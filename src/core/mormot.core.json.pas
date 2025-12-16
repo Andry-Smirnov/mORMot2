@@ -2669,10 +2669,12 @@ type
   // - fsoDisableSaveIfNeeded will disable SaveIfNeeded method process
   // - fsoReadIni will disable JSON loading, and expect INI file format
   // - fsoWriteIni will force SaveIfNeeded to use the INI layout
+  // - fsoNoEnumsComment will customize SaveIfNeeded output
   TSynJsonFileSettingsOption = (
     fsoDisableSaveIfNeeded,
     fsoReadIni,
-    fsoWriteIni);
+    fsoWriteIni,
+    fsoNoEnumsComment);
   TSynJsonFileSettingsOptions = set of TSynJsonFileSettingsOption;
 
   /// abstract parent class able to store settings as JSON file
@@ -2683,10 +2685,13 @@ type
     fFileName: TFileName;
     fLoadedAsIni: boolean;
     fSettingsOptions: TSynJsonFileSettingsOptions;
+    fIniOptions: TIniFeatures;
     fInitialFileHash: cardinal;
     // could be overriden to validate the content coherency and/or clean fields
     function AfterLoad: boolean; virtual;
   public
+    /// initialize this instance and all its published fields
+    constructor Create; override;
     /// read existing settings from a JSON content
     // - if the input is no JSON object, then a .INI structure is tried
     function LoadFromJson(const aJson: RawUtf8;
@@ -2706,6 +2711,9 @@ type
     /// allow to customize the storing process
     property SettingsOptions: TSynJsonFileSettingsOptions
       read fSettingsOptions write fSettingsOptions;
+    /// allow to customize fsoReadIni/fsoWriteIni storing process
+    property IniOptions: TIniFeatures
+      read fIniOptions write fIniOptions;
     /// can be used to compare two instances original file content
     // - will use DefaultHasher, so hash could change after process restart
     property InitialFileHash: cardinal
@@ -6347,7 +6355,7 @@ utf8: case Escape of // inlined Add(PUtf8Char(P), Len, Escape);
         twJsonEscape:
           AddJsonEscape(PUtf8Char(P), 0); // faster with no Len
         twOnSameLine:
-          AddOnSameLine(PUtf8Char(P), 0); // faster with no Len
+          AddOnSameLine(PUtf8Char(P));    // faster with no Len
       end;
     CP_RAWBYTESTRING:
       if not IsBase64(P, Len) and
@@ -12313,6 +12321,12 @@ end;
 
 { TSynJsonFileSettings }
 
+constructor TSynJsonFileSettings.Create;
+begin
+  inherited Create;
+  fIniOptions := [ifClassSection, ifClassValue, ifMultiLineSections, ifArraySection];
+end;
+
 function TSynJsonFileSettings.AfterLoad: boolean;
 begin
   result := true; // success
@@ -12330,7 +12344,7 @@ begin
     result := JsonSettingsToObject(aJson, self);
   if not result then
   begin
-    result := IniToObject(aJson, self, aSectionName, @JSON_[mFastFloat]);
+    result := IniToObject(aJson, self, aSectionName, @JSON_[mFastFloat], 0, fIniOptions);
     if result then
     begin
       fSectionName := aSectionName;
@@ -12365,16 +12379,20 @@ end;
 function TSynJsonFileSettings.SaveIfNeeded: boolean;
 var
   saved: RawUtf8;
+  opt: TTextWriterWriteObjectOptions;
 begin
   result := false;
   if (self = nil) or
      (fFileName = '') or
      (fsoDisableSaveIfNeeded in fSettingsOptions) then
     exit;
+  opt := SETTINGS_WRITEOPTIONS;
+  if fsoNoEnumsComment in fSettingsOptions then
+    exclude(opt, woHumanReadableEnumSetAsComment);
   if fsoWriteIni in fSettingsOptions then
-    saved := ObjectToIni(self, fSectionName)
+    saved := ObjectToIni(self, fSectionName, opt, 0, fIniOptions)
   else
-    saved := ObjectToJson(self, SETTINGS_WRITEOPTIONS);
+    saved := ObjectToJson(self, opt);
   if saved = fInitialJsonContent then
     exit;
   result := FileFromString(saved, fFileName);
