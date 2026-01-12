@@ -1754,8 +1754,7 @@ type
     // - i.e. release any managed type memory, and fill Item with zeros
     procedure ItemClear(Item: pointer);
       {$ifdef HASINLINE}inline;{$endif}
-    /// will fill the element with some random content
-    // - this method is thread-safe using Rtti.DoLock/DoUnLock
+    /// will thread-safe fill the element with some random content
     procedure ItemRandom(Item: pointer);
     /// will copy one element content raw memory using RTTI
     procedure ItemCopy(Source, Dest: pointer);
@@ -2423,6 +2422,8 @@ function AnyScanExists(P, V: pointer; Count, VSize: PtrInt): boolean;
 // - this function scans the Content memory buffer, and is
 // therefore very fast (no temporary TMemIniFile is created)
 // - if Section equals '', find the Name= value before any [Section]
+// - will follow INI relaxed expectations, i.e. ignore spaces/tabs around
+// the '=' or ':' sign, and at the end of each input text line
 function FindIniEntry(const Content, Section, Name: RawUtf8;
   const DefaultValue: RawUtf8 = ''): RawUtf8;
 
@@ -2498,17 +2499,25 @@ procedure ReplaceSection(SectionFirstLine: PUtf8Char;
 
 /// return TRUE if Value of UpperName does exist in P, till end of current section
 // - expects UpperName as 'NAME=' or 'HTTPHEADERNAME:'
-// - note: won't ignore spaces/tabs around the '=' sign
+// - will follow INI relaxed expectations, i.e. ignore spaces/tabs around '='/':'
 function ExistsIniName(P: PUtf8Char; UpperName: PAnsiChar): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// find the Value of UpperName in P, till end of current INI section
 // - expect UpperName already as 'NAME=' for efficient INI key=value lookup
 // - will follow INI relaxed expectations, i.e. ignore spaces/tabs around
-// the '=' sign, and at the end of each input text line
+// the '=' or ':' sign, and at the end of each input text line
 function FindIniNameValue(P: PUtf8Char; UpperName: PAnsiChar;
   const DefaultValue: RawUtf8 = ''; PEnd: PUtf8Char = nil): RawUtf8;
 
+/// raw internal function used by FindIniNameValue() with no result allocation
+// - Value=nil if not found, or Value<>nil and return length (may be 0 for '')
+function FindIniNameValueP(P, PEnd: PUtf8Char; UpperName: PAnsiChar;
+  out Value: PUtf8Char): PtrInt;
+
 /// find the Value of UpperName in Content, wrapping FindIniNameValue()
+// - will follow INI relaxed expectations, i.e. ignore spaces/tabs around
+// the '=' or ':' sign, and at the end of each input text line
 function FindIniNameValueU(const Content: RawUtf8; UpperName: PAnsiChar): RawUtf8;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -2521,9 +2530,9 @@ function ExistsIniNameValue(P: PUtf8Char; const UpperName: RawUtf8;
   UpperValues: PPAnsiChar): boolean;
 
 /// find the integer Value of UpperName in P, till end of current section
-// - expect UpperName as 'NAME=' or 'CONTENT-LENGTH: '
+// - expect UpperName as 'NAME=' or 'CONTENT-LENGTH:'
 // - return 0 if no NAME= entry was found
-// - note: won't ignore spaces/tabs around the '=' sign
+// - will follow INI relaxed expectations, i.e. ignore spaces/tabs around '='/':'
 function FindIniNameValueInteger(P: PUtf8Char; const UpperName: RawUtf8): PtrInt;
 
 /// replace a value from a given set of name=value lines
@@ -2543,10 +2552,12 @@ type
   // mainprop.nested.field = value with ifClassValue
   // - nested arrays (with ifArraySection) are stored as inlined JSON or within
   // prefixed sections like [nested-xxx] with any not azAZ_09 as xxx separator
+  // - ifMultiLineJsonArray would parse multi-line field=[val1,... JSON arrays
   // - ifClearValues will let IniToObject() call TRttiCustomProp.ClearValue()
   // on each property
   TIniFeatures = set of (
-    ifClassSection, ifClassValue, ifMultiLineSections, ifArraySection, ifClearValues);
+    ifClassSection, ifClassValue, ifMultiLineSections, ifArraySection,
+    ifMultiLineJsonArray, ifClearValues);
 
 /// fill a class Instance properties from an .ini content
 // - the class property fields are searched in the supplied main SectionName
@@ -3903,11 +3914,11 @@ begin
   result := FindIniNameValue(p, UpperName, '', p + length(Content));
 end;
 
-function FindIniNameValue(P: PUtf8Char; UpperName: PAnsiChar;
-  const DefaultValue: RawUtf8; PEnd: PUtf8Char): RawUtf8;
-var
+function FindIniNameValueP(P, PEnd: PUtf8Char; UpperName: PAnsiChar;
+  out Value: PUtf8Char): PtrInt;
+var // note: won't use "out Len: PtrInt" which is confusing with integer vars
   u, PBeg: PUtf8Char;
-  l: PtrInt;
+  first: AnsiChar;
   {$ifdef CPUX86NOTPIC}
   table: TNormTable absolute NormToUpperAnsi7;
   {$else}
@@ -3915,12 +3926,13 @@ var
   {$endif CPUX86NOTPIC}
 label
   fnd;
-begin // expects UpperName as 'NAME='
+begin // expects UpperName as 'NAME=' and P^ at the beginning of section content
   u := P;
   if (u <> nil) and
      (u^ <> '[') and
      (UpperName <> nil) then
   begin
+    first := UpperName[0];
     {$ifndef CPUX86NOTPIC}
     table := @NormToUpperAnsi7;
     {$endif CPUX86NOTPIC}
@@ -3930,7 +3942,7 @@ begin // expects UpperName as 'NAME='
         inc(u); // trim left ' '
       if u^ = #0 then
         break;
-      if table[u^] = UpperName[0] then
+      if table[u^] = first then
         PBeg := u; // check for UpperName=... line below - ignore ; comment
       {$ifdef CPUX64}
       if PEnd <> nil then
@@ -3965,7 +3977,7 @@ begin // expects UpperName as 'NAME='
                   goto fnd
                 else
                   break;
-              repeat // ignore spaces/tabs around the '=' sign
+              repeat // ignore spaces/tabs around the '=' or ':' separator
                 inc(PBeg);
                 case PBeg^ of
                   #9, ' ':
@@ -3984,11 +3996,11 @@ begin // expects UpperName as 'NAME='
               repeat
 fnd:            inc(PBeg); // should ignore spaces/tabs after the '=' sign
               until not (PBeg^ in [#9, ' ']);
-            l := P - PBeg;
-            while (l > 0) and
-                  (PBeg[l - 1] in [#9, ' ']) do
-              dec(l);      // should trim spaces/tabs at the end of the line
-            FastSetString(result, PBeg, l);
+            result := P - PBeg;
+            while (result > 0) and
+                  (PBeg[result - 1] in [#9, ' ']) do
+              dec(result); // should trim spaces/tabs at the end of the line
+            Value := PBeg; // <> nil but maybe with result=len=0
             exit;
           end;
         until false;
@@ -3999,30 +4011,29 @@ fnd:            inc(PBeg); // should ignore spaces/tabs after the '=' sign
         inc(u);
     until u^ in [#0, '['];
   end;
-  result := DefaultValue;
+  Value := nil; // not found
+  result := 0;  // value length
+end;
+
+function FindIniNameValue(P: PUtf8Char; UpperName: PAnsiChar;
+  const DefaultValue: RawUtf8; PEnd: PUtf8Char): RawUtf8;
+var
+  v: PUtf8Char;
+  l: PtrInt;
+begin // expects UpperName as 'NAME=' and P^ at the beginning of section content
+  l := FindIniNameValueP(P, PEnd, UpperName, v);
+  if v = nil then
+    result := DefaultValue
+  else
+    FastSetString(result, v, l); // return '' for l=0 (existing void value)
 end;
 
 function ExistsIniName(P: PUtf8Char; UpperName: PAnsiChar): boolean;
 var
-  table: PNormTable;
+  v: PUtf8Char;
 begin
-  if UpperName <> nil then
-  begin
-    result := true;
-    table := @NormToUpperAnsi7;
-    while (P <> nil) and
-          (P^ <> '[') do
-    begin
-      if P^ = ' ' then
-        repeat
-          inc(P)
-        until P^ <> ' '; // trim left ' '
-      if IdemPChar2(table, P, pointer(UpperName)) then
-        exit; // found name
-      P := GotoNextLine(P);
-    end;
-  end;
-  result := false;
+  FindIniNameValueP(P, {PEnd=}nil, pointer(UpperName), v);
+  result := v <> nil; // found, but maybe with result length = 0
 end;
 
 function ExistsIniNameValue(P: PUtf8Char; const UpperName: RawUtf8;
@@ -4142,21 +4153,10 @@ end;
 
 function FindIniNameValueInteger(P: PUtf8Char; const UpperName: RawUtf8): PtrInt;
 var
-  table: PNormTable;
+  v: PUtf8Char;
 begin
-  result := 0;
-  if (P = nil) or
-     (UpperName = '') then
-    exit;
-  table := @NormToUpperAnsi7;
-  repeat
-    if IdemPChar2(table, P, pointer(UpperName)) then
-      break;
-    P := GotoNextLine(P);
-    if P = nil then
-      exit;
-  until false;
-  result := GetInteger(P + length(UpperName));
+  FindIniNameValueP(P, {PEnd=}nil, pointer(UpperName), v);
+  result := GetInteger(v);
 end;
 
 function FindIniEntry(const Content, Section, Name, DefaultValue: RawUtf8): RawUtf8;
@@ -4361,38 +4361,41 @@ var
   begin
     result := false;
     v := FindIniNameValue(section, @up, #0, sectionend);
-    if p^.Value.Parser in ptMultiLineStringTypes then // e.g. rkLString
+    if (ifMultiLineSections in Features) and
+       (v = #0) and
+       (rcfMultiLineStrings in p^.Value.Flags) then // strings or array of RawUtf8
     begin
-      if v = #0 then // may be stored in a multi-line section body
+      PWord(FillUp(p))^ := ord(']');
+      if FindSectionFirstLine(nested, @up, @nestedend) then
       begin
-        if ifMultiLineSections in Features then
-        begin
-          PWord(FillUp(p))^ := ord(']');
-          if FindSectionFirstLine(nested, @up, @nestedend) then
-          begin
-            // multi-line text value can been stored in its own section
-            FastSetString(v, nested, nestedend - nested);
-            if p^.Prop^.SetValueText(obj, v) then
-              result := true;
-          end;
-        end;
-      end
-      else if p^.Prop^.SetValueText(obj, v) then // single line text
-        result := true;
+        // multi-line text value has been stored in its own section
+        FastSetString(v, nested, nestedend - nested);
+        if p^.Prop^.SetValueText(obj, v) then
+          result := true;
+      end;
     end
     else if v <> #0 then // we found this propname=value in section..sectionend
       if (p^.OffsetSet <= 0) or // setter does not support JSON
          (rcfBoolean in p^.Value.Cache.Flags) or // simple value from text
-         (p^.Value.Kind in (rkIntegerPropTypes + [rkEnumeration, rkSet, rkFloat])) then
+         (p^.Value.Kind in (rkIntegerPropTypes + rkStringTypes +
+                            [rkEnumeration, rkSet, rkFloat])) then
       begin
         if p^.Prop^.SetValueText(obj, v) then // RTTI conversion from JSON/CSV
           result := true;
       end
-      else // e.g. rkVariant, rkDynArray complex values from single line JSON
+      else // e.g. rkVariant, rkDynArray complex values from JSON array/object
       begin
         json := pointer(v);
         GetDataFromJson(@PByteArray(obj)[p^.OffsetSet], json,
           nil, p^.Value, DocVariantOptions, true, nil);
+        if (json = nil) and
+           (v <> '') and
+           (ifMultiLineJsonArray in Features) and // try multi line JSON
+           (v[1] = '[') and
+           (PosExChar(']', v) = 0) and
+           (FindIniNameValueP(section, sectionend, @up, json) <> 0) then
+          GetDataFromJson(@PByteArray(obj)[p^.OffsetSet], json,
+            nil, p^.Value, DocVariantOptions, true, nil);
         if json <> nil then
           result := true;
       end
@@ -4519,7 +4522,7 @@ begin
     dec(L);
     if L = 0 then
     begin
-      U := ''; // no meaningful text
+      FastAssignNew(U); // no meaningful text
       exit;
     end;
   end;
@@ -4607,10 +4610,10 @@ var
               W.Add(#10);
             end;
           else
-            if (p^.Value.Parser in ptMultiLineStringTypes) and // e.g. rkLString
-               (ifMultiLineSections in feat) then
+            if (ifMultiLineSections in feat) and
+               (rcfMultiLineStrings in p^.Value.Flags) then
             begin
-              p^.Prop^.GetAsString(obj, s);
+              p^.Prop^.GetAsString(obj, s); // strings or array of RawUtf8
               if TrimAndIsMultiLine(s) then
                 // store multi-line text values in their own section
                 AddRawUtf8(nested, nestedcount,

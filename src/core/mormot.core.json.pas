@@ -7446,6 +7446,8 @@ begin // note: no quotes for strings, since "%" should be used in the Format
       Add(PUtf8Char(V^.VPChar), Escape);
     vtObject:
       WriteObject(V^.VObject, WriteObjectOptions);
+    vtInterface: // e.g. ISerializable
+      WriteObject(ObjectFromInterface(IInterface(V^.VInterface)), WriteObjectOptions);
     vtAnsiString:
       if V^.VAnsiString <> nil then // expect RawUtf8
         case Escape of
@@ -10890,7 +10892,10 @@ begin
     {$endif HASVARUSTRING}
     varVariant:
       // rkVariant
-      SetVariantByValue(PVariant(Data)^, PVariant(@Dest)^, {forcenoutf8=}true);
+      begin
+        TSynVarData(Dest).VType := varEmpty; // for next line
+        SetVariantByValue(PVariant(Data)^, PVariant(@Dest)^, {forcenoutf8=}true);
+      end;
     varUnknown:
       // rkChar, rkWChar, rkSString converted into temporary RawUtf8
       begin

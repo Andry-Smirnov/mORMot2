@@ -963,7 +963,13 @@ begin
   case dpapi of
     {$ifdef OSWINDOWS}
     0:
-      func := CryptDataForCurrentUserDPAPI;
+      begin
+        if IsWow64Emulation then // PRISM seems inconsistent about this API
+          exit;
+        func := CryptDataForCurrentUserDPAPI;
+        if OSVersion < wVista then
+          max := 100; // slow API on Windows XP
+      end;
     {$endif OSWINDOWS}
     1:
       func := CryptDataForCurrentUser;
@@ -976,9 +982,9 @@ begin
     exit;
   end;
   enc := func('warmup', 'appsec', true);
-  Check(enc <> '');
+  Check(enc <> '', 'warmup');
   test := func(enc, 'appsec', false);
-  Check(test <> '');
+  Check(test <> '', 'appsec');
   CheckEqual(test, 'warmup');
   size := 0;
   tim.Start;
@@ -988,11 +994,10 @@ begin
     CheckEqual(length(plain), i);
     UInt32ToUtf8(i, appsec);
     enc := func(plain, appsec, true);
-    if not ((plain = '') or
-            (enc <> '')) then
-      enc := func(plain, appsec, true);
     check((plain = '') or
-          (enc <> ''));
+          (enc <> ''), 'not void');
+    check((plain = '') or
+          (enc <> plain), 'enc<>plain');
     check(length(enc) >= length(plain));
     test := func(enc, appsec, false);
     CheckEqual(length(test), i);
@@ -1472,7 +1477,7 @@ begin
   FillCharFast(time, SizeOf(time), 0);
   size := 0;
   n := 0;
-  for s := 0 to high(SIZ) do
+  for s := 0 to high(SIZ) do // up to 10KB of CP1252 text
   begin
     data := RandomWinAnsi(SIZ[s]);
     CheckEqual(length(data), SIZ[s]);
@@ -2497,8 +2502,8 @@ begin
   Check(Zeroed(UnZeroed('~'#0#0'~~')) = '~'#0#0'~~', 'unz4');
   enc.Init;
   dec.Init;
-  tmp := RandomWinAnsi(1 shl 20);
-  Check(length(tmp) = 1 shl 20);
+  tmp := RandomWinAnsi(1 shl 20); // 1MB of 8-bit random
+  CheckEqual(length(tmp), 1 shl 20);
   b32 := BinToBase32(tmp);
   tmp2 := Base32ToBin(b32);
   CheckEqual(length(tmp2), length(tmp));
@@ -2702,7 +2707,7 @@ begin
   SetLength(crypted, MAX + 256);
   st := '1234essai';
   orig := RandomWinAnsi(8000);
-  Check(length(orig) = 8000);
+  CheckEqual(length(orig), 8000);
   PInteger(UniqueRawUtf8(RawUtf8(st)))^ := Random32;
   for noaesni := false to true do
   begin
