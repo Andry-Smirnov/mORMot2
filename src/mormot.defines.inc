@@ -765,7 +765,8 @@
 
   {$define MORMOT22}  // defined since mORMot 2.2 stable
   {$define MORMOT23}  // defined since mORMot 2.3 stable
-  {.$define MORMOT24} // defined since mORMot 2.4 stable
+  {$define MORMOT24}  // defined since mORMot 2.4 stable
+  {.$define MORMOT25} // defined since mORMot 2.5 stable
 
 // -----------
 // -- about pascal code expectations
@@ -900,8 +901,8 @@
       {$undef LIZARD_EXTERNALONLY}  // static liblizard.a
     {$endif CPUINTEL}
     {$ifdef CPUARM}
+      {$define LIBDEFLATESTATIC}    // seems stable enough since mORMot 2.4
       {.$undef LIZARD_EXTERNALONLY} // static liblizard.a is not tested
-      {.$define LIBDEFLATESTATIC}   // compiles, but untested
       {.$define LIBQUICKJSSTATIC}   // compiles, but untested
     {$endif CPUARM}
     {$ifdef CPUAARCH64}
