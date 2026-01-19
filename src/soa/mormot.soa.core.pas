@@ -263,7 +263,9 @@ type
   // ! Server.ServiceRegister(TServiceCalculator,[TypeInfo(ICalculator)],sicShared);
   // - TRestClientUri will have to register an interface remote access as:
   // ! Client.ServiceRegister([TypeInfo(ICalculator)],sicShared));
-  // note that the implementation (TServiceCalculator) remain on the server side
+  // but after Client.SetUser() you could directly call Client.Services.Resolve<>
+  // which will register the interface type using the "soa" information - note
+  // that the implementation (TServiceCalculator) remain on the server side
   // only: the client only needs the ICalculator interface
   // - then TRestServer and TRestClientUri will both have access to the
   // service, via their Services property, e.g. as:
@@ -274,6 +276,9 @@ type
   // !   result := I.Add(10,20);
   // which is in practice to be used with the faster wrapper method:
   // ! if Services.Resolve(ICalculator,I) then
+  // !   result := I.Add(10,20);
+  // or, using generics:
+  // ! if Services.Resolve<ICalculator>(I) then
   // !   result := I.Add(10,20);
   TServiceFactory = class(TInjectableObject)
   protected
@@ -1105,7 +1110,7 @@ begin
   inherited CreateWithResolver(aOwner, {raiseIfNotFound=}true);
   fInterface := TInterfaceFactory.Get(aInterface);
   if fInterface = nil then // paranoid
-    EServiceException.RaiseUtf8('%.Create: no I%', [self, aInterface^.RawName]);
+    EServiceException.RaiseUtf8('%.Create: no %', [self, aInterface^.RawName]);
   fInstanceCreation := aInstanceCreation;
   fInterfaceMangledUri := BinToBase64Uri(PHash128(fInterface.InterfaceGuid)^);
   fInterfaceUri := fInterface.InterfaceUri;
@@ -1119,17 +1124,17 @@ begin
   FormatUtf8('{"contract":"%","implementation":"%","methods":%}',
     [fInterfaceUri, LowerCase(TrimLeftLowerCaseShort(ToText(InstanceCreation))),
      fInterface.Contract], fContract);
-  fContractHash := '"' + CardinalToHex(Hash32(fContract)) +
-    CardinalToHex(crc32(0, pointer(fContract), length(fContract))) + '"';
-    // 2 hashes to avoid collision
+  // combine two 32-bit hashes to avoid collision (paranoid)
+  Join(['"', CardinalToHex(Hash32(fContract)), CardinalToHex(
+        crc32(0, pointer(fContract), length(fContract))), '"'], fContractHash);
   if aContractExpected <> '' then // override default contract
     if aContractExpected[1] <> '"' then
       // stored as JSON string
-      fContractExpected := '"' + aContractExpected + '"'
+      Join(['"', aContractExpected, '"'], fContractExpected)
     else
       fContractExpected := aContractExpected
   else
-    fContractExpected := fContractHash; // for security
+    fContractExpected := fContractHash; // default to safe and short hash
 end;
 
 function TServiceFactory.ServiceMethodIndex(const aUri: RawUtf8): PtrInt;
@@ -2074,7 +2079,7 @@ const
   _TRestServerUri =
     'Address,Port,Root: RawUtf8';
   _TServicesPublishedInterfaces =
-    'PublicUri:TRestServerUri Names: array of RawUtf8';
+    'PublicUri:TRestServerUri Names:array of RawUtf8';
 
 procedure InitializeUnit;
 begin
