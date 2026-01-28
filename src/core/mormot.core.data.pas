@@ -1955,6 +1955,7 @@ type
     function Find(Item: pointer): PtrInt; overload;
     /// search for a hashed element value inside the dynamic array with hashing
     function Find(Item: pointer; aHashCode: cardinal): PtrInt; overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// search for a hash position inside the dynamic array with hashing
     function Find(aHashCode: cardinal; aForAdd: boolean): PtrInt; overload;
     /// returns position in array, or next void index in HashTable[] as -(index+1)
@@ -10196,16 +10197,16 @@ begin
     exit;
 end;
 
-function TDynArrayHasher.Find(Item: pointer): PtrInt;
-begin
-  result := Find(Item, HashOne(Item));
-end;
-
 function TDynArrayHasher.Find(Item: pointer; aHashCode: cardinal): PtrInt;
 begin
   result := FindOrNew(aHashCode, Item, nil); // fallback to Scan() if needed
   if result < 0 then
     result := -1; // for coherency with most search methods
+end;
+
+function TDynArrayHasher.Find(Item: pointer): PtrInt;
+begin
+  result := Find(Item, HashOne(Item));
 end;
 
 type // dedicated TFastReHash engine for better register allocation
@@ -11259,13 +11260,13 @@ end;
 function AnyScanIndex(P, V: pointer; Count, VSize: PtrInt): PtrInt;
 begin
   case VSize of
-    // optimized versions for arrays of most simple types
+    // optimized versions for arrays of most simple types - may use SSE2 asm
     1:
-      result := ByteScanIndex(P, Count, PByte(V)^); // SSE2 asm on Intel/AMD
+      result := ByteScanIndex(P, Count, PByte(V)^);
     2:
-      result := WordScanIndex(P, Count, PWord(V)^); // may use SSE2 asm
+      result := WordScanIndex(P, Count, PWord(V)^);
     4:
-      result := IntegerScanIndex(P, Count, PInteger(V)^); // may use SSE2 asm
+      result := IntegerScanIndex(P, Count, PInteger(V)^);
     8:
       result := Int64ScanIndex(P, Count, PInt64(V)^);
     SizeOf(THash128):

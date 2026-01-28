@@ -869,6 +869,13 @@ type
     procedure Resolve(const aInterfaces: array of TGuid;
                       const aObjs: array of pointer;
       aRaiseExceptionIfNotFound: boolean = true); overload;
+    {$ifdef HASGENERICS}
+    /// can be used to perform an DI/IoC for a given interface using generics
+    // - raise EInterfaceResolver if T is not implemented by this resolver
+    function Resolve<T: IInvokable>: T; overload;
+    /// can be used to perform an DI/IoC for a given interface using generics
+    function Resolve<T: IInvokable>(out Instance: T): boolean; overload;
+    {$endif HASGENERICS}
   end;
 
   /// used to store a list of TInterfacedObject instances
@@ -4802,6 +4809,15 @@ asm
 end;
 {$endif CPUAARCH64}
 
+{$else}
+
+{$ifdef CPUAARCH64}
+procedure TInterfacedObjectFakeRaw.AArch64FakeStub;
+begin
+  // TODO: use external .o for Delphi ARM64
+end;
+{$endif CPUAARCH64}
+
 {$endif FPC}
 
 {$ifdef CPUX64}
@@ -5002,16 +5018,16 @@ begin
     // fill register x10 with address
     stub := PtrUInt(@TInterfacedObjectFakeRaw.AArch64FakeStub);
     tmp := (stub shr 0) and $ffff;
-    P^ := ($d280 shl 16) + (tmp shl 5) + $0a;
+    P^ := PtrUInt($d280 shl 16) + (tmp shl 5) + $0a;
     inc(P);
     tmp := (stub shr 16) and $ffff;
-    P^ := ($f2a0 shl 16) + (tmp shl 5) + $0a;
+    P^ := PtrUInt($f2a0 shl 16) + (tmp shl 5) + $0a;
     inc(P);
     tmp := (stub shr 32) and $ffff;
-    P^ := ($f2c0 shl 16) + (tmp shl 5) + $0a;
+    P^ := PtrUInt($f2c0 shl 16) + (tmp shl 5) + $0a;
     inc(P);
     tmp := (stub shr 48) and $ffff;
-    P^ := ($f2e0 shl 16) + (tmp shl 5) + $0a;
+    P^ := PtrUInt($f2e0 shl 16) + (tmp shl 5) + $0a;
     inc(P);
     // branch to address in x10 register
     P^ := $d61f0140;
@@ -5265,6 +5281,24 @@ begin
             [self, info^.RawName]);
     end;
 end;
+
+{$ifdef HASGENERICS}
+
+function TInterfaceResolver.Resolve<T>: T;
+begin
+  result := nil;
+  if not TryResolve(TypeInfo(T), result) then
+    EInterfaceResolver.RaiseUtf8('%.Resolve(%) unsatisfied',
+      [self, PRttiInfo(TypeInfo(T))^.RawName]);
+end;
+
+function TInterfaceResolver.Resolve<T>(out Instance: T): boolean;
+begin
+  result := TryResolve(TypeInfo(T), Instance);
+end;
+
+{$endif HASGENERICS}
+
 
 { TInterfaceResolverForSingleInterface }
 
@@ -6920,6 +6954,7 @@ end;
 
 {$ifdef CPUAARCH64}
 
+{$ifdef FPC}
 procedure CallMethod(var Args: TCallMethodArgs); assembler; nostackframe;
 label stack_loop,load_regs,asmcall_end,float_result;
 asm
@@ -6999,7 +7034,12 @@ asmcall_end:
    ldp  x29, x30, [sp], #16
    ret
 end;
-
+{$else}
+procedure CallMethod(var Args: TCallMethodArgs);
+begin
+  // TODO: use external .o stub on Delphi ARM64
+end;
+{$endif FPC}
 {$endif CPUAARCH64}
 
 {$ifdef CPUX64}

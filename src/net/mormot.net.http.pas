@@ -265,7 +265,7 @@ const
   XPOWEREDNAME = 'X-Powered-By';
 
   /// the full text of the current Synopse mORMot framework version
-  // - e.g. 'mORMot 2.3' : won't supply full version number with build revision
+  // - e.g. 'mORMot 2.4' : won't supply full version number with build revision
   // (as SYNOPSE_FRAMEWORK_VERSION), to reduce potential attacker knowledge
   XPOWEREDVALUE = SYNOPSE_FRAMEWORK_NAME + ' 2.' + SYNOPSE_FRAMEWORK_BRANCH;
 
@@ -3670,6 +3670,7 @@ begin
   P := pointer(CommandUri);
   if P = nil then
     exit;
+  // parse CommandMethod
   case PCardinal(P)^ of
     ord('G') + ord('E') shl 8 + ord('T') shl 16 + ord(' ') shl 24:
       begin
@@ -3703,7 +3704,18 @@ begin
       inc(P);
     end;
   end;
+  // parse CommandUri and HTTP/1.x
   B := P;
+  if (PCardinal(P)^ = ord('h') + ord('t') shl 8 + ord('t') shl 16 + ord('p') shl 24) and
+     (PCardinal(P + 4)^ and $ffffff = ord(':') + ord('/') shl 8 + ord('/') shl 16) then
+  begin
+    // absolute-URI from https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
+    P := PosChar(P + 7, '/'); // use fast SSE2 asm on x86_64
+    if P = nil then
+      P := B // paranoid
+    else
+      B := P;
+  end;
   while true do
     if P^ = ' ' then
       break
@@ -4671,7 +4683,7 @@ begin
      (ifUrlParamPosSet in fInternalFlags) then
     exit;
   include(fInternalFlags, ifUrlParamPosSet); // call PosChar() once
-  result := PosCharU(Url, '?');
+  result := PosCharU(Url, '?'); // use fast SSE2 asm on x86_64
   fUrlParamPos := result;
 end;
 

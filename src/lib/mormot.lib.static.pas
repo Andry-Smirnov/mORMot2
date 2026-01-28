@@ -168,6 +168,11 @@ var
 
 {$else}
 
+{$ifdef WINARMDELPHI}
+type
+  TFPUExceptionMask = TArithmeticExceptionMask; // undefined in math.pas on LLVM
+{$endif WINARMDELPHI}
+
 var
   /// on non Intel/AMD, use slower but cross-platform RTL Math unit
   // - defined as var for runtime customization
@@ -366,12 +371,14 @@ var
    atm: time_t;
 
 function localtime32(t: PCardinal): pointer; cdecl;
+  {$ifdef FPC} public name _PREFIX + '_localtime32'; {$endif}
 begin
   localtime32_s(t^, atm);
   result := @atm;
 end;
 
 function localtime64(t: PInt64): pointer; cdecl;
+  {$ifdef FPC} public name _PREFIX + '_localtime64'; {$endif}
 begin
   localtime64_s(t^, atm);
   result := @atm;
@@ -2092,7 +2099,7 @@ begin
     result := Get8087CW;
     {$endif CPU64}
   {$else}
-    result := cardinal(GetExceptionMask);
+    result := {$ifdef WINARMDELPHI}byte{$else}cardinal{$endif}(GetExceptionMask);
   {$endif CPUINTEL}
 end;
 
@@ -2106,7 +2113,7 @@ begin
     Set8087CW(flags);
     {$endif CPU64}
   {$else}
-    SetExceptionMask(TFPUExceptionMask(flags));
+    SetExceptionMask(TFPUExceptionMask({$ifdef WINARMDELPHI}byte{$endif}(flags)));
   {$endif CPUINTEL}
 end;
 
@@ -2115,7 +2122,7 @@ var
   new: cardinal;
 begin
   result := _GetFlags;
-  new := cardinal(_FPUFLAGS[flags]);
+  new := {$ifdef WINARMDELPHI}byte{$else}cardinal{$endif}(_FPUFLAGS[flags]);
   if new <> result then
     _SetFlags(new)
   else
@@ -2135,7 +2142,7 @@ initialization
   // manual fill of our raw mingw import table
   {$ifndef NOLIBCSTATIC}
   beginthreadex := @libc_beginthreadex;
-  endthreadex := @libc_endthreadex;
+  endthreadex   := @libc_endthreadex;
   {$ifdef CPU32}
   imp_localtime32 := @localtime32;
   {$else}

@@ -1900,9 +1900,11 @@ begin
       end
       else
       begin
+        {$ifndef LLVM}
         if Assigned(ExceptClsProc) then
           ctxt.EClass := GetExceptionClass(ExceptClsProc)(Exc)
         else
+        {$endif LLVM}
           ctxt.EClass := EExternal;
         ctxt.EInstance := nil;
         ctxt.ELevel := sllExceptionOS;
@@ -2156,7 +2158,7 @@ type
     th32ParentProcessID: DWord;    // this process's parent process
     pcPriClassBase: integer;       // base priority of process's threads
     dwFlags: DWord;
-    szExeFile: array [0..MAX_PATH - 1] of WideChar;   // Path
+    szExeFile: array[0..MAX_PATH - 1] of WideChar;   // Path
   end;
 
   TThreadEntry32 = record
@@ -2306,7 +2308,7 @@ function GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx): BOOL;
 
 {$endif UNICODE}
 
-function CoCreateGuid(out guid: THash128Rec): HRESULT;
+function CoCreateGuid(out guid: THash128): HRESULT;
   stdcall; external 'ole32.dll';
 
 procedure XorOSEntropy(var e: THash512Rec);
@@ -2334,7 +2336,7 @@ begin
   DefaultHasher128(@e.h3, @ft, SizeOf(ft));
   for i := 0 to high(e.r) do
   begin
-    CoCreateGuid(u); // very fast on Windows - used to obfuscate system info
+    CoCreateGuid(u.b); // very fast on Windows - used to obfuscate system info
     XorMemory(e.r[i], u);
   end;
   QueryPerformanceCounter(u.Lo); // is likely to have changed in-between
@@ -3362,7 +3364,9 @@ function _GetRawSmbios(var info: TRawSmbiosInfo): boolean;
 var
   siz: DWord;
   tmp: RawByteString;
+  {$ifdef CPUINTEL}
   addr: PtrUInt;
+  {$endif CPUINTEL}
   get: function(sig, id: DWord; buf: pointer; siz: DWord): PtrUInt; stdcall;
 begin
   // first try to use Vista+ API which supports EFI (even on aarch64-win64!)
@@ -4803,7 +4807,7 @@ type
       RelationCache: (
         Cache: TSystemCacheDescriptor);
       RelationGroup: (
-        Reserved: array [0..1] of QWord); // to define the actual struct size
+        Reserved: array[0..1] of QWord); // to define the actual struct size
   end;
 
 {$ifndef UNICODE}
@@ -4990,7 +4994,7 @@ begin
       if Vers = wServer2016 then
         // we identify only LTSC server versions
         // see e.g. https://betawiki.net/wiki/Windows_Server_2025
-        if OSVersionInfo.dwBuildNumber >= 177609 then    // up to 17763 RTM
+        if OSVersionInfo.dwBuildNumber >= 17609 then     // up to 17763 RTM
           if OSVersionInfo.dwBuildNumber >= 19504 then   // up to 20348 Preview
             if OSVersionInfo.dwBuildNumber >= 25871 then // up to 26100 Preview
               Vers := wServer2025_64
@@ -5134,9 +5138,9 @@ begin
   _fmt('%d x %s (' + CPU_ARCH_TEXT + ')',
     [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
   // 5. compute some minimal entropy using the just retrieved info
-  CoCreateGuid(SystemEntropy.LiveFeed); // very fast and unique (but not strong)
   rnd := @SystemEntropy.Startup;
-  rnd^ := SystemEntropy.LiveFeed.b;
+  CoCreateGuid(rnd^); // very fast and unique (but not strong)
+  SystemEntropy.LiveFeed.b := rnd^;
   crc32c128(rnd, @SystemInfo, SizeOf(SystemInfo));
   crc32c128(rnd, @mem, SizeOf(mem));
   crc32c128(rnd, @OSVersionInfo, SizeOf(OSVersionInfo));
