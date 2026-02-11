@@ -53,6 +53,7 @@ const
   cAnyPort    = '0';
 
   cLocalhost32 = $0100007f;
+  cAnyHost32   = $ffffffff;
 
   {$ifdef OSWINDOWS}
   SOCKADDR_SIZE = 28;
@@ -139,12 +140,26 @@ type
 
   /// store the 4 bytes of a typical IP address as 32-bit unsigned integer
   TNetIP4 = cardinal;
+  /// store several 4 bytes of a typical IP address as 32-bit unsigned integers
+  TNetIP4s = array of TNetIP4;
   /// store the 16-bit IP port to connect/bind a socket
   TNetPort = cardinal;
-  /// store the 6 bytes of a typical ethernet MAC address binary
+
+  /// store the 6 bytes / 48-bit of a typical ethernet MAC address binary
   TNetMac = array[0..5] of byte;
+  /// store several ethernet MAC addresses binary
+  TNetMacs = array of TNetMac;
   /// pointer to an ethernet MAC address binary buffer
   PNetMac = ^TNetMac;
+  PPNetMac = ^PNetMac;
+  TNetMacArray = array[ 0 .. MaxInt div SizeOf(TNetMac) - 1 ] of TNetMac;
+  PNetMacArray = ^TNetMacArray;
+  /// store the 48-bit of a typical ethernet MAC address binary as cardinal+word
+  TNetMac48 = packed record
+    c: cardinal;
+    w: word;
+  end;
+  PNetMac48 = ^TNetMac48;
 
 const
   NO_ERROR = 0;
@@ -613,6 +628,9 @@ procedure IP4Text(ip4addr: PByteArray; var result: RawUtf8);
 function IP4ToText(ip4addr: PByteArray): RawUtf8;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// convert an array of IPv4 raw value into a RawUtf8 CSV text
+function IP4sToText(const ip4: array of TNetIP4): RawUtf8;
+
 /// convert an IPv6 raw value into a ShortString text
 // - will shorten the address using the regular 0 removal scheme, e.g.
 // 2001:00b8:0a0b:12f0:0000:0000:0000:0001 returns '2001:b8:a0b:12f0::1'
@@ -633,8 +651,25 @@ procedure IP6Text(ip6addr: PByteArray; var result: RawUtf8);
 function MacToText(mac: pointer): RawUtf8;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// convert a MAC address into a 17-chars shortstring like '12:50:b6:1e:c6:aa'
+function MacToShort(mac: pointer): TShort23;
+  {$ifdef HASINLINE} inline; {$endif}
+
 /// reverse function from MacToText() or MacToHex()
 function TextToMac(Text: PUtf8Char; Mac: PByte): boolean;
+
+/// fill a MAC address as 00:00:00:00:00:00
+procedure FillZero(var Mac: TNetMac); overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// compare two MAC address raw binary values
+function IsEqual(const A, B: TNetMac): boolean; overload;
+
+/// returns TRUE if all 6 bytes of this MAC address buffer equal zero
+function IsZero(const Mac: TNetMac): boolean; overload;
+
+/// search a MAC address from an array of TNetMac items using O(n) scan
+function MacIndex(first, mac: PNetMac48; n: PtrInt): PtrInt;
 
 /// convert a MAC address value from its standard hexadecimal text representation
 // - returns e.g. '12:50:b6:1e:c6:aa' from '1250b61ec6aa' or '1250B61EC6AA'
@@ -1704,7 +1739,10 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// check if a textual IPv4 matches a decoded CIDR sub-network
     function Match(const ip4: RawUtf8): boolean; overload;
+    /// return the CIDR sub-network as standard '1.2.3.4/24' text
+    function ToShort: TShort23;
   end;
+  PIp4SubNet = ^TIp4SubNet;
 
   /// store one TIp4SubNets CIDR mask definition
   TIp4SubNetMask = record
@@ -1800,7 +1838,13 @@ const
 // - end text input parsing at final #0 '/' or any char <= ' '
 function NetIsIP4(text: PUtf8Char; value: PByte = nil): boolean;
 
-/// parse a text input buffer until the end space or EOL
+/// just a wrapper around NetIsIP4(pointer(text)) which set result=0 on error
+function ToIP4(const text: RawUtf8): TNetIP4;
+
+/// decode one or several IP addresses from CSV text
+function ToIP4s(const text: RawUtf8): TNetIP4s;
+
+/// parse a text input buffer until the end space or EOL - used for config files
 function NetGetNextSpaced(var P: PUtf8Char): RawUtf8;
 
 /// IdemPChar() like function, to avoid linking mormot.core.text
@@ -2659,7 +2703,7 @@ begin
     ad4.sin_addr.s_addr := cLocalhost32 // 127.0.0.1
   else if (address = cBroadcast) or
           (address = c6Broadcast) then
-    ad4.sin_addr.s_addr := cardinal(-1) // 255.255.255.255
+    ad4.sin_addr.s_addr := cAnyHost32 // 255.255.255.255
   else if address = cAnyHost then
     // keep 0.0.0.0 for bind - but connect would redirect to 127.0.0.1
   else if NetIsIP4(pointer(address), @ad4.sin_addr) or
@@ -3751,6 +3795,21 @@ begin
   IP4Text(ip4addr, result);
 end;
 
+function IP4sToText(const ip4: array of TNetIP4): RawUtf8;
+var
+  s: TShort16;
+  i: PtrInt;
+begin
+  result := '';
+  for i := 0 to high(ip4) do
+  begin
+    IP4Short(@ip4[i], s);
+    if i <> high(ip4) then
+      AppendShortChar(',', @s);
+    AppendBufferToUtf8(@s[1], ord(s[0]), result);
+  end;
+end;
+
 procedure IP6Short(ip6addr: PByteArray; var s: ShortString);
 // this code is faster than any other inet_ntop6() I could find around
 var
@@ -3877,6 +3936,47 @@ end;
 function MacToText(mac: pointer): RawUtf8;
 begin
   ToHumanHex(result, mac, 6);
+end;
+
+function MacToShort(mac: pointer): TShort23;
+begin
+  result[0] := #17;
+  ToHumanHexP(@result[1], mac, 6);
+end;
+
+procedure FillZero(var Mac: TNetMac);
+begin
+  TNetMac48(Mac).c := 0;
+  TNetMac48(Mac).w := 0;
+end;
+
+function IsEqual(const A, B: TNetMac): boolean;
+begin
+  result := (TNetMac48(A).c = TNetMac48(B).c) and
+            (TNetMac48(A).w = TNetMac48(B).w);
+end;
+
+function IsZero(const Mac: TNetMac): boolean;
+begin
+  result := (TNetMac48(Mac).c = 0) and
+            (TNetMac48(Mac).w = 0);
+end;
+
+function MacIndex(first, mac: PNetMac48; n: PtrInt): PtrInt;
+var
+  c: cardinal;
+begin
+  result := 0;
+  c := mac^.c;
+  while result < n do
+  begin
+    if (first^.c = c) and
+       (first^.w = mac^.w) then
+      exit;
+    inc(first);
+    inc(result);
+  end;
+  result := -1;
 end;
 
 function TextToMac(Text: PUtf8Char; Mac: PByte): boolean;
@@ -5275,6 +5375,35 @@ begin
   result := true; // 1.2.3.4
 end;
 
+function ToIP4(const text: RawUtf8): TNetIP4;
+begin
+  if not NetIsIP4(pointer(text), @result) then
+    result := 0;
+end;
+
+function ToIP4s(const text: RawUtf8): TNetIP4s;
+var
+  p: PUtf8Char;
+  v: TNetIP4;
+begin
+  result := nil;
+  p := pointer(text);
+  if p <> nil then
+    repeat
+      while p^ = ' ' do
+        inc(p);
+      if not NetIsIP4(p, @v) then
+        exit;
+      AddInteger(TIntegerDynArray(result), v);
+      while p^ <> ',' do
+        if p^ = #0 then
+          exit
+        else
+          inc(p);
+      inc(p); // jump ','
+    until false;
+end;
+
 function NetGetNextSpaced(var P: PUtf8Char): RawUtf8;
 var
   S: PUtf8Char;
@@ -5347,7 +5476,7 @@ begin
   end
   else
   begin
-    mask := cardinal(-1); // 255.255.255.255
+    mask := cAnyHost32; // 255.255.255.255
     result := NetIsIP4(pointer(subnet), @ip32); // plain '1.2.3.4' IPv4 address
   end;
   ip := ip32 and mask; // normalize
@@ -5359,6 +5488,18 @@ var
 begin
   result := NetIsIP4(pointer(ip4), @ip32) and
             Match(ip32{%H-});
+end;
+
+function TIp4SubNet.ToShort: TShort23;
+var
+  prefix: cardinal;
+begin
+  IP4Short(@ip, result);
+  prefix := IP4Prefix(mask);
+  if prefix = 0 then
+    exit;
+  AppendShortChar('/', @result);
+  AppendShortCardinal(prefix, result);
 end;
 
 

@@ -351,7 +351,8 @@ end;
 
 procedure TTestCoreBase._CamelCase;
 var
-  v: RawUtf8;
+  v, v2, all: RawUtf8;
+  k: TSetCase;
 begin
   CheckEqual(UnCamelCase(''), '');
   v := UnCamelCase('On');
@@ -423,6 +424,30 @@ begin
   CheckEqual(SnakeCase('Variable Name'), 'variable_name');
   CheckEqual(SnakeCase('VARIABLE NAME'), 'variable_name');
   CheckEqual(SnakeCase('VariableName'), 'variable_name');
+  v := 'Something';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Something');
+  v := 'something';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Something');
+  v := 'Some title';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Some Title');
+  v := 'some title';
+  TitleCaseSelf(v);
+  CheckEqual(v, 'Some Title');
+  for k := low(k) to high(k) do
+  begin
+    v := GetEnumNameTrimed(TypeInfo(TSetCase), ord(k));
+    v2 := SetCase(v, k);
+    CheckUtf8((v = v2) = (k in [scNoTrim, scTrimLeft, scPascalCase, scTitleCase]), v);
+    v := SetCase(v, k);
+    CheckEqual(v, v2, 'SetCase(self)');
+    Append(all, v, ',');
+  end;
+  CheckEqual(all, 'NoTrim,TrimLeft,Un camel case,Un Camel Title,lowercase,' +
+    'lowerCaseFirst,UPPERCASE,snake_case,SCREAMING_SNAKE_CASE,kebab-case,dot.case,' +
+    'TitleCase,camelCase,PascalCase,');
 end;
 
 function GetBitsCount64(const Bits; Count: PtrInt): PtrInt;
@@ -433,7 +458,7 @@ begin
   begin
     dec(Count);
     if Count in TBits64(Bits) then // bt dword[rdi],edx is slow in such a loop
-      inc(result);                 // ... but correct :)
+      inc(result);                 // ... but simple and correct :)
   end;
 end;
 
@@ -3075,6 +3100,14 @@ begin
     Check(LoadJsonInPlace(h2, pointer(s), PT_INFO[pt]) <> nil);
     CheckUtf8(CompareMem(@h, @h2, PT_SIZE[pt]), '%', [PT_INFO[pt].RawName]);
   end;
+  DotNetIdentifierGuid('MyCompany.MyComponent', g);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'ce5fa4ea-ab00-5402-8b76-9f76ac858fb5');
+  Check(not IsRandomGuid(@g), 'from identifier');
+  DotNetIdentifierGuid('YourProviderNameYourProviderName', g);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, '6f8eac67-f87f-598a-71a0-67e48d8c468d');
+  Check(not IsRandomGuid(@g), 'from identifier');
 end;
 
 procedure TTestCoreBase._ParseCommandArgs;
@@ -9180,6 +9213,19 @@ begin
   Check(not IsInvalidHttpHeader('a'#13#10));
   Check(not IsInvalidHttpHeader('a'#13#10'b'#13#10));
   Check(not IsInvalidHttpHeader('a'#13#10'b'));
+  Check(not IsInvalidHttpHeader('aa'#13#10'bb'#13#10));
+  Check(not IsInvalidHttpHeader('aaa'#13#10'bbb'));
+  Check(not IsInvalidHttpHeader('aaa'#13#10'bbb'#13#10));
+  Check(not IsInvalidHttpHeader('aaaa'#13#10'bbbb'));
+  Check(not IsInvalidHttpHeader('aaaa'#13#10'bbbb'#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa'#13#10'bbbbb'));
+  Check(not IsInvalidHttpHeader('aaaaa'#13#10'bbbbb'#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa '#13#10'bbbbb '));
+  Check(not IsInvalidHttpHeader('aaaaa '#13#10'bbbbb '#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa  '#13#10'bbbbb  '));
+  Check(not IsInvalidHttpHeader('aaaaa  '#13#10'bbbbb  '#13#10));
+  Check(not IsInvalidHttpHeader('aaaaa  1'#13#10'bbbbb  1'));
+  Check(not IsInvalidHttpHeader('aaaaa  1'#13#10'bbbbb  1'#13#10));
   Check(IsInvalidHttpHeader(#13#10'a'#13#10));
   Check(IsInvalidHttpHeader(#10'a'#13#10));
   Check(IsInvalidHttpHeader(#13#10#13#10'a'#13#10));
@@ -9192,6 +9238,15 @@ begin
   Check(IsInvalidHttpHeader('a'#13#10'b'#13#13));
   Check(IsInvalidHttpHeader('a'#13#10'b'#13));
   Check(IsInvalidHttpHeader('a'#13#10'b'#10));
+  s := 'Content-Type: text/html;charset=utf-8'#13#10'ETag: "E039C149"';
+  Check(not IsInvalidHttpHeader(s), 'httphead0');
+  Check(not IsInvalidHttpHeader(s), 'httphead1');
+  Append(s, [#13#10]);
+  Check(not IsInvalidHttpHeader(s), 'httphead2');
+  AppendLine(s, ['name: ', 10]);
+  Check(not IsInvalidHttpHeader(s), 'httphead3');
+  AppendLine(s, ['ident: ', 7]);
+  CheckHash(s, $56DED9BD, 'httphead4');
   s := 'toto'#13#10;
   Check(not IsInvalidHttpHeader(s));
   CheckEqual(PurgeHeaders(''), '');
@@ -9555,8 +9610,8 @@ begin
   end;
   // validate SyslogMessage()
   FillcharFast(tmp, SizeOf(tmp), 1);
-  len := SyslogMessage(sfAuth, ssCrit, 'test', '', '', tmp, SizeOf(tmp), false);
-  // Check(len=65); // <-- different for every PC, due to PC name differences
+  len := SyslogMessage(sfAuth, ssCrit, ' test  ', '', '', tmp, SizeOf(tmp), false);
+  Check(len > 50); // len different for every PC, due to PC name differences
   tmp[len] := #0;
   Check(IdemPChar(PUtf8Char(@tmp), PAnsiChar('<34>1 ')));
   Check(PosEx(' - - - test', tmp) = len - 10);
@@ -9565,8 +9620,9 @@ begin
   Check(IdemPChar(PUtf8Char(@tmp), PAnsiChar('<165>1 ')));
   Check(PosEx(' proc msg - ++++', tmp) > 1);
   Check(len < 300, 'truncated to avoid buffer overflow');
-  Check(tmp[len - 1] = '+');
-  Check(tmp[len] = #1);
+  Check(tmp[len - 1] = '+', 'last+');
+  Check(tmp[len] = #0, 'ending #0');
+  Check(tmp[len + 1] = #1, 'buffer');
   // validate TSynLogFile
   Test('D:\Dev\lib\SQLite3\exe\TestSQL3.exe 1.2.3.4 (2011-04-07 11:09:06)'#13#10 +
     'Host=MyPC User=MySelf CPU=2*0-15-1027 OS=2.3=5.1.2600 Wow64=0 Freq=3579545 ' +

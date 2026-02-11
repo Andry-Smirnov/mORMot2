@@ -428,6 +428,29 @@ begin
   PLightLock(@fSharedLock[ndx])^.UnLock;
 end;
 
+procedure syslog(priv: integer; fmt: PAnsiChar; arg: array of const);
+  cdecl; external clib name 'syslog';
+
+const
+  MAX_SYSLOG = 1500; // mimics UDP/Ethernet frame truncation
+
+function SysLogSend(priority: integer; msg: PUtf8Char; len: PtrInt): boolean;
+var
+  tmp: array[0 .. MAX_SYSLOG] of AnsiChar;
+begin
+  result := (len > 1) and
+            (len <= MAX_SYSLOG);
+  if not result then
+    exit;
+  if msg[len] <> #0 then
+  begin
+    MoveFast(msg^, tmp, len);
+    tmp[len] := #0; // make ASCIIZ for %s parameter
+    msg := @tmp;
+  end;
+  syslog(priority, '%s', [msg]);
+end;
+
 const
   // for CompareStringW() Windows-like call in Unicode_CompareString()
   LOCALE_USER_DEFAULT = $400; // ignored in practice
@@ -1985,7 +2008,7 @@ begin
         p^ := dlsym(systemd, SD_NAMES[i]);
         if p^ = nil then
         begin
-          p := @@listen_fds;
+          p := @@listen_fds; // missing entry: reset all other API functions
           for j := 0 to i do
           begin
             p^ := nil;
@@ -2008,11 +2031,43 @@ begin
   result := Assigned(listen_fds);
 end;
 
+const
+  _MESSAGE: array[0..7] of AnsiChar = 'MESSAGE=';
+
+function TSystemD.Send(priority: integer; msg: PUtf8Char; len: PtrInt): boolean;
+var
+  v: array[0..1] of TIoVec;
+  v0: TShort16;
+  tmp: array[0 .. MAX_SYSLOG + 8] of AnsiChar;
+begin
+  result := false;
+  if (len < 2) or
+     (len > MAX_SYSLOG) or
+     not IsAvailable then
+    exit;
+  // prepare and send the information to the journal
+  if priority > 7 then
+    priority := 7;
+  v0 := 'PRIORITY=';
+  AppendShortCardinal(priority, v0);
+  v[0].iov_base := @v0[1];
+  v[0].iov_len := ord(v0[0]);
+  PInt64(@tmp)^ := PInt64(@_MESSAGE)^;
+  MoveFast(msg^, tmp[8], len);
+  v[1].iov_base := @tmp;
+  v[1].iov_len := len + 8;
+  result := sd.journal_sendv(v[0], 2) = 0;
+  // if systemd-journald is not running (the socket is not present), sendv()
+  // does nothing, and returns 0 = success
+end;
+
 function TSystemD.ProcessIsStartedBySystemd: boolean;
 begin
   result := IsAvailable and
-    (fpgetppid() = 1) and // e.g. under Docker or when started by init.d
-    (BaseUnix.fpGetenv(PAnsiChar('INVOCATION_ID')) <> nil); // as set e.g. on Ubuntu 20.04
+            // parent PID = 1 e.g. under Docker or when started by init.d
+            (fpgetppid() = 1) and
+            // INVOCATION_ID is set e.g. on Ubuntu 20.04
+            (BaseUnix.fpGetenv(PAnsiChar('INVOCATION_ID')) <> nil);
 end;
 
 procedure TSystemD.Done;
@@ -2379,18 +2434,6 @@ begin
     else
       folder := IncludeTrailingPathDelimiter(folder);
   result := folder <> '';
-end;
-
-function WritableFolder(const parent, sub: TFileName; var folder: TFileName): boolean;
-begin
-  result := false;
-  folder := EnsureDirectoryExists(Join([parent, sub]));
-  if folder = '' then
-    exit;
-  if FileIsWritable(folder) then
-    result := true
-  else
-    folder := '';
 end;
 
 function IsExpandedPath(const FileName: TFileName): boolean;
@@ -3175,7 +3218,7 @@ function StringFromFileNoSize(const FileName: TFileName): RawByteString;
 var
   h: THandle;
   pos, read: PtrInt;
-  tmp: array[0..$7fff] of AnsiChar; // 32KB stack buffer
+  tmp: TBuffer64K; // 64KB stack buffer - /proc/cpuinfo could be huge
 begin
   result := '';
   if FileName = '' then
@@ -3189,8 +3232,8 @@ begin
     if read <= 0 then
       break; // end of input
     inc(pos, read);
-    if pos < SizeOf(tmp) then // is likely to flush before 32KB of output
-      continue;
+    if pos < SizeOf(tmp) then // kernel-side may iterate on PAGE_SIZE (4KB)
+      continue;               // but is likely to flush before 64KB of output
     AppendBufferToUtf8(@tmp, pos, RawUtf8(result)); // in-place resize
     pos := 0;
   until false;
@@ -5150,12 +5193,12 @@ begin
     CpuCacheSize := _GetNextCardinal(cache);
     while cache^ = ' ' do
       inc(cache);
-    case upcase(cache^) of
-      'K':
+    case cache^ of
+      'k', 'K':
         cacheshr := 10;
-      'M':
+      'm', 'M':
         cacheshr := 20;
-      'G':
+      'g', 'G':
         cacheshr := 30;
     else
       cacheshr := 0;
