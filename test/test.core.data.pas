@@ -2597,8 +2597,35 @@ var
     check(CompareBuf(v, info.Value, info.ValueLen) = 0);
   end;
 
+  procedure TestJsonArrayAsCsv(const json, expected: RawUtf8);
+  var
+    tmp: RawUtf8;
+    len: PtrInt;
+  begin
+    FastSetString(tmp, pointer(json), length(json));
+    len := JsonArrayAsCsv(pointer(tmp));
+    if len = 0 then
+    begin
+      Check(expected = '');
+      exit;
+    end;
+    Check(len < length(tmp));
+    FakeLength(tmp, len);
+    CheckEqual(tmp, expected);
+  end;
+
 begin
   TestSimpleEnum;
+  TestJsonArrayAsCsv('', '');
+  TestJsonArrayAsCsv('123', '');
+  TestJsonArrayAsCsv('[1]', '1');
+  TestJsonArrayAsCsv('[ "1" ]', '1');
+  TestJsonArrayAsCsv('[ "1 " ]  ', '1 ');
+  TestJsonArrayAsCsv('[1 , 2  ]', '1,2');
+  TestJsonArrayAsCsv('["1 "," 2  "]', '1 , 2  ');
+  TestJsonArrayAsCsv('["1 "," 2  "', '');
+  TestJsonArrayAsCsv('["1 ":" 2  "]', '');
+  TestJsonArrayAsCsv('["ip:1.2.3.4", "1.2.3.5"]', 'ip:1.2.3.4,1.2.3.5');
   FillcharFast(F, SizeOf(F), 0); // initialize all fields before DA.Add(F)
   TestGetJsonField('', '', false, true, #0, #0);
   TestGetJsonField('true,false', 'true', false, false, ',', 'f');
@@ -2790,7 +2817,7 @@ begin
   J := JsonEncode('{name:"John",field:{ "$regex": "acme.*corp", $options: "i" }}',
     [], []);
   CheckEqual(J, '{"name":"John","field":{"$regex":"acme.*corp","$options":"i"}}');
-  // below only works if unit mormot.db.nosql.bson is included in uses
+  // below line only works if unit mormot.db.nosql.bson is included in uses
   CheckEqual(JsonEncode('{name:?,field:/%/i}', ['acme.*corp'], ['John']), J);
   peop := TOrmPeople.Create;
   try
@@ -5161,7 +5188,7 @@ begin
   FillCharFast(b2, SizeOf(b2), 0);
   // mORMot 1 serialization with Delphi extended RTTI
   u2 := '{"Precision":1,"SignSpecialPlaces":0,"Fraction":' +
-    '"5000000000000000000000000000000000000000000000000000000000000000"}';
+        '"5000000000000000000000000000000000000000000000000000000000000000"}';
   Check(RecordLoadJson(b2, u2, TypeInfo(TBcd)));
   BcdToUtf8(b2, u2);
   CheckEqual(u2, '5');
@@ -5428,6 +5455,10 @@ var
   end;
 
 begin
+  if CheckFailed(BsonVariantType <> nil, 'no BsonVariantType') then
+    exit;
+  if CheckFailed(BsonVariantVType <> 0, 'no BsonVariantVType') then
+    exit;
   CheckEqual(SizeOf(TDecimal128), 16);
   CheckEqual(ord(betEof), $00);
   CheckEqual(ord(betInt64), $12);
@@ -6877,8 +6908,10 @@ var
   ps: TEnumPetStore1;
   pss, pss2: TEnumPetStore1Set;
   psa: array of TEnumPetStore1;
-  astext: boolean;
   P: PUtf8Char;
+  astext: boolean;
+  k: TRttiKind;
+  t: TRttiParserType;
   eoo: AnsiChar;
   e: TEmoji;
   ep: TSetMyEnumPart;
@@ -6889,7 +6922,19 @@ var
   d: TTest;
   {$endif HASEXTRECORDRTTI}
 begin
+  // some paranoid checks
+  for k := low(k) to high(k) do
+  begin
+    Check(Assigned(RTTI_FINALIZE[k]) = (k in rkManagedTypes + [rkClass]));
+    Check(Assigned(RTTI_MANAGEDCOPY[k]) = (k in rkManagedTypes));
+  end;
+  CheckEqual(SizeOf(TRttiVarData), SizeOf(TVarData));
+  CheckEqual(SizeOf(TSynVarData), SizeOf(TVarData));
+  Check(@PRttiVarData(nil)^.PropValue = @PVarData(nil)^.VAny);
+  for t := succ(low(t)) to high(t) do
+    Check(Assigned(PT_INFO[t]) <> (t in (ptComplexTypes - [ptOrm, ptTimeLog])));
   {$ifdef HASEXTRECORDRTTI}
+  // quickly validate Delphi 2010+ exxtended RTTI
   r := Rtti.RegisterType(TypeInfo(TPeople));
   check(r <> nil);
   checkEqual(r.Props.Count, 4);
@@ -6902,9 +6947,6 @@ begin
   Check(RecordLoadJson(d, u, TypeInfo(TTest)));
   check(d.d <> 0);
   {$endif HASEXTRECORDRTTI}
-  CheckEqual(SizeOf(TRttiVarData), SizeOf(TVarData));
-  CheckEqual(SizeOf(TSynVarData), SizeOf(TVarData));
-  Check(@PRttiVarData(nil)^.PropValue = @PVarData(nil)^.VAny);
   // CSV (or JSON array) to set
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), ''), 0, 'TSetMyEnum0');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'none'), 0, 'TSetMyEnum?');

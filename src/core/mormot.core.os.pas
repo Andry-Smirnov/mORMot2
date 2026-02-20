@@ -349,6 +349,12 @@ function UriTruncLen(const Address: RawUtf8): PtrInt;
 function UriTruncAnchorLen(const Address: RawUtf8): PtrInt;
   {$ifdef HASINLINE} inline; {$endif}
 
+// define some raw text functions, to avoid linking mormot.core.text
+function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
+procedure _fmt(const Fmt: string; const Args: array of const; var result: RawUtf8); overload;
+procedure _toutf8(const Str: TFileName; var Utf8: RawUtf8); {$ifdef OSPOSIX} inline; {$endif}
+procedure _addutf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
+
 
 { ****************** Gather Operating System Information }
 
@@ -1984,7 +1990,7 @@ function RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture: cardinal;
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetCurrentThreadId: DWord; stdcall;
 
-/// retrieves the current process ID
+/// retrieves the current process ID in a cross-platform way
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetCurrentProcessId: DWord; stdcall;
 
@@ -2058,11 +2064,6 @@ function FileOpen(const aFileName: TFileName; aMode: integer): THandle;
 /// redefined here to avoid warning to include "Windows" in uses clause
 // - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
 procedure FileClose(F: THandle); stdcall;
-
-/// redefined here to avoid warning to include "Windows" in uses clause
-// and support FileName longer than MAX_PATH
-// - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
-function RenameFile(const OldName, NewName: TFileName): boolean;
 
 /// redirection to Windows SetFileTime() of a file name from Int64(TFileTime)
 // - if any Int64 is 0, the proper value will be guess from the non-0 values
@@ -2505,6 +2506,9 @@ var TryEnterCriticalSection: function(var cs: TRTLCriticalSection): integer;
 
 {$endif NODIRECTTHREADMANAGER}
 
+/// retrieves the current process ID in a cross-platform way
+function GetCurrentProcessId: TThreadIDInt;
+
 {$endif OSPOSIX}
 
 /// returns TRUE if the supplied mutex has been initialized
@@ -2571,7 +2575,7 @@ procedure SetLastError(error: integer);
 function GetErrorText(error: integer = 0): RawUtf8;
 
 /// returns a given error code as plain text ShortString
-function GetErrorShort(error: integer = 0): ShortString;
+function GetErrorShort(error: integer = 0): TShort63;
 
 /// returns a given error code as plain text ShortString
 procedure GetErrorShortVar(error: integer; var dest: ShortString);
@@ -2946,6 +2950,10 @@ function DateTimeToWindowsFileTime(DateTime: TDateTime): integer;
 // and support FileName longer than MAX_PATH
 // - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
 function DeleteFile(const aFileName: TFileName): boolean;
+
+/// redefined here to avoid warning to include "Windows" in uses clause
+// and support FileName longer than MAX_PATH
+function RenameFile(const aOld, aNew: TFileName): boolean;
 
 /// redefined here to avoid warning to include "Windows" in uses clause
 // and support FileName longer than MAX_PATH
@@ -3640,7 +3648,7 @@ function RetrieveLoadAvg: TShort23;
 /// a shorter version of GetSystemInfoText, used e.g. by TSynLogFamily.LevelSysInfo
 // - 'ncores avg1 avg5 avg15 [updays] used/totalram [used/totalswap] osint32' on POSIX,
 // or 'ncores user kern [updays] used/totalram [used/totalswap] osint32' on Windows
-procedure RetrieveSysInfoText(out text: ShortString);
+procedure RetrieveSysInfoText(var text: ShortString);
 
 /// retrieve low-level information about current memory usage
 // - as used e.g. by TSynMonitorMemory or GetMemoryInfoText
@@ -4909,9 +4917,11 @@ procedure FillRandom(Dest: PCardinal; CardinalCount: integer);
 {$endif PUREMORMOT2}
 
 /// compute a random UUid value from the RandomBytes() generator and RFC 4122
+// - to derivate a Uuid from a name see IdentifierGuid()/DotNetIdentifierGuid()
 procedure RandomGuid(out result: TGuid); overload;
 
 /// compute a random UUid value from the RandomBytes() generator and RFC 4122
+// - to derivate a Uuid from a name see IdentifierGuid()/DotNetIdentifierGuid()
 function RandomGuid: TGuid; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -5380,7 +5390,7 @@ type
     // SERVICE_INTERROGATE, SERVICE_PAUSE_CONTINUE, SERVICE_QUERY_CONFIG,
     // SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STOP, SERVICE_USER_DEFINED_CONTROL
     constructor CreateOpenService(
-      const TargetComputer, DataBaseName, Name: RawUtf8;
+      const TargetComputer, DataBaseName, ServiceName: RawUtf8;
       DesiredAccess: cardinal = SERVICE_ALL_ACCESS);
     /// release memory and handles
     destructor Destroy; override;
@@ -5932,18 +5942,18 @@ implementation
 
 { ****************** Some Cross-System Type and Constant Definitions }
 
-function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
+function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
 begin
-  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
+  _toutf8(Format(Fmt, Args), result); // good enough (seldom called)
 end;
 
 procedure _fmt(const Fmt: string; const Args: array of const;
-  var result: RawUtf8); overload;
+  var result: RawUtf8);
 begin
-  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
+  _toutf8(Format(Fmt, Args), result); // good enough (seldom called)
 end;
 
-procedure _AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
+procedure _addutf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
 var
   n: PtrInt;
 begin
@@ -6132,7 +6142,7 @@ begin
   if osv.os <> osWindows then
     exit;
   txt4 := osv.winbuild;
-  case  osv.win of
+  case osv.win of
     wTen, wTen_64, wEleven, wEleven_64: // desktop versions
       txt4 := FindOsBuild(txt4, high(DESKTOP_INT), @DESKTOP_INT, @DESKTOP_TXT);
     wServer2016, wServer2016_64, wServer2019_64, wServer2022_64, wServer2025_64:
@@ -6154,7 +6164,7 @@ begin
   AppendOsBuild(osv, @result, sep);
 end;
 
-procedure AppendOsv(const osv: TOperatingSystemVersion; var dest: Shortstring);
+procedure AppendOsv(const osv: TOperatingSystemVersion; var dest: TShort47);
 begin
   case osv.os of
     osWindows:
@@ -6227,11 +6237,11 @@ begin
     if osv.os in (OS_LINUX - [osAndroid]) then
       AppendShort(' Linux ', result) // e.g. 'Ubuntu Linux 5.4.0'
     else
-      AppendShortChar(' ', @result);
+      AppendShortCharSafe(' ', result);
     AppendShortCardinal(osv.utsrelease[2], result);
-    AppendShortChar('.', @result);
+    AppendShortCharSafe('.', result);
     AppendShortCardinal(osv.utsrelease[1], result);
-    AppendShortChar('.', @result);
+    AppendShortCharSafe('.', result);
     AppendShortCardinal(osv.utsrelease[0], result);
   end;
 end;
@@ -6578,11 +6588,11 @@ var
 begin
   OsErrorShort(Code, @os, NoInt); // redirect to Win/Linux/BsdErrorShort()
   if Sep <> #0 then
-    AppendShortChar(Sep, @Dest);
+    AppendShortCharSafe(Sep, Dest);
   AppendShort(os, Dest);
 end;
 
-function GetErrorShort(error: integer): ShortString;
+function GetErrorShort(error: integer): TShort63;
 begin
   if error = 0 then
     error := GetLastError;
@@ -6845,8 +6855,8 @@ begin
   else if IsAnsiCompatibleW(W, LW) then
   begin
     // fast handling of pure ASCII-7 content (very common case)
-    if LW > 255 then
-      LW := 255;
+    if LW > high(res) then
+      LW := high(res);
     res[0] := AnsiChar(LW);
     i := 1;
     repeat
@@ -7780,7 +7790,7 @@ end;
 
 function GetFileNameWithoutExtOrPath(const FileName: TFileName): RawUtf8;
 begin
-  result := RawUtf8(GetFileNameWithoutExt(ExtractFileName(FileName)));
+  _toutf8(GetFileNameWithoutExt(ExtractFileName(FileName)), result);
 end;
 
 function PosExtString(Str: PChar): PChar; // work on AnsiString + UnicodeString
@@ -8001,12 +8011,12 @@ begin
   until u = high(_u);
   Size := (Size * 10000) shr (u * 10);
   SimpleRoundTo2DigitsCurr64(Size);
-  AppendShortCurr64(Size, Dest, 1);
+  AppendShortCurr64(Size, Dest, {fixeddecimals=}1);
   if WithSpace then
-    AppendShortChar(' ', @Dest);
+    AppendShortCharSafe(' ', Dest);
   if u <> 0 then
-    AppendShortChar(_U[u], @Dest);
-  AppendShortChar('B', @Dest);
+    AppendShortCharSafe(_U[u], Dest);
+  AppendShortCharSafe('B', Dest);
 end;
 
 {$ifndef NOEXCEPTIONINTERCEPT}
@@ -8425,9 +8435,9 @@ end;
 procedure AppendFreeTotalKB(free, total: QWord; var dest: ShortString);
 begin
   AppendKb(free, dest);
-  AppendShortChar('/', @dest);
+  AppendShortCharSafe('/', dest);
   AppendKb(total, dest);
-  AppendShortChar(' ', @dest);
+  AppendShortCharSafe(' ', dest);
 end;
 
 function GetMemoryInfoText: TShort31;
@@ -8465,7 +8475,7 @@ begin
      result);
 end;
 
-procedure RetrieveSysInfoText(out text: ShortString);
+procedure RetrieveSysInfoText(var text: ShortString);
 var
   si: TSysInfo;  // Linuxism, but properly emulated in thit unit on Mac/BSD
 begin
@@ -9296,7 +9306,7 @@ begin
       break; // no more occurence
     if fValues[i] <> '' then
     begin
-      _AddRawUtf8(value, fValues[i]);
+      _addutf8(value, fValues[i]);
       result := true;
     end;
     first := i + 1;
@@ -9335,7 +9345,7 @@ function TExecutableCommandLine.Get(const name: array of RawUtf8;
 var
   def, tmp: RawUtf8; // RTL conversion is fast enough in this unit
 begin
-  def := RawUtf8(tmp);
+  _toutf8(default, def);
   result := Get(name, tmp, description, def);
   if result then
     value := string(tmp)
@@ -9564,7 +9574,7 @@ begin
       exit; // may equal -1 e.g. from a .so on MacOS
     SetLength(fRawParams, n);
     for i := 0 to n - 1 do
-      fRawParams[i] := RawUtf8(ParamStr(i + 1));
+      _toutf8(ParamStr(i + 1), fRawParams[i]);
   end;
   Finalize(fNames);
   Finalize(fValues);
@@ -9603,22 +9613,22 @@ begin
           if j <> 1 then
             if j <> 0 then
             begin
-              _AddRawUtf8(fNames[clkParam], copy(s, 1, j - 1));
-              _AddRawUtf8(fValues, copy(s, j + 1, MaxInt));
+              _addutf8(fNames[clkParam], copy(s, 1, j - 1));
+              _addutf8(fValues, copy(s, j + 1, MaxInt));
             end
             else if (i + 1 = n) or
                     (swlen[i + 1] <> 0) then
-              _AddRawUtf8(fNames[clkOption], s)
+              _addutf8(fNames[clkOption], s)
             else
             begin
-              _AddRawUtf8(fNames[clkParam], s);
+              _addutf8(fNames[clkParam], s);
               inc(i);
-              _AddRawUtf8(fValues, fRawParams[i]);
+              _addutf8(fValues, fRawParams[i]);
             end;
           end;
       end
       else
-        _AddRawUtf8(fNames[clkArg], s);
+        _addutf8(fNames[clkArg], s);
     inc(i);
   until i = n;
   SetLength(fRetrieved[clkArg],    length(fNames[clkArg]));

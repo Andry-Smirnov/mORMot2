@@ -6795,7 +6795,7 @@ begin
     exit;
   n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
   repeat
-    p^.CopyValue(aRecord, self); // copy all fields between sibbling classes
+    p^.CopyValue(aRecord, self); // copy all fields between sibling classes
     inc(p);
     dec(n);
   until n = 0;
@@ -6820,7 +6820,7 @@ begin
   end;
   if p = nil then
     exit;
-  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // two sibbling classes
+  n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // two sibling classes
   repeat
     if FieldBitGet(aRecordFieldBits, p^.PropertyIndex) then
       p^.CopyValue(aRecord, self);
@@ -7997,14 +7997,14 @@ var
               if GetManyField(P + 6) then
               begin
                 aManyField[1] := AnsiChar(i * 2 + 67);
-                result := RawUtf8(aManyField);
+                ShortStringToAnsi7String(aManyField, result);
                 exit; // Categories.Dest.Name=? -> C.Name=?
               end;
             end
             else if (P^ = '.') and GetManyField(P + 1) then
             begin
               aManyField[1] := AnsiChar(i * 2 + 66);
-              result := RawUtf8(aManyField);
+              ShortStringToAnsi7String(aManyField, result);
               exit;  // Categories.Kind=? -> CC.Kind=?
             end;
           end;
@@ -8300,7 +8300,11 @@ begin
   end
   else
   begin
+    if woHumanReadable in Options then
+      W.AddCRAndIndent;
     W.AddProp(pointer(props.IDJsonName), length(props.IDJsonName));
+    if woHumanReadable in Options then
+      W.AddDirect(' ');
     W.Add(TOrm(Instance).fID);
     W.BlockAfterItem(Options);
   end;
@@ -8308,9 +8312,10 @@ begin
   n := props.Count;
   repeat
     if woHumanReadable in Options then
-      W.WriteObjectPropNameHumanReadable(cur^.JsonName)
-    else
-      W.AddProp(pointer(cur^.JsonName), length(cur^.JsonName));
+      W.AddCRAndIndent; // inlined WriteObjectPropNameHumanReadable()
+    W.AddProp(pointer(cur^.JsonName), length(cur^.JsonName));
+    if woHumanReadable in Options then
+      W.AddDirect(' ');
     cur^.GetJsonValues(Instance, W);
     inc(cur);
     dec(n);

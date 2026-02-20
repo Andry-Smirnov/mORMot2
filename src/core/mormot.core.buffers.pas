@@ -1430,7 +1430,7 @@ function Base32ToBin(const base32: RawUtf8): RawByteString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 // internal raw functions used to initialize Base32/58/64/64uri decoding lookup
-procedure FillLookupTable(s, d: PByteArray; i: PtrUInt);
+procedure FillLookupTable(s, d: PByteArray; his: PtrUInt);
 procedure FillBaseDecoder(s: PAnsiChar; d: PAnsiCharDec; i: PtrUInt);
 
 /// fill a RawBlob from TEXT-encoded blob data
@@ -6445,13 +6445,13 @@ end;
 
 { ************ Base64, Base64Uri, Base58 and Baudot Encoding / Decoding }
 
-procedure FillLookupTable(s, d: PByteArray; i: PtrUInt);
+procedure FillLookupTable(s, d: PByteArray; his: PtrUInt);
 begin
   repeat
-    d[s[i]] := i; // pre-compute O(1) lookup table for the meaningful chars
-    dec(i);
-  until i = 0;
-  d[s[0]] := i
+    d[s[his]] := his; // pre-compute O(1) lookup table for the meaningful chars
+    dec(his);
+  until his = 0;
+  d[s[0]] := his
 end;
 
 procedure FillBaseDecoder(s: PAnsiChar; d: PAnsiCharDec; i: PtrUInt);
@@ -9595,7 +9595,7 @@ begin
   AppendShortChar(' ', @result);
   AppendShort(itemname, result);
   if itemcount > 1 then
-    AppendShortCharSafe('s', @result);
+    AppendShortCharSafe('s', result);
 end;
 
 function EscapeBuffer(s: PAnsiChar; slen: integer;
@@ -9933,7 +9933,7 @@ begin
     Ansi7StringToShortString(Context, ctx);
   persec[0] := #0;
   if PerSecond <> 0 then
-    FormatShort16(' %/s', [KBNoSpace(PerSecond)], persec);
+    FormatShort(' %/s', [KBNoSpace(PerSecond)], persec);
   curr[0] := #0;
   AppendKB(CurrentSize, curr, {withspace=}false);
   if ExpectedSize = 0 then
@@ -10675,10 +10675,8 @@ end;
 function IsHttpOrHttps(P: PUtf8Char): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 begin
-  result := (PCardinal(P)^ =
-             ord('h') + ord('t') shl 8 + ord('t') shl 16 + ord('p') shl 24) and
-            ((PCardinal(P + 4)^ and $ffffff =
-             ord(':') + ord('/') shl 8 + ord('/') shl 16) or
+  result := (PCardinal(P)^ = HTTP__32) and
+            ((PCardinal(P + 4)^ and $ffffff = HTTP__24) or
              (PCardinal(P + 4)^ =
              ord('s') + ord(':') shl 8 + ord('/') shl 16 + ord('/') shl 24));
 end;

@@ -480,8 +480,8 @@ begin
       break;
     if Pos + len > max then
       exit;
-    AppendShortBuffer(pointer(@p[Pos]), len, @tmp);
-    AppendShortCharSafe('.', @tmp);
+    AppendShortBuffer(pointer(@p[Pos]), len, high(tmp), @tmp);
+    AppendShortCharSafe('.', tmp);
     inc(Pos, len);
   until false;
   if tmp[ord(tmp[0])] = '.' then

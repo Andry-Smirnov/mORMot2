@@ -867,6 +867,7 @@ type
 
 /// returns a 64-bit value as inlined ':(1234):' text
 function InlineParameter(ID: Int64): TShort31; overload;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// returns a string value as inlined ':("value"):' text
 function InlineParameter(const value: RawUtf8): RawUtf8; overload;
@@ -1504,7 +1505,7 @@ begin
   if aType <= high(aType) then
     result := TrimLeftLowerCaseToShort(ToText(aType))
   else
-    FormatShort16('#%', [ord(aType)], result);
+    FormatShort('#%', [ord(aType)], result);
 end;
 
 function IsZero(const Fields: TFieldBits): boolean;
@@ -2394,7 +2395,7 @@ end;
 
 function InlineParameter(ID: Int64): TShort31;
 begin
-  FormatShort31(':(%):', [ID], result);
+  FormatShort(':(%):', [ID], result);
 end;
 
 function InlineParameter(const value: RawUtf8): RawUtf8;
@@ -3241,7 +3242,7 @@ var
       B := P;
       repeat
         inc(P);
-      until not (jcJsonIdentifier in JSON_CHARS[P^]);
+      until not (jcJsonIdentifier in JSON_CHARS[P^]); // _-.[]$0..9a..zA..Z
       FastSetString(select.SubField, B, P - B);
       fHasSelectSubFields := true;
     end;
@@ -3373,7 +3374,7 @@ var
       B := P;
       repeat
         inc(P);
-      until not (jcJsonIdentifier in JSON_CHARS[P^]);
+      until not (jcJsonIdentifier in JSON_CHARS[P^]); // _-.[]$0..9a..zA..Z
       FastSetString(Where.SubField, B, P - B); // '.subfield1.subfield2'
       fWhereHasSubFields := true;
       P := GotoNextNotSpace(P);

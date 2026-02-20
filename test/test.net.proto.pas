@@ -1549,30 +1549,32 @@ end;
 const
   FND_RESP = [doSubnetMask, doDhcpLeaseTime, doDhcpMessageType,
     doDhcpServerIdentifier, doDhcpRenewalTime, doDhcpRebindingTime];
-  OPTION82: string[7] = 'OPT__82';
 
 procedure TNetworkProtocols.DHCP;
 var
-  refdisc, refoffer, refreq, refack: RawByteString;
+  refdisc, refoffer, refreq, refack, bin: RawByteString;
   mac, ip, txt, json: RawUtf8;
   fn: TFileName;
   lens: TDhcpParsed;
   fnd: TDhcpOptions;
   opt, opt2: TDhcpOption;
+  dor, dor2: TDhcpOptionRai;
   dmt, dmt2: TDhcpMessageType;
   ip4, sip4: TNetIP4;
   xid: cardinal;
-  d: TDhcpProcessData;
+  d: TDhcpState;
   i, n, l: PtrInt;
   server: TDhcpProcess;
+  settings: TDhcpServerSettings;
   macs: TNetMacs;
   ips: TNetIP4s;
   timer: TPrecisionTimer;
   f: PAnsiChar;
-  hostname: TShort7;
+  hostname, opt82: TShort15;
   rnd: TLecuyer;
   nfo: TMacIP;
   m1, m2: TDhcpMetrics;
+  rv: TRuleValue;
 
   procedure DoRequest(ndx: PtrInt);
   begin
@@ -1596,7 +1598,7 @@ var
   begin
     s := TDhcpProcess.Create;
     try
-      s.Setup(nil); // needed here to fill s.Scope[] with the default subnet
+      s.Setup(settings); // fill s.Scope[] with good subnet
       Check(s.LoadFromText(saved), 'loadfromtext1');
       new := s.SaveToText;
       if new <> saved then // allow one (unlikely) GetTickSec slip
@@ -1611,16 +1613,31 @@ var
     end;
   end;
 
+  procedure CheckTlv(const json, bin: RawUtf8);
+  begin
+    CheckEqual(EscapeHex(TlvFromJson(json), ESC_ASCII, '$'), bin);
+  end;
+
+  procedure CheckCidrRoute(const cidr, hex: RawUtf8);
+  var
+    bin: RawByteString;
+  begin
+    Check(CidrRoutes(pointer(cidr), bin));
+    CheckEqualHex(bin, hex, 'cidr');
+  end;
+
 begin
   // validate some DHCP protocol definitions
   CheckEqual(ord(dmtTls), 18, 'dmt');
-  CheckEqual(SizeOf(TDhcpPacket), 548, 'TDhcpPacket');
-  CheckEqual(PtrUInt(@PDhcpPacket(nil)^.options), 240, 'options');
+  CheckEqual(SizeOf(TDhcpPacket), 1468, 'TDhcpPacket');
+  CheckEqual(PtrUInt(@PDhcpPacket(nil)^.options), DHCP_PACKET_HEADER, 'options');
+  CheckEqual(PtrUInt(@PRuleValue(nil)^.value), SizeOf(Int64), 'TRuleValue');
+  CheckEqual(SizeOf(TRuleValue), 8 + SizeOf(pointer));
   CheckEqual(SizeOf(TDhcpLease), 16, 'TDhcpLease');
   CheckEqual(DHCP_OPTION[doSubnetMask], 'subnet-mask');
   CheckEqual(DHCP_OPTION[doRouters], 'routers');
   CheckEqual(DHCP_OPTION[doTftpServerName], 'tftp-server-name');
-  CheckEqual(DHCP_OPTION[doDhcpAgentOptions], 'dhcp-agent-options');
+  CheckEqual(DHCP_OPTION[doRelayAgentInformation], 'relay-agent-information');
   RandomLecuyer(rnd);
   for dmt := low(dmt) to high(dmt) do
   begin
@@ -1660,6 +1677,72 @@ begin
     Check(opt = opt2);
   end;
   Check(not FromText('none', opt2));
+  for dor := low(dor) to high(dor) do
+  begin
+    dor2 := pred(dor);
+    Check(FromText(RAI_OPTION[dor], dor2));
+    Check(dor = dor2);
+  end;
+  // validate TRuleValue binary layout against TDhcpState.MatchOne expectations
+  PInt64(@rv)^ := -1;
+  CheckEqual(rv.num, 255);
+  Check(not IsZero(rv.mac));;
+  rv.value := 'rv.value';
+  CheckEqual(PInt64(@rv)^, -1, 'rv');
+  CheckEqual(rv.value, 'rv.value');
+  PInt64(@rv)^ := 0;
+  CheckEqual(rv.num, 0);
+  CheckEqual(ord(rv.kind), 0, 'rv.kind');
+  CheckEqual(PInt64(@rv)^, 0, 'rv');
+  Check(IsZero(rv.mac));
+  Check(TextToMac('ff:ff:ff:ff:ff:ff', @rv.mac));
+  Check(not IsZero(rv.mac));
+  CheckEqual(PInt64(@rv)^, -65536, 'rv');
+  CheckEqual(PInt64(@rv)^ shr 16, $FFFFFFFFFFFF, 'rv');
+  rv.num := 255;
+  PByte(@rv.kind)^ := 255;
+  CheckEqual(PInt64(@rv)^, -1, 'rv2');
+  CheckEqual(rv.value, 'rv.value');
+  // validate CIDR routes encoding following RFC 3442
+  CheckCidrRoute('', '');
+  CheckCidrRoute('192.168.1.0/24,10.0.0.5',     '18C0A8010A000005');
+  Check(not CidrRoutes('192.168.1.300/24,10.0.0.5', bin));
+  Check(not CidrRoutes('192.168.1.0/24,10.0.0.', bin));
+  CheckCidrRoute('10.0.0.0/8,192.168.1.1',      '080AC0A80101');
+  CheckCidrRoute('192.168.1.0/24,10.0.0.5;10.0.0.0/8,192.168.1.1',
+                 '18C0A8010A000005080AC0A80101');
+  CheckCidrRoute('10.0.0.1,192.168.0.1',        '200A000001C0A80001');
+  CheckCidrRoute('10.0.0.1/32,192.168.0.1',     '200A000001C0A80001');
+  CheckCidrRoute('10.0.0.1/33,192.168.0.1',     '200A000001C0A80001');
+  CheckCidrRoute('0.0.0.0/0,10.0.0.1',          '000A000001');
+  CheckCidrRoute('172.16.0.0/16,192.168.1.1',   '10AC10C0A80101');
+  CheckCidrRoute('192.168.1.0/24,10.0.0.5,10.0.0.1,192.168.1.1,',
+                 '18C0A8010A000005200A000001C0A80101');
+  // validate Type-Length-Value (TLV) encoding e.g. for DHCP option 43/82
+  CheckEqual(TlvFromJson(''), '');
+  CheckTlv('{6:"bcd"}',                    '$06$03bcd');
+  CheckTlv('{6:"uint8:7"}',                '$06$01$07');
+  CheckTlv('{6:"uint16:7"}',               '$06$02$00$07');
+  CheckTlv('{6:7}',                        '$06$04$00$00$00$07');
+  CheckTlv('{6:"hex:010203"}',             '$06$03$01$02$03');
+  CheckTlv('{6:false}',                    '$06$01$00');
+  CheckTlv('{6:true}',                     '$06$01$01');
+  CheckTlv('{6:"ip:4.3.2.1"}',             '$06$04$04$03$02$01');
+  CheckTlv('{6:"ip:8.7.6.5,4.3.2.1"}',     '$06$08$08$07$06$05$04$03$02$01');
+  CheckTlv('{6:["ip:8.7.6.5","4.3.2.1"]}', '$06$08$08$07$06$05$04$03$02$01');
+  CheckTlv('{6:"mac:06:05:04:03:02:01"}',  '$06$06$06$05$04$03$02$01');
+  CheckTlv('{6:"mac:06:05:04:03:02:01,16:15:14:13:12:11"}',
+           '$06$0C$06$05$04$03$02$01$16$15$14$13$12$11');
+  CheckTlv('{6:"esc:ab$00c",7:"uuid:{8C36C986-F291-4DA0-B2D0-3A6F4468D6C3}"}',
+           '$06$04ab$00c$07$10$86$C96$8C$91$F2$A0M$B2$D0:oDh$D6$C3');
+  CheckTlv('{"6":"IP:10.0.0.5,1.2.3.4","9": "BASE64:Zm9vYmFy"}',
+           '$06$08$0A$00$00$05$01$02$03$04$09$06foobar');
+  CheckTlv('{6:true,7:{0:"a",1:"b"},8:"c"}',
+           '$06$01$01$07$06$00$01a$01$01b$08$01c');
+  CheckTlv('{6:"cidr:192.168.1.0/24,10.0.0.5"}',
+           '$06$08$18$C0$A8$01$0A$00$00$05');
+  CheckTlv('{6:["cidr:192.168.1.0/24", "10.0.0.5"]}',
+           '$06$08$18$C0$A8$01$0A$00$00$05');
   // validate client DISCOVER disc from WireShark
   refdisc := Base64ToBin(
     'AQEGAAAAPR0AAAAAAAAAAAAAAAAAAAAAAAAAAAALggH8QgAAAAAAAAAAAAAAAAAAAAAAAAAA' +
@@ -1747,8 +1830,15 @@ begin
   ip4 := DhcpIP4(pointer(refack), lens[doDhcpServerIdentifier]);
   CheckEqual(IP4ToText(@ip4), '192.168.0.1');
   // validate TDhcpProcess logic (without any actual UDP transmission)
+  settings := TDhcpServerSettings.Create;
   server := TDhcpProcess.Create;
   try
+    // custom settings for our tests
+    settings.AddScope; // with default subnet
+    CheckEqual(settings.Scope[0].SubnetMask, '192.168.1.1/24');
+    settings.Scope[0].SubnetMask := '192.168.0.1/14'; // allow 262,144 IPs
+    //ConsoleObject(settings);
+    //ConsoleWrite(ObjectToIni(settings, 'Dhcp'));
     // setup the DHCP server logic
     server.Log := TSynLog;
     Check(server.FileName = '');
@@ -1758,36 +1848,38 @@ begin
     server.FileName := fn;
     Check(not FileExists(fn), fn);
     Check(server.FileName = fn);
-    server.Setup({settings=}nil); // fill with our default subnet
+    server.Setup(settings);
+    // validate metrics persistence
     server.MetricsFolder := WorkDir;
     json := server.SaveMetricsToJson;
     CheckUtf8(IsValidJson(json, {strict=}true), json);
-    server.ConsolidateMetrics(m1);
+    server.ComputeMetrics(m1);
     CheckEqual(MetricsToJson(m1), json);
     // precompute some random MAC addresses and setup a few statics
-    n := 200;
+    n := 2000;
     SetLength(macs, n);
     for i := 0 to n - 1 do
       Check(IsZero(macs[i]));
     rnd.Fill(pointer(macs), SizeOf(macs[0]) * n);
-    Check(server.AddStatic('192.168.1.100'));
-    Check(server.AddStatic(Join([MacToText(@macs[10]), '=192.168.1.110'])));
-    Join([MacToText(@macs[1]), '=192.168.1.110'], txt);
+    Check(server.AddStatic('192.168.0.100'));
+    Check(server.AddStatic(Join([MacToText(@macs[10]), '=192.168.0.110'])));
+    Join([MacToText(@macs[1]), '=192.168.0.110'], txt);
     Check(not server.AddStatic(txt));
-    Check(server.RemoveStatic('192.168.1.110'));
+    Check(server.RemoveStatic('192.168.0.110'));
     Check(server.AddStatic(txt));
-    Check(not server.AddStatic('192.168.0.100'));
-    Check(not server.RemoveStatic('192.168.1.111'));
-    Check(server.AddStatic('414243444546474849=192.168.1.111'));
-    Check(not server.AddStatic('414243444546474849=192.168.1.111'));
-    Check(not server.AddStatic('514243444546474849=192.168.1.111'));
-    Check(not server.AddStatic('414243444546474849=192.168.1.112'));
-    Check(server.AddStatic('616263666566676869=192.168.1.112'));
-    Check(server.RemoveStatic('192.168.1.112'));
-    Check(not server.RemoveStatic('192.168.1.112'));
-    Check(server.RemoveStatic('192.168.1.111'));
-    Check(not server.RemoveStatic('192.168.1.111'));
+    Check(not server.AddStatic('2.167.1.100'));
+    Check(not server.RemoveStatic('192.168.0.111'));
+    Check(server.AddStatic('414243444546474849=192.168.0.111'));
+    Check(not server.AddStatic('414243444546474849=192.168.0.111'));
+    Check(not server.AddStatic('514243444546474849=192.168.0.111'));
+    Check(not server.AddStatic('414243444546474849=192.168.0.112'));
+    Check(server.AddStatic('616263666566676869=192.168.0.112'));
+    Check(server.RemoveStatic('192.168.0.112'));
+    Check(not server.RemoveStatic('192.168.0.112'));
+    Check(server.RemoveStatic('192.168.0.111'));
+    Check(not server.RemoveStatic('192.168.0.111'));
     Check(server.FileName = fn);
+    Check(server.GetScope('192.168.0.1') <> nil);
     Check(server.GetScope('192.168.1.1') <> nil);
     Check(server.GetScope('8.8.8.8') = nil);
     CheckEqual(server.SaveToText, CRLF);
@@ -1802,9 +1894,9 @@ begin
     Check(DhcpParse(@d.Send, n, lens, @fnd) = dmtOffer);
     Check(fnd = FND_RESP + [doDhcpClientIdentifier]);
     sip4 := DhcpIP4(@d.Send, lens[doDhcpServerIdentifier]);
-    CheckEqual(IP4ToText(@sip4), '192.168.1.1');
+    CheckEqual(IP4ToText(@sip4), '192.168.0.1');
     CheckEqual(d.Send.siaddr, sip4);
-    CheckEqual(DhcpIP4(@d.Send, lens[doSubnetMask]), IP4Netmask(24));
+    CheckEqual(DhcpIP4(@d.Send, lens[doSubnetMask]), IP4Netmask(14));
     CheckEqual(DhcpInt(@d.Send, lens[doDhcpRenewalTime]),   60);
     CheckEqual(DhcpInt(@d.Send, lens[doDhcpRebindingTime]), 105);
     CheckEqual(DhcpInt(@d.Send, lens[doDhcpLeaseTime]),     120);
@@ -1822,13 +1914,13 @@ begin
       Check(DhcpParse(@d.Send, n, lens, @fnd) = dmtAck);
       Check(fnd = FND_RESP + [doDhcpClientIdentifier]);
       sip4 := DhcpIP4(@d.Send, lens[doDhcpServerIdentifier]);
-      CheckEqual(IP4ToText(@sip4), '192.168.1.1');
+      CheckEqual(IP4ToText(@sip4), '192.168.0.1');
       CheckEqual(d.Send.siaddr, sip4);
       if ip4 = 0 then
         ip4 := d.Send.ciaddr
       else
         CheckEqual(d.Send.ciaddr, ip4, 'consecutive ips');
-      CheckEqual(DhcpIP4(@d.Send, lens[doSubnetMask]), IP4Netmask(24));
+      CheckEqual(DhcpIP4(@d.Send, lens[doSubnetMask]), IP4Netmask(14));
       CheckEqual(DhcpInt(@d.Send, lens[doDhcpRenewalTime]),   60);
       CheckEqual(DhcpInt(@d.Send, lens[doDhcpRebindingTime]), 105);
       CheckEqual(DhcpInt(@d.Send, lens[doDhcpLeaseTime]),     120);
@@ -1836,16 +1928,16 @@ begin
     d.Recv := d.Send;
     d.RecvLen := n;
     Check(server.ComputeResponse(d) < 0, 'ack');
-    Check(d.HostName^ = '', 'no hostname');
+    Check(d.RecvHostName^ = '', 'no hostname');
     CheckEqual(server.Count, 1);
     txt := server.SaveToText;
     CheckNotEqual(txt, CRLF, 'offer not saved');
-    Check(PosEx(' 00:0b:82:01:fc:42 192.168.1.10', txt) <> 0, 'mac ip saved');
+    Check(PosEx(' 00:0b:82:01:fc:42 192.168.0.10', txt) <> 0, 'mac ip saved');
     Check(length(txt) < 1000, 'saved len');
     CheckSaveToTextMatch(txt);
     d.Recv.cookie := 0;
     Check(server.ComputeResponse(d) < 0, 'invalid frame');
-    // make 200 concurrent requests - more than 2M handshakes per second ;)
+    // make N concurrent requests
     n := length(macs);
     SetLength(ips, n);
     timer.Start;
@@ -1855,15 +1947,17 @@ begin
       hostname := 'HOST';
       AppendShortCardinal(i, hostname);
       f := DhcpClient(d.Recv, dmtDiscover, macs[i]);
-      DhcpAddOption(f, doHostName, @hostname[1], length(hostname));
+      DhcpAddOptionShort(f, doHostName, hostname);
       f^ := #255;
       d.RecvLen := f - PAnsiChar(@d.Recv) + 1;
       Check(IsEqual(macs[i], PNetMac(@d.Recv.chaddr)^));
       CheckNotEqual(xid, d.Recv.xid);
       xid := d.Recv.xid;
+      PInt64(@d.RecvLensRai)^ := -1;
       Check(server.ComputeResponse(d) > 0, 'request#');
       CheckEqual(d.Send.xid, xid);
-      Check(d.HostName^ = hostname, 'hostname');
+      Check(IsZero(THash128(d.RecvLensRai)), 'rai');
+      Check(d.RecvHostName^ = hostname, 'hostname');
       Check(IsEqual(macs[i], PNetMac(@d.Recv.chaddr)^));
       Check(IsEqual(macs[i], PNetMac(@d.Send.chaddr)^));
       ips[i] := d.Send.ciaddr; // OFFERed IP
@@ -1878,14 +1972,15 @@ begin
     txt := server.SaveToText;
     CheckSaveToTextMatch(txt);
     CheckNotEqual(txt, CRLF, 'offer not saved');
-    Check(PosEx(' 00:0b:82:01:fc:42 192.168.1.10', txt) <> 0, 'saved 2');
-    CheckEqual(PosEx(' 192.168.1.100', txt), 0, 'no static ip');
-    Check(PosEx(' 192.168.1.101', txt) <> 0, 'saved 3');
-    Check(PosEx(' 192.168.1.109', txt) <> 0, 'saved 4');
-    CheckEqual(PosEx(' 192.168.1.110', txt), 0, 'no static mac=ip');
-    Check(PosEx(' 192.168.1.111', txt) <> 0, 'saved 5');
-    CheckEqual(PosEx(MacToText(@macs[1]), txt), 0, 'no static mac=ip');
-    CheckNotEqual(PosEx(MacToText(@macs[10]), txt), 0, 'saved 6');
+    Check(PosEx(' 00:0b:82:01:fc:42 192.168.0.10', txt) <> 0, 'saved 2');
+    CheckEqual(PosEx(' 192.168.0.100', txt), 0, 'no static ip');
+    Check(PosEx(' 192.168.0.101', txt) <> 0, 'saved 3');
+    Check(PosEx(' 192.168.0.109', txt) <> 0, 'saved 4');
+    CheckEqual(PosEx(' 192.168.0.110', txt), 0, 'static ip');
+    Check(PosEx(' 192.168.0.111', txt) <> 0, 'saved 5');
+    CheckEqual(PosEx(MacToText(@macs[1]), txt), 0, 'static mac1');
+    for i := 2 to 100 do
+      CheckNotEqual(PosEx(MacToText(@macs[i]), txt), 0, 'no static macs');
     Check(length(txt) > 2000, 'saved len2');
     // validate ParseMacIP()
     for i := 0 to n - 1 do
@@ -1930,9 +2025,9 @@ begin
     Check(FileExists(fn), 'file after OnIdle');
     // benchmark OnIdle() performance
     timer.Start;
-    for i := 1 to n * 10 do // increasing tix32 to trigger CheckOutdated
+    for i := 1 to 2000 do // increasing tix32 to trigger CheckOutdated
       CheckEqual(server.OnIdle((i * 1000) mod 6000), 0, 'onidle');
-    NotifyTestSpeed('DHCP OnIdle', n * 10, 0, @timer);
+    NotifyTestSpeed('DHCP OnIdle', 2000, 0, @timer);
     // ensure OnIdle() did persist the file on disk
     CheckEqual(server.Count, n, 'count');
     Check(server.FileName = fn, fn);
@@ -1963,17 +2058,30 @@ begin
     CheckEqual(m1[dsmStaticHits] + m1[dsmDynamicHits],
                m1[dsmDiscover]   + m1[dsmRequest], 'hits');
     Check(not IsEqual(m1, m2), 'm2');
-    server.ConsolidateMetrics(m2);
-    Check(IsEqual(m1, m2), 'ConsolidateMetrics12');
+    server.ComputeMetrics(m2);
+    Check(IsEqual(m1, m2), 'ComputeMetrics12');
     server.SaveMetricsFolder({csv=}true);
     // clear all previous leases
     server.ClearLeases;
+    server.ComputeMetrics(m2);
+    Check(not IsZero(m2));
+    Check(IsEqual(m1, m2), 'metrics after ClearLeases');
+    CheckEqual(m2[dsmDecline], 0);
+    server.ResetMetrics;
+    server.ComputeMetrics(m2);
+    Check(IsZero(m2));
+    Check(not IsEqual(m1, m2), 'metrics after ResetMetrics');
     CheckEqual(server.Count, 0, 'after clear');
     CheckEqual(server.SaveToText, CRLF, 'after clear');
     // validate DECLINE process - and option 82 Relay Agent
     CheckEqual(server.OnIdle(1), 0, 'onidle'); // trigger MaxDeclinePerSec process
     f := DhcpClient(d.Recv, dmtDiscover, macs[0]);
-    DhcpAddOption(f, doDhcpAgentOptions, @OPTION82[1], 7);
+    opt82[0] := #6;
+    opt82[1] := #1;                     // T = circuit-id
+    opt82[2] := #4;                     // L = 4
+    PCardinal(@opt82[3])^ := $41424344; // V = DCBA
+    Check(PShortString(@opt82[2])^ = 'DCBA', 'DCBA');
+    DhcpAddOptionShort(f, doRelayAgentInformation, opt82);
     f^ := #255;
     d.RecvLen := f - PAnsiChar(@d.Recv) + 1;
     Check(IsEqual(macs[0], PNetMac(@d.Recv.chaddr)^));
@@ -1983,12 +2091,19 @@ begin
     Check(l > 0, 'request1');
     CheckEqual(d.Send.xid, xid);
     CheckNotEqual(d.Send.ciaddr, ips[0]);
+    Check(not IsZero(THash128(d.RecvLensRai)), 'rai_opt82');
+    for dor := low(dor) to high(dor) do
+      Check((d.RecvLensRai[dor] <> 0) = (dor = dorCircuitId));
+    Check(DhcpData(@d.Recv, d.RecvLensRai[dorCircuitId])^ = 'DCBA');
+    Check(DhcpData(@d.Recv, d.RecvLensRai[dorRemoteId])^[0] = #0);
     Check(server.GetScope(d.Send.ciaddr) <> nil);
-    CheckEqual(lens[doDhcpAgentOptions], 0, 'no relay agent');
+    CheckEqual(lens[doRelayAgentInformation], 0, 'no relay agent');
     Check(DhcpParse(@d.Send, l, lens, @fnd) = dmtOffer);
-    Check(fnd = FND_RESP + [doDhcpAgentOptions]);
-    CheckNotEqual(lens[doDhcpAgentOptions], 0, 'propagated relay agent');
-    Check(DhcpData(@d.Send, lens[doDhcpAgentOptions])^ = OPTION82);
+    Check(fnd = FND_RESP + [doRelayAgentInformation]);
+    CheckNotEqual(lens[doRelayAgentInformation], 0, 'propagated relay agent');
+    Check(DhcpData(@d.Send, lens[doRelayAgentInformation])^ = opt82, 'o82a');
+    Check(DhcpIdem(@d.Send, lens[doRelayAgentInformation], opt82), 'o82b');
+    Check(not DhcpIdem(@d.Send, lens[doRelayAgentInformation], 'totoro'), 'o82c');
     ips[0] := d.Send.ciaddr;
     f := DhcpClient(d.Recv, dmtDecline, macs[0]);
     d.RecvLen := f - PAnsiChar(@d.Recv) + 1;
@@ -2004,8 +2119,18 @@ begin
     Check(server.GetScope(d.Send.ciaddr) <> nil);
     CheckNotEqual(d.Send.ciaddr, ips[0]);
     CheckEqual(server.SaveToText, CRLF, 'declined no offer');
+    server.ComputeMetrics(m2);
+    CheckEqual(m2[dsmDecline], 1);
+    CheckEqual(m2[dsmDiscover], 2);
+    CheckEqual(m2[dsmOffer], 2);
+    CheckEqual(m2[dsmOption82Hits], 1);
+    Check(not IsEqual(m1, m2), 'ComputeMetrics Declined');
+    json := MetricsToJson(m2, [woDontStoreVoid]);
+    CheckEqual(json, '{"discover":2,"offer":2,"decline":1,"lease-allocated":2,' +
+      '"dynamic-hits":2,"option-82-hits":1}');
   finally
     server.Free;
+    settings.Free;
   end;
 end;
 

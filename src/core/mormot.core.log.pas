@@ -2043,17 +2043,32 @@ const
     ssInfo,    // sllDDDInfo
     ssDebug);  // sllMonitoring
 
-/// append some information to a syslog message memory buffer
-// - following https://datatracker.ietf.org/doc/html/rfc5424
-// - ready to be sent via UDP or TLS to a syslog remote server
+/// raw computation of a RFC 5424 syslog message content into a memory buffer
 // - returns the number of bytes written to destbuffer (with destsize > 127)
 function SyslogMessage(facility: TSyslogFacility; severity: TSyslogSeverity;
-  const msg, procid, msgid: RawUtf8; destbuffer: PUtf8Char; destsize: PtrInt;
-  trimmsgfromlog: boolean; const appname: RawUtf8 = ''): PtrInt;
+  P: PAnsiChar; Len: PtrInt; const procid, msgid: RawUtf8; destbuffer: PUtf8Char;
+  destsize: PtrInt; trimmsgfromlog: boolean; const appname: RawUtf8 = ''): PtrInt;
+
+/// high-level computation of a RFC 5424 syslog message content
+// - ready to be sent via UDP or TLS to a syslog remote server
+// - TlsTcpFormat will prepend <len><space><sysmessage> as per RFC
+// - use Temp as temporary storage, and return Dest/result bytes from it
+function SyslogPrepare(Level: TSynLogLevel; Text: PUtf8Char; Len: PtrInt;
+  var Temp: TBuffer2K; out Dest: PUtf8Char; TlsTcpFormat: boolean = true;
+  TrimSynLogDate: boolean = false; const AppName: RawUtf8 = '';
+  const MsgId: RawUtf8 = ''): PtrInt;
+
+/// high-level computation of a RFC 3164 original BSD syslog message content
+// - as expected locally on /var/log unix socket dgram in most POSIX systems
+// but not on systemd Linux which is incompatible and favors sd_journal_send()
+// - returns the number of bytes written to Temp
+function SyslogBsdPrepare(Level: TSynLogLevel; Text: PUtf8Char; Len: PtrInt;
+  var Temp: TBuffer2K; TrimSynLogDate: boolean = false;
+  const AppName: RawUtf8 = ''): PtrInt;
 
 /// send an event to the Operating System journal
 // - use systemd library on Linux with fallback to syslog() on POSIX
-// - on Windows, calls OutputDebugStringW() - TODO: use ETW API
+// - on Windows, calls OutputDebugStringW() - TODO: use bloated ETW API?
 // - as used e.g. for TSynLogFamily.EchoToConsoleUseJournal process
 // - input text would detect and trim "20200615 08003008 xxxx" TSynLog format,
 // unless TrimSynLogDate is forced to false
@@ -2126,7 +2141,7 @@ end;
    Then this .mab file can be distributed along the executable, or just
    appended to it after build.
 
-   Code below is inspired - but highly rewritten - from RTL's linfodwrf.pp }
+   Code below was inspired - but highly rewritten - from RTL's linfodwrf.pp }
 
 type
   TDwarfLineInfoHeader64 = packed record
@@ -2319,7 +2334,7 @@ begin
   s[0] := #0;
   while read.NextByteSafe(@c) and
         ({%H-}c <> #0) do
-    AppendShortCharSafe(c, @s);
+    AppendShortCharSafe(c, s);
 end;
 
 procedure TDwarfReader.ReadAbbrevTable(file_offset, file_size: QWord);
@@ -2566,7 +2581,7 @@ begin
     else if Pos('\', s) > 0 then
       c := '\';
     if s[ord(s[0])] <> c then
-      AppendShortCharSafe(c, @s);
+      AppendShortCharSafe(c, s);
     AddRawUtf8(dirs, dirsn, ShortStringToUtf8(s));
   until false;
   filesn := 0;
@@ -2782,7 +2797,7 @@ begin
           s := debug.fSymbols.NewPtr;
           if (typname[0] <> #0) and
              (typname[ord(typname[0])] <> '.') then
-            AppendShortCharSafe('.', @typname);
+            AppendShortCharSafe('.', typname);
           // DWARF2 symbols are emitted as UPPER by FPC -> lower for esthetics
           if header64.version < 3 then
             ShortStringToAnsi7String(lowercase(typname + name), s^.name);
@@ -3434,7 +3449,7 @@ procedure TDebugFile.SaveToJson(W: TTextWriter);
 begin
   if Rtti.RegisterType(TypeInfo(TDebugSymbol)).Props.Count = 0 then
     Rtti.RegisterFromText([TypeInfo(TDebugSymbol), _TDebugSymbol,
-                           TypeInfo(TDebugUnit), _TDebugUnit]);
+                           TypeInfo(TDebugUnit),   _TDebugUnit]);
   W.AddShort('{"Symbols":');
   fSymbols.SaveToJson(W, []);
   W.AddShort(',"Units":');
@@ -3707,7 +3722,7 @@ begin
   if u >= 0 then
   begin
     AppendShortAnsi7String(Units[u].FileName, result);
-    AppendShortCharSafe(' ', @result);
+    AppendShortCharSafe(' ', result);
   end
   else
     result[0] := #0;
@@ -3717,7 +3732,7 @@ begin
   begin
     AppendShortTwoChars(ord(' ') + ord('(') shl 8, @result);
     AppendShortCardinal(line, result);
-    AppendShortCharSafe(')', @result);
+    AppendShortCharSafe(')', result);
   end;
 end;
 
@@ -8238,14 +8253,15 @@ begin
   len := Utf8TruncatedLength(pointer(P), len, maxLen);
 end;
 
+const
+  MAX_SYSLOG = 1500; // mimics UDP/Ethernet frame truncation
+
 function SyslogMessage(facility: TSyslogFacility; severity: TSyslogSeverity;
-  const msg, procid, msgid: RawUtf8; destbuffer: PUtf8Char; destsize: PtrInt;
-  trimmsgfromlog: boolean; const appname: RawUtf8): PtrInt;
+  P: PAnsiChar; Len: PtrInt; const procid, msgid: RawUtf8; destbuffer: PUtf8Char;
+  destsize: PtrInt; trimmsgfromlog: boolean; const appname: RawUtf8): PtrInt;
 var
-  P: PAnsiChar;
   start: PUtf8Char;
   name: PRawUtf8;
-  len: PtrInt;
   st: TSynSystemTime;
 begin
   result := 0;
@@ -8279,8 +8295,6 @@ begin
   destbuffer := PrintUSAscii(destbuffer, '');              // no STRUCTURED-DATA
   destbuffer^ := ' ';
   inc(destbuffer);
-  P := pointer(msg);
-  len := length(msg);
   TrimSynLogMessage(PUtf8Char(P), len, trimmsgfromlog,
     destsize - (destbuffer - start) - 3);
   if len < 2 then
@@ -8295,8 +8309,51 @@ begin
   result := (destbuffer - start) + len;
 end;
 
-const
-  MAX_SYSLOG = 1500; // mimics UDP/Ethernet frame truncation
+function SyslogPrepare(Level: TSynLogLevel; Text: PUtf8Char; Len: PtrInt;
+  var Temp: TBuffer2K; out Dest: PUtf8Char; TlsTcpFormat, TrimSynLogDate: boolean;
+  const AppName, MsgId: RawUtf8): PtrInt;
+var
+  DestEnd: PAnsiChar;
+begin
+  Dest := @Temp[8];
+  result := SyslogMessage(sfUser, LOG_TO_SYSLOG[Level], pointer(Text), Len,
+    UInt32ToUtf8(GetCurrentProcessId), MsgId, Dest, MAX_SYSLOG, TrimSynLogDate, AppName);
+  if (result <= 0) or
+     not TlsTcpFormat then
+    exit;
+  DestEnd := @Temp[result + 8];
+  Temp[7] := ' '; // return as <len>' '<sysmessage>
+  Dest := pointer(StrUInt32(PAnsiChar(@Temp[7]), result));
+  result := DestEnd - Dest;
+end;
+
+function SyslogBsdPrepare(Level: TSynLogLevel; Text: PUtf8Char; Len: PtrInt;
+  var Temp: TBuffer2K; TrimSynLogDate: boolean; const AppName: RawUtf8): PtrInt;
+var
+  now: TSynSystemTime;
+  day: TShort3;
+  h, a: string[32]; // truncated to 32 chars for legacy compatibility reasons
+begin // <PRI>TIMESTAMP SP HOSTNAME SP TAG[: ]MESSAGE
+  now.FromNowLocal; // the RFC 4.1.2 states it is the local time :(
+  day[0] := #2;
+  PWord(@day[1])^ := TwoDigitLookupW[now.Day];
+  if day[1] = '0' then
+    day[1] := ' ';
+  h := Executable.Host;
+  if AppName <> '' then
+    a := AppName
+  else
+    a := Executable.ProgramName;
+  result := FormatBuffer('<%>% % %:%:% % %[%]: ',
+    [ord(LOG_TO_SYSLOG[Level]) + ord(sfUser) shl 3, HTML_MONTH_NAMES[now.Month],
+     day, UInt2DigitsToShortFast(now.Hour), UInt2DigitsToShortFast(now.Minute),
+     UInt2DigitsToShortFast(now.Second), h, a, GetCurrentProcessId],
+    @Temp, SizeOf(Temp));
+  TrimSynLogMessage(Text, Len, TrimSynLogDate, high(Temp) - result);
+  MoveFast(Text^, Temp[result], Len);
+  inc(result, Len);
+  Temp[result] := #0; // for debugging
+end;
 
 {$ifdef OSLINUX} // compatibility function for old mORMot code
 function SystemdEcho(Level: TSynLogLevel; const Text: RawUtf8;
@@ -8326,7 +8383,7 @@ begin
   TrimSynLogMessage(Text, Len, TrimSynLogDate, MAX_SYSLOG);
   if len < 2 then
     exit; // nothing to send
-  // call the proper System API - note that ETW is not yet supported since huge
+  // call the proper OS API - note that bloated Windows ETW is not yet supported
   {$ifdef OSWINDOWS}
   WinDebugOutput(Text, len); // call OutputDebugStringW() API
   result := true;

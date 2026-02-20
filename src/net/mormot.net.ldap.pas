@@ -3386,7 +3386,7 @@ var
 
 begin
   result := '';
-  text := TrimU(Filter);
+  TrimU(Filter, text);
   if text = '' then
     exit;
   if text[1] = '(' then
@@ -3811,7 +3811,7 @@ end;
 
 procedure AttributeNameNormalize(var AttrName: RawUtf8);
 var
-  existing: pointer;
+  existing: pointer; // interned value with no RefCnt / try..finally
 begin
   if AttrName = '' then
     exit;

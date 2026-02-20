@@ -418,8 +418,15 @@ begin
   CheckEqual(SnakeCase('Abc_Def'), 'abc_def');
   CheckEqual(SnakeCase('AbcDef_'), 'abc_def_');
   CheckEqual(SnakeCase('Abc__Def'), 'abc_def');
+  CheckEqual(SnakeCase('Abc__Def', '-'), 'abc-def');
   CheckEqual(SnakeCase('AbcDef__'), 'abc_def_');
   CheckEqual(SnakeCase('Abc__Def__'), 'abc_def_');
+  CheckEqual(SnakeCase('Abc12Def'), 'abc_12_def');
+  CheckEqual(SnakeCase('X64Def', '-'), 'x64-def');
+  CheckEqual(SnakeCase('XY64Def', '-'), 'xy-64-def');
+  CheckEqual(SnakeCase('column1', '-'), 'column-1');
+  CheckEqual(SnakeCase('column100', '-'), 'column-100');
+  CheckEqual(SnakeCase('Column 1', '-'), 'column-1');
   CheckEqual(SnakeCase('variable name'), 'variable_name');
   CheckEqual(SnakeCase('Variable Name'), 'variable_name');
   CheckEqual(SnakeCase('VARIABLE NAME'), 'variable_name');
@@ -445,9 +452,9 @@ begin
     CheckEqual(v, v2, 'SetCase(self)');
     Append(all, v, ',');
   end;
-  CheckEqual(all, 'NoTrim,TrimLeft,Un camel case,Un Camel Title,lowercase,' +
-    'lowerCaseFirst,UPPERCASE,snake_case,SCREAMING_SNAKE_CASE,kebab-case,dot.case,' +
-    'TitleCase,camelCase,PascalCase,');
+  CheckEqual(all, 'NoTrim,TrimLeft,AnyRemoved,Un camel case,Un Camel Title,' +
+    'lowercase,lower-case,lowerCaseFirst,UPPERCASE,snake_case,SCREAMING_SNAKE_CASE,' +
+    'kebab-case,dot.case,TitleCase,camelCase,PascalCase,');
 end;
 
 function GetBitsCount64(const Bits; Count: PtrInt): PtrInt;
@@ -3100,6 +3107,20 @@ begin
     Check(LoadJsonInPlace(h2, pointer(s), PT_INFO[pt]) <> nil);
     CheckUtf8(CompareMem(@h, @h2, PT_SIZE[pt]), '%', [PT_INFO[pt].RawName]);
   end;
+  // validate IdentifierGuid()/DotNetIdentifierGuid()
+  IdentifierGuid('www.opentofu.org', g, UUID_DNS);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'df1e675d-b743-5f6c-9952-6311d0f141df');
+  Check(not IsRandomGuid(@g), 'from identifier');
+  IdentifierGuid('https://www.opentofu.org/', g, UUID_URL);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'ace93eea-1a2c-5eed-b41b-718be15d2e50');
+  IdentifierGuid('1.3.6.1.4', g, UUID_OID);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, 'af9d40a5-7a36-5c07-b23a-851cd99fbfa5');
+  IdentifierGuid('CN=Example,C=GB', g, UUID_X500);
+  ToUtf8(g, s, @TwoDigitsHexLower);
+  CheckEqual(s, '84e09961-4aa4-57f8-95b7-03edb1073253');
   DotNetIdentifierGuid('MyCompany.MyComponent', g);
   ToUtf8(g, s, @TwoDigitsHexLower);
   CheckEqual(s, 'ce5fa4ea-ab00-5402-8b76-9f76ac858fb5');
@@ -5491,10 +5512,13 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
 
   procedure CheckTrimCopy(const S: RawUtf8; start, count: PtrInt);
   var
-    t: RawUtf8;
+    t, c, u: RawUtf8;
   begin
     trimcopy(S, start, count, t);
-    checkEqual(t, TrimU(copy(S, start, count)));
+    c := copy(S, start, count);
+    CheckEqual(t, TrimU(c));
+    TrimU(c, u);
+    CheckEqual(t, u);
   end;
 
 var
@@ -9541,13 +9565,15 @@ procedure TTestCoreBase.Debugging;
   end;
 
 var
-  tmp: array[0..512] of AnsiChar;
+  tmp: TBuffer2K;
+  dst, up: PUtf8Char;
   msg, n, v: RawUtf8;
   os, os2: TOperatingSystem;
   ld: TLinuxDistribution;
   islinux: boolean;
   osv: TOperatingSystemVersion;
   len: integer;
+  //sock: TNetSocket;
 begin
   // validate UserAgentParse()
   Check(not UserAgentParse('toto (mozilla)', n, v, os));
@@ -9608,21 +9634,65 @@ begin
     for os2 := low(os) to high(os) do
       Check((OS_INITIAL[os2] = OS_INITIAL[os]) = (os2 = os), 'OS_INITIAL');
   end;
-  // validate SyslogMessage()
+  // validate Syslog messages formatting
+  msg := ' test  ';
+  dst := @tmp;
   FillcharFast(tmp, SizeOf(tmp), 1);
-  len := SyslogMessage(sfAuth, ssCrit, ' test  ', '', '', tmp, SizeOf(tmp), false);
+  len := SyslogBsdPrepare(sllInfo, pointer(msg), length(msg), tmp);
+  // e.g. '<14>Feb 11 13:45:19 dev-ab mormot2tests[23014]: test'
+  Check(len > 10);
+  Check(IdemPChar(dst, PAnsiChar('<14>')));
+  Check(tmp[len] = #0, 'ending #0');
+  Check(tmp[len + 1] = #1, 'buffer');
+  {if NewUnixSocket('/dev/log', sock) = nrOk then
+  begin
+    writeln(sock.Send(@tmp, len));
+    sock.Close;
+  end;}
+  FillcharFast(tmp, SizeOf(tmp), 1);
+  len := SyslogMessage(sfAuth, ssCrit, pointer(msg), length(msg),
+    '', '', tmp, SizeOf(tmp), false);
+  // e.g. <34>1 2026-02-11T15:01:23.552Z dev-ab mormot2tests - - - test
   Check(len > 50); // len different for every PC, due to PC name differences
-  tmp[len] := #0;
-  Check(IdemPChar(PUtf8Char(@tmp), PAnsiChar('<34>1 ')));
-  Check(PosEx(' - - - test', tmp) = len - 10);
+  Check(IdemPChar(dst, PAnsiChar('<34>1 ')));
+  up := ' - - - TEST';
+  CheckEqual(StrPosI(up, dst) - dst, len - 11);
   msg := RawUtf8OfChar('+', 300);
-  len := SyslogMessage(sfLocal4, ssNotice, msg, 'proc', 'msg', tmp, 300, false);
-  Check(IdemPChar(PUtf8Char(@tmp), PAnsiChar('<165>1 ')));
-  Check(PosEx(' proc msg - ++++', tmp) > 1);
+  len := SyslogMessage(sfLocal4, ssNotice, pointer(msg), length(msg),
+    'proc', 'msg', tmp, 300, false);
+  Check(IdemPChar(dst, PAnsiChar('<165>1 ')));
+  up := ' PROC MSG - ++++';
+  Check(StrPosI(up, dst) <> nil, 'proc msg');
   Check(len < 300, 'truncated to avoid buffer overflow');
   Check(tmp[len - 1] = '+', 'last+');
   Check(tmp[len] = #0, 'ending #0');
   Check(tmp[len + 1] = #1, 'buffer');
+  FillcharFast(tmp, len, 1);
+  len := SyslogPrepare(sllInfo, pointer(msg), length(msg), tmp, dst, {tls=}false);
+  Check(len > 50);
+  Check(len < 400);
+  Check(IdemPChar(dst, PAnsiChar('<14>1 ')));
+  Check(dst[len - 1] = '+', 'last+');
+  Check(dst[len] = #0, 'ending #0');
+  Check(dst[len + 1] = #1, 'buffer');
+  // '361 <14>1 2026-02-11T12:03:02.386Z dev-ab mormot2tests 20096 - - +++++...'
+  FillcharFast(dst^, len, 1);
+  len := SyslogPrepare(sllInfo, pointer(msg), length(msg), tmp, dst, {tls=}true);
+  Check(StrPosI(pointer(msg), dst) <> nil, 'msg in syslog');
+  FormatUtf8(' % ', [GetCurrentProcessId], v);
+  Check(StrPosI(pointer(v), dst) <> nil, 'pid in syslog');
+  UpperCaseCopy(Executable.Host, v);
+  Check(StrPosI(pointer(v), dst) <> nil, 'host in syslog');
+  UpperCaseCopy(Executable.ProgramName, v);
+  Check(StrPosI(pointer(v), dst) <> nil, 'appname in syslog');
+  Check(len > 50);
+  Check(len < 400);
+  Check(dst[3] = ' ');
+  Check(IdemPChar(@dst[4], PAnsiChar('<14>1 ')));
+  CheckEqual(GetInteger(dst), len - 4);
+  Check(dst[len - 1] = '+', 'last+');
+  Check(dst[len] = #0, 'ending #0');
+  Check(dst[len + 1] = #1, 'buffer');
   // validate TSynLogFile
   Test('D:\Dev\lib\SQLite3\exe\TestSQL3.exe 1.2.3.4 (2011-04-07 11:09:06)'#13#10 +
     'Host=MyPC User=MySelf CPU=2*0-15-1027 OS=2.3=5.1.2600 Wow64=0 Freq=3579545 ' +

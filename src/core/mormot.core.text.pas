@@ -695,7 +695,7 @@ type
     procedure AddUHex(Value: cardinal; QuotedChar: AnsiChar = '"');
       {$ifdef HASINLINE}inline;{$endif}
     /// append an Unsigned 64-bit integer Value as a String
-    procedure AddQ(Value: QWord);
+    procedure AddQ(Value: QWord; Reserve: PtrInt = 32);
       {$ifdef FPC_CPUX64}inline;{$endif} // URW1147 on Delphi XE2
     /// append an Unsigned 64-bit integer Value as a quoted hexadecimal String
     procedure AddQHex(Value: Qword; QuotedChar: AnsiChar = '"');
@@ -1017,6 +1017,11 @@ type
     // - return the position to write text
     // - but WON'T increase the instance position: caller should do inc(B, ...)
     function AddPrepare(Len: PtrInt): pointer;
+    /// prepare direct access to the internal output buffer
+    // - return the position to write text
+    // - but WON'T increase the instance position: caller should do inc(B, ...)
+    function AddPrepareShort(Len: PtrInt): pointer;
+      {$ifdef HASINLINE}inline;{$endif}
     /// write some data Base64 encoded
     // - this method will raise an ESynException: use inherited TJsonWriter instead
     procedure WrBase64(P: PAnsiChar; Len: PtrUInt; withMagic: boolean); virtual;
@@ -1196,6 +1201,10 @@ function NeedsXmlEscape(text: PUtf8Char): boolean;
 // - just a wrapper around TTextWriter.AddXmlEscape() process
 function XmlEscape(const text: RawUtf8): RawUtf8;
 
+const
+  /// convenient parameter to EscapeHex() / UnescapeHex() binary to ASCII 7-bit
+  ESC_ASCII: TSynAnsicharSet = [#0 .. #31, '$', #127 .. #255];
+
 /// quickly identify if any character appears in an UTF-8 string
 function NeedsEscape(text: PUtf8Char; const toescape: TSynAnsicharSet): boolean;
 
@@ -1225,7 +1234,11 @@ function UnescapeHexBuffer(src, dest: PUtf8Char; escape: AnsiChar = '\'): PUtf8C
 
 /// un-escape \xx or \c encoded chars into a new RawUtf8 string
 // - any CR/LF after \ will also be ignored
-function UnescapeHex(const src: RawUtf8; escape: AnsiChar = '\'): RawUtf8;
+function UnescapeHex(const src: RawUtf8; escape: AnsiChar = '\'): RawUtf8; overload;
+
+/// un-escape \xx or \c encoded chars into a new RawUtf8 string (escape='\')
+// - any CR/LF after \ will also be ignored
+procedure UnescapeHex(var dst: RawUtf8; src: PUtf8Char; srclen: PtrInt; escape: AnsiChar); overload;
 
 /// escape as \char pair some chars from a set into a pre-allocated buffer
 // - dest^ should have at least srclen * 2 bytes, for \char pairs
@@ -1885,7 +1898,7 @@ function FormatBufferRaw(const Format: RawUtf8; Args: PVarRec; ArgsCount: PtrInt
 /// fast Format() function replacement, for UTF-8 content stored in ShortString
 // - use the same single token % (and implementation) than FormatUtf8()
 // - ShortString allows fast stack allocation, so is perfect for small content
-// - truncate result if the text size exceeds 255 bytes
+// - truncate result if the text size exceeds high(result) e.g. 255 bytes
 procedure FormatShort(const Format: RawUtf8; const Args: array of const;
   var result: ShortString);
 
@@ -1902,16 +1915,6 @@ procedure FormatString(const Format: RawUtf8; const Args: array of const;
 // - use the same single token % (and implementation) than FormatUtf8()
 function FormatString(const Format: RawUtf8; const Args: array of const): string; overload;
   {$ifdef FPC}inline;{$endif} // Delphi don't inline "array of const" parameters
-
-/// fast Format() function replacement, for UTF-8 content stored in TShort16
-// - truncate result if the text size exceeds 16 chars (17 bytes)
-procedure FormatShort16(const Format: RawUtf8; const Args: array of const;
-  var result: TShort16);
-
-/// fast Format() function replacement, for UTF-8 content stored in TShort31
-// - truncate result if the text size exceeds 31 chars (32 bytes)
-procedure FormatShort31(const Format: RawUtf8; const Args: array of const;
-  var result: TShort31);
 
 /// fast Format() function replacement, for UTF-8 content stored in variant
 function FormatVariant(const Format: RawUtf8; const Args: array of const): variant;
@@ -2689,13 +2692,13 @@ function OctToBin(const Oct: RawUtf8): RawByteString; overload;
 function GuidToText(P: PUtf8Char; guid: PByteArray; tab: PWordArray = nil): PUtf8Char;
 
 /// convert a TGuid into 38 chars encoded { text } as RawUtf8
-// - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
+// - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with braces)
 // - if you do not need the embracing { }, use ToUtf8() overloaded function
 function GuidToRawUtf8(
   {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): RawUtf8;
 
 /// convert a TGuid into 36 chars encoded text as RawUtf8
-// - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {})
+// - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without braces)
 // - if you need the embracing { }, use GuidToRawUtf8() function instead
 function ToUtf8(
   {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}guid: TGuid): RawUtf8; overload;
@@ -2706,7 +2709,7 @@ function NotNullGuidToUtf8(
   {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): RawUtf8;
 
 /// convert a TGuid into 36 chars encoded text as RawUtf8
-// - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {})
+// - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without braces)
 // - you can set tab = @TwoDigitsHexLower to force a lowercase output
 procedure ToUtf8({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid;
   var text: RawUtf8; tab: PWordArray = nil); overload;
@@ -2719,12 +2722,12 @@ function GuidArrayToCsv(const guid: array of TGuid; SepChar: AnsiChar = ',';
   tab: PWordArray = nil): RawUtf8;
 
 /// convert a TGuid into into 38 chars encoded { text } as RTL string
-// - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
+// - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with braces)
 // - this version is faster than the one supplied by SysUtils
 function GuidToString(
   {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): string;
 
-/// convert a TGuid into its standard uppercase text representation with the {}
+/// convert a TGuid into its standard uppercase text representation with braces
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}'
 // - using a ShortString will allow fast allocation on the stack, so is
 // preferred e.g. when providing a Guid to a ESynException.CreateUtf8()
@@ -2732,7 +2735,7 @@ function GuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
   guid: TGuid): TShortGuid; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// convert a TGuid into its standard uppercase text representation with the {}
+/// convert a TGuid into its standard uppercase text representation with braces
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}'
 // - using a ShortString will allow fast allocation on the stack, so is
 // preferred e.g. when providing a Guid to a ESynException.CreateUtf8()
@@ -2755,28 +2758,28 @@ function UuidToShort({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 function TextToGuid(P: PUtf8Char; Guid: PByteArray): PUtf8Char;
 
 /// convert some GUID or UUID RTL string text into a TGuid binary variable
-// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
+// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with braces)
 // - return {00000000-0000-0000-0000-000000000000} if the supplied text buffer
 // is not a valid TGuid
 function StringToGuid(const text: string): TGuid;
 
 /// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
-// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
-// or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
+// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with braces)
+// or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without braces) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
 // - return {00000000-0000-0000-0000-000000000000} if the supplied text buffer
 // is not a valid TGuid
 function RawUtf8ToGuid(const text: RawByteString): TGuid; overload;
 
 /// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
-// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
-// or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
+// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with braces)
+// or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without braces) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
 function RawUtf8ToGuid(const text: RawByteString; out guid: TGuid): boolean; overload;
 
 /// convert some GUID or UUID UTF-8 encoded text into a TGuid binary variable
-// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
-// or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
+// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with braces)
+// or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without braces) or even
 // '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
 function RawUtf8ToGuid(text: PUtf8Char; textlen: PtrInt; out guid: TGuid): boolean; overload;
 
@@ -4460,6 +4463,13 @@ begin
   result := B + 1;
 end;
 
+function TTextWriter.AddPrepareShort(Len: PtrInt): pointer;
+begin
+  if BEnd - B <= Len then // note: PtrInt(BEnd - B) could be < 0
+    FlushToStream;
+  result := B + 1;
+end;
+
 procedure TTextWriter.WriteObject(Value: TObject;
   WriteOptions: TTextWriterWriteObjectOptions);
 begin
@@ -4886,13 +4896,13 @@ begin
   AddBinToHexDisplayLower(@Value, SizeOf(Value), QuotedChar);
 end;
 
-procedure TTextWriter.AddQ(Value: QWord);
+procedure TTextWriter.AddQ(Value: QWord; Reserve: PtrInt);
 var
   tmp: TTemp24;
   P: PAnsiChar;
   Len: PtrInt;
 begin
-  if BEnd - B <= 32 then
+  if BEnd - B <= Reserve then
     FlushToStream;
   {$ifndef ASMINTEL} // our StrInt32 asm has less CPU cache pollution
   if Value <= high(SmallUInt32Utf8) then
@@ -6675,16 +6685,18 @@ begin
     end;
 end;
 
+procedure UnescapeHex(var dst: RawUtf8; src: PUtf8Char; srclen: PtrInt; escape: AnsiChar);
+begin
+  FastSetString(dst, srclen); // allocate maximum size
+  FakeSetLength(dst, UnescapeHexBuffer(src, pointer(dst), escape) - pointer(dst));
+end;
+
 function UnescapeHex(const src: RawUtf8; escape: AnsiChar): RawUtf8;
 begin
   if PosExChar(escape, src) = 0 then
     result := src // no unescape needed
   else
-  begin
-    FastSetString(result, length(src)); // allocate maximum size
-    FakeSetLength(result, UnescapeHexBuffer(
-      pointer(src), pointer(result), escape) - pointer(result));
-  end;
+    UnescapeHex(result, pointer(src), length(src), escape);
 end;
 
 function EscapeCharBuffer(src, dest: PUtf8Char; srclen: integer;
@@ -9889,30 +9901,18 @@ end;
 
 procedure FormatShort(const Format: RawUtf8; const Args: array of const;
   var result: ShortString);
+var
+  f: TFormatUtf8;
 begin
-  result[0] := AnsiChar(FormatBufferRaw(
-    Format, @Args[0], length(Args), @result[1], 255) - @result[1]);
+  f.Parse(Format, @Args[0], length(Args));
+  result[0] := AnsiChar(f.WriteMax(@result[1], high(result)) - @result[1]);
 end;
 
 function FormatToShort(const Format: RawUtf8;
   const Args: array of const): ShortString;
 begin
   result[0] := AnsiChar(FormatBufferRaw(
-    Format, @Args[0], length(Args), @result[1], 255) - @result[1]);
-end;
-
-procedure FormatShort16(const Format: RawUtf8; const Args: array of const;
-  var result: TShort16);
-begin
-  result[0] := AnsiChar(FormatBufferRaw(
-    Format, @Args[0], length(Args), @result[1], 16) - @result[1]);
-end;
-
-procedure FormatShort31(const Format: RawUtf8; const Args: array of const;
-  var result: TShort31);
-begin
-  result[0] := AnsiChar(FormatBufferRaw(
-    Format, @Args[0], length(Args), @result[1], 31) - @result[1]);
+    Format, @Args[0], length(Args), @result[1], high(result)) - @result[1]);
 end;
 
 procedure FormatString(const Format: RawUtf8; const Args: array of const;
@@ -12016,7 +12016,7 @@ end;
 
 procedure _AppendShortUuid(const u: TGuid; var s: ShortString);
 begin // much more efficient than default GUIDToString() in mormot.core.os
-  if ord(s[0]) > 255 - 36 then
+  if ord(s[0]) > high(s) - 36 then
     exit;
   GuidToText(@s[ord(s[0]) + 1], @u, @TwoDigitsHexLower);
   inc(s[0], 36);
