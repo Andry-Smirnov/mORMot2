@@ -1965,8 +1965,8 @@ begin
        (s <> 'squashfs') and
        (s <> 'nullfs') then
       _addutf8(_ProcFileSystems, s);
-    p := GotoNextLine(p);
-  until p = nil;
+    p := GotoNextLineSmall(p);
+  until p^ = #0;
   if _ProcFileSystems = nil then
     exit;
   // add some FS which may be marked as nodev but could be considered as "real"
@@ -2060,8 +2060,8 @@ begin
   // prepare and send the information to the journal
   if priority > 7 then
     priority := 7;
-  v0 := 'PRIORITY=';
-  AppendShortCardinal(priority, v0);
+  v0 := 'PRIORITY=#';
+  v0[10] := AnsiChar(priority + ord('0'));
   v[0].iov_base := @v0[1];
   v[0].iov_len := ord(v0[0]);
   PInt64(@tmp)^ := PInt64(@_MESSAGE)^;
@@ -3529,7 +3529,7 @@ const
   // read some of the /sys/class/dmi/id/* files (may require root access)
   _KNOWN: array[0..15] of record
     id: TSmbiosBasicInfo;
-    fn: string[15];
+    fn: TShort15;
   end = (
     (id: sbiBiosVendor;        fn: 'bios_vendor'),
     (id: sbiBiosVersion;       fn: 'bios_version'),
@@ -3925,8 +3925,8 @@ begin
   repeat
     AddDiskPartition(
       _GetNextSpaced(p), _GetNextSpaced(p), _GetNextSpaced(p), result, n);
-    p := GotoNextLine(p);
-  until p = nil;
+    p := GotoNextLineSmall(p);
+  until p^ = #0;
   SetLength(result, n);
 end;
 
@@ -4213,7 +4213,7 @@ procedure DoShutDown(Sig: integer; Info: PSigInfo; Context: PSigContext); cdecl;
 var
   level: TSynLogLevel;
   si_code: integer;
-  text: string[4]; // code below has no memory allocation
+  text: TShort7; // code below has no memory allocation
 begin
   if Assigned(SynDaemonInterceptLog) then
   begin
@@ -4452,7 +4452,7 @@ var
   pidfilename: TFileName;
   s: AnsiString;
 const
-  TXT: array[boolean] of string[4] = ('run', 'fork');
+  TXT: array[boolean] of TShort7 = ('run', 'fork');
 begin
   SynDaemonIntercept(onlog);
   if dofork then

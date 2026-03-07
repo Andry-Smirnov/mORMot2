@@ -9,28 +9,31 @@ unit mormot.net.dhcp;
    Simple Dynamic Host Configuration Protocol (DHCP) Protocol Support
     - Low-Level DHCP Protocol Definitions
     - Low-Level per-scope DHCP metrics
-    - Middle-Level DHCP Scope and Lease Logic
+    - Middle-Level DHCP Scope, Pool and Lease Logic
     - Middle-Level DHCP State Machine
     - High-Level Multi-Scope DHCP Server Processing Logic
 
    Implement DISCOVER, OFFER, REQUEST, DECLINE, ACK, NAK, RELEASE, INFORM.
    Background lease persistence using dnsmasq-compatible text files.
    Static IP reservation using MAC address or any other set of options (e.g. 61).
+   Properly adapt to Windows environments (e.g. options 81/119/249 support).
    Support VLAN via SubNets / Scopes, giaddr and Relay Agent Option 82.
    Versatile JSON rules for vendor-specific or user-specific options.
+   IP ranges reservation with each subnet/scope from custom JSON rules.
+   Optional DDNS propagation e.g. to Samba of fadn options 81 registrations.
    Scale up to 100k leases per subnet with minimal RAM/CPU consumption.
    No memory allocation is performed during the response computation.
    Prevent most client abuse with configurable rate limiting.
    Cross-Platform on Windows, Linux and MacOS, running in a single thread/core.
-   Meaningful and customizable logging of the actual process (e.g. into syslog).
+   Meaningful and customizable logging of the actual process (as text or syslog).
+   Optional verbose debug of all input/output frames as usable JSON objects.
    Generate detailed JSON and CSV metrics as local files, global and per scope.
-   Easy configuration via JSON or INI files.
+   Easy configuration via JSON files, with hot reloading of rules at runtime.
    Expandable in code via callbacks or virtual methods as plugins.
-   e.g. as full local PXE environment with our mormot.net.tftp.server.pas unit
+   Perfect for local PXE environment with our mormot.net.tftp.server.pas unit.
 
   *****************************************************************************
-  TODO:  - "range" reservation in "rules"
-         - DHCPv6 support (much more complex, and mostly not required)
+    TODO:  - DHCPv6 support (much more complex, and mostly not required)
 }
 
 interface
@@ -48,8 +51,12 @@ uses
   mormot.core.datetime,
   mormot.core.rtti,
   mormot.core.json,
+  mormot.core.data,
   mormot.core.log,
-  mormot.net.sock;
+  mormot.core.threads,
+  mormot.net.sock,
+  mormot.net.http,
+  mormot.net.server;
 
 
 { **************** Low-Level DHCP Protocol Definitions }
@@ -141,22 +148,24 @@ type
  // - doBroadcastAddress is option 28 (192.168.1.255)
  // - doNtpServers is option 42
  // - doVendorEncapsulatedOptions is option 43
- // - doDhcpRequestedAddress is Requested IP Address option 50 (0.0.0.0)
- // - doDhcpLeaseTime is IP Lease Duration in seconds option 51 (86400 for 24h)
- // - doDhcpMessageType is option 53 (TDhcpMessageType) - first to appear
- // - doDhcpServerIdentifier is option 54 (192.168.1.1)
- // - doDhcpParameterRequestList is option 55 (1,3,6,15,51,54)
- // - doDhcpRenewalTime is T1 in seconds option 58 (43200 for 12h)
- // - doDhcpRebindingTime is T2 in seconds option 59 (75600 for 21h)
+ // - doRequestedAddress is Requested IP Address option 50 (0.0.0.0)
+ // - doLeaseTime is IP Lease Duration in seconds option 51 (86400 for 24h)
+ // - doMessageType is option 53 (TDhcpMessageType) - first to appear
+ // - doServerIdentifier is option 54 (192.168.1.1)
+ // - doParameterRequestList is option 55 (1,3,6,15,51,54)
+ // - doRenewalTime is T1 in seconds option 58 (43200 for 12h)
+ // - doRebindingTime is T2 in seconds option 59 (75600 for 21h)
  // - doVendorClassIdentifier is PXE RFC 2132 option 60 (PXEClient)
- // - doDhcpClientIdentifier is option 61 ($01 + MAC)
+ // - doClientIdentifier is option 61 ($01 + MAC)
  // - doTftpServerName is PXE option 66 (192.168.10.10 or host name)
  // - doBootFileName is PXE option 67 (pxelinux.0)
  // - doUserClass is PXE RFC 3004 option 77 (PXEClient:Arch:00000)
+ // - doFqdn is RFC 4702 option 81 (device.example.com)
  // - doRelayAgentInformation is Relay Agent (RFC 3046) option 82 - appear last
  // - doClientArchitecture is RFC 4578 PXE option 93 as uint16 (00:00)
  // - doUuidClientIdentifier is RFC 4578 PXE option 97 ($00 + SMBIOS_UUID)
  // - doSubnetSelection is option 118 to override the giaddr value
+ // - doDomainSearch is RFC 3397 option 119 (mycompany.com)
  // - doEnd is "End Of Options" marker option 255 (not a true value)
  TDhcpOption = (
    doPad,
@@ -168,22 +177,24 @@ type
    doBroadcastAddress,
    doNtpServers,
    doVendorEncapsulatedOptions,
-   doDhcpRequestedAddress,
-   doDhcpLeaseTime,
-   doDhcpMessageType,
-   doDhcpServerIdentifier,
-   doDhcpParameterRequestList,
-   doDhcpRenewalTime,
-   doDhcpRebindingTime,
+   doRequestedAddress,
+   doLeaseTime,
+   doMessageType,
+   doServerIdentifier,
+   doParameterRequestList,
+   doRenewalTime,
+   doRebindingTime,
    doVendorClassIdentifier,
-   doDhcpClientIdentifier,
+   doClientIdentifier,
    doTftpServerName,
    doBootFileName,
    doUserClass,
+   doFqdn,
    doRelayAgentInformation,
    doClientArchitecture,
    doUuidClientIdentifier,
    doSubnetSelection,
+   doDomainSearch,
    doEnd
  );
  /// set of supported DHCP options
@@ -192,7 +203,7 @@ type
  PDhcpOptions = ^TDhcpOptions;
 
  /// decoded DHCP Option 82 relay-agent-information sub-options - see RFC 3046
- // - fixed as 8 items for TDhcpParsedRai to fit in 64-bit
+ // - fixed as 8 items for TDhcpParsedRai to fit in 128-bit
  TDhcpOptionRai = (
    dorUndefined,
    dorCircuitId,
@@ -207,22 +218,41 @@ type
 
 var
   /// uppercase identifier of each DHCP message type, e.g. 'DISCOVER' or 'ACK'
+  // - DHCP_TXT[dmtUndefined] = 'invalid' as expected by DoLog()
   DHCP_TXT: array[TDhcpMessageType] of RawUtf8;
 
-  /// KEA-like identifier of each DHCP option
-  // - https://kea.readthedocs.io/en/kea-3.1.4/arm/dhcp4-srv.html#standard-dhcpv4-options
+  /// the JSON identifier of each DHCP option, used e.g. in "rule" JSON
   // - i.e. 'subnet-mask', 'routers', 'domain-name-servers', 'host-name',
   // 'domain-name', 'broadcast-address', 'ntp-servers', 'vendor-encapsulated-options',
-  // 'dhcp-requested-address', 'dhcp-lease-time', 'dhcp-message-type',
-  // 'dhcp-server-identifier', 'dhcp-parameter-request-list', 'dhcp-renewal-time',
-  // 'dhcp-rebinding-time', 'vendor-class-identifier', 'dhcp-client-identifier',
-  // 'tftp-server-name', 'boot-file-name', 'user-class', 'relay-agent-information',
-  // 'client-architecture', 'uuid-client-identifier' and 'subnet-selection'
+  // 'requested-address', 'lease-time', 'message-type', 'server-identifier',
+  // 'parameter-request-list', 'renewal-time', 'rebinding-time',
+  // 'vendor-class-identifier', 'client-identifier', 'tftp-server-name',
+  // 'boot-file-name', 'user-class', 'fqdn', 'relay-agent-information',
+  // 'client-architecture', 'uuid-client-identifier', 'subnet-selection'
+  // and 'domain-search'
+  // - those were designed for simple/obvious semantic and shorter JSON
+  // - alternate KEA-like identifiers will also be recognized in "rule" as
+  // defined in the DHCP_OPTION_ALTERNATE[] constant
   DHCP_OPTION: array[TDhcpOption] of RawUtf8;
   /// KEA-like identifier of each DHCP RAI sub-option
   // - i.e. 'circuit-id', 'remote-id', 'link-selection', 'subscriber-id',
   // 'server-id-override', 'relay-id' and 'relay-port'
   RAI_OPTION: array[TDhcpOptionRai] of RawUtf8;
+
+const
+  /// alternate DHCP option "rule" identifiers, especially for KEA compatibility
+  // - will be recognized in "rule" for less-astonishment principle
+  // - https://kea.readthedocs.io/en/kea-3.1.4/arm/dhcp4-srv.html#standard-dhcpv4-options
+  // - KEA expects a verbose "dhcp-*" prefix for the main options
+  // - also relaxed some other identifiers, like router/dns/hostname/domain...
+  DHCP_OPTION_ALTERNATE: array[doRouters .. doUuidClientIdentifier] of RawUtf8 = (
+    'router', 'dns', 'hostname', 'domain', 'broadcast-address', 'ntp-server',
+    'vendor-options', 'dhcp-requested-address', 'dhcp-lease-time',
+    'dhcp-message-type', 'dhcp-server-identifier', 'dhcp-parameter-request-list',
+    'dhcp-renewal-time', 'dhcp-rebinding-time', 'vendor-class',
+    'dhcp-client-identifier', 'tftp-server', 'boot-filename', 'user-class',
+    'fqdn', 'relay-agent', 'client-arch', 'client-uuid');
+
 
 function ToText(dmt: TDhcpMessageType): PShortString; overload;
 function ToText(opt: TDhcpOption): PShortString; overload;
@@ -239,6 +269,7 @@ const
 
 /// initialize a DHCP client discover/request packet
 // - returns pointer to @dhcp.options for additional DhcpAddOption() fluent calls
+// - use rather TDhcpState.ClientNew/ClientFlush wrapper methods
 function DhcpClient(var dhcp: TDhcpPacket; dmt: TDhcpMessageType;
   const addr: TNetMac; req: TDhcpOptions = DHCP_REQUEST): PAnsiChar;
 
@@ -296,6 +327,13 @@ type
 function DhcpParse(dhcp: PDhcpPacket; len: PtrInt; var lens: TDhcpParsed;
   found: PDhcpOptions = nil; mac: PNetMac = nil): TDhcpMessageType;
 
+/// quickly validate a DHCP binary frame header
+function DhcpParseHeader(dhcp: PDhcpPacket; len: PtrInt): boolean;
+
+/// parse a raw DHCP binary frame and encode it as a JSON object
+function DhcpParseToJson(dhcp: PDhcpPacket; len: PtrInt;
+  extended: boolean = false): RawJson;
+
 /// locate an option by number in a DHCP packet
 // - assume dhcp^ contains a packet already validated by DhcpParse()
 // - returns nil if not found, or the location of op value in dhcp^.option[]
@@ -319,8 +357,9 @@ function DhcpInt(dhcp: PDhcpPacket; len: PtrUInt): cardinal;
 
 /// decode MAC or Eth=1 + MAC values stored at dhcp^.option[lens[opt]]
 function DhcpMac(dhcp: PDhcpPacket; len: PtrUInt): PNetMac;
+  {$ifdef FPC} inline; {$endif}
 
-/// decode the lens[doDhcpParameterRequestList] within dhcp^.option[]
+/// decode the lens[doParameterRequestList] within dhcp^.option[]
 function DhcpRequestList(dhcp: PDhcpPacket; const lens: TDhcpParsed): TDhcpOptions;
 
 type
@@ -354,52 +393,58 @@ type
     uuid: RawByteString;
   end;
 
-  /// define TRuleValue content as DHCP "rules" condition or action
+  /// define TRuleValue content as DHCP "rule" condition or action
   // - those items are ordered by the most used at runtime first
   // - pvkMac as "mac" value condition in the mac inlined field
   // - pvkOpt is a known option as DHCP_OPTION_NUM[TDhcpOption(mac[0])] = num
   // - pvkRai as Relay-Agent-Information sub-option condition like "circuit-id"
-  // - pvkMacs as array of "mac" values condition in the TNetMacs value field
   // - pvkBoot as "boot" value condition
   // - pvkRaw is DHCP option outside of TDhcpOption - stored as plain num
+  // - pvkMacs as array of "mac" values condition in the TNetMacs value field
   // - pvkTlv stores raw Type-Length-Value (TLV) with num = sub-option
   // - pvkAlways to store a binary blob from "always" JSON definition
   TRuleValueKind = (
     pvkMac,
     pvkOpt,
     pvkRai,
-    pvkMacs,
     pvkBoot,
     pvkRaw,
+    pvkMacs,
     pvkTlv,
     pvkAlways,
     pvkUndefined);
 
-  /// store one DHCP "rules" condition or action
+  /// store one DHCP "rule" condition or action in optimized 12/16 bytes
   // - used for "all" "any" "not-all" "not-any" conditions against a value
   // - used as "always" and "requested" data to be sent back to the client
   // - kind/num/mac fields order matters to access PInt64(one)^ shr 16 = Mac64
   TRuleValue = packed record
     /// define which kind of value is stored in this entry
+    // - is evaluated by TDhcpState.MatchOne as byte-code-like efficient runtime
     kind: TRuleValueKind;
     /// the raw (sub-)option number/ordinal to match, or to be sent back
     // - is the DHCP option number for kind=pvkRaw/pvkOpt
     // - is the TLV sub-option number for kind=pckTlv
     // - is a TDhcpClientBoot ordinal for pvkBoot match
     // - is a TDhcpOptionRai ordinal for pvkRai match
+    // - is the DHCP option number to be checked and included as "requested"
     // - not used (contains 0) for pckAlways and pvkMac/pvkMacs
     num: byte;
     /// the CPU-cache-friendly inlined pvkMac value
-    // - for pvkOpt, TDhcpOption(mac[0]) store the known option
+    // - for pvkOpt, TDhcpOption(mac[0]) store the known/decoded option
     mac: TNetMac;
     /// the associated raw binary value
     value: RawByteString;
   end;
-  /// points to one DHCP "rules" entry and its associated value
+  /// points to one DHCP "rule" entry and its associated value
   PRuleValue = ^TRuleValue;
 
-  /// store one DHCP "rules" entry and its associated value
+  /// store one DHCP "rule" entry and its associated value
   TRuleValues = array of TRuleValue;
+
+const
+  /// truncate 64-bit integer to 6-bytes TNetMac - efficient on Intel and aarch64
+  MAC_MASK = $0000ffffffffffff;
 
 var
   /// contains PXE boot network identifiers used for JSON/INI settings fields
@@ -414,6 +459,16 @@ function ParseMacIP(var nfo: TMacIP; const macip: RawUtf8): boolean;
 /// raw generation of a Type-Length-Value (TLV) binary from JSON
 function TlvFromJson(p: PUtf8Char; out v: RawByteString): boolean; overload;
 function TlvFromJson(const json: RawUtf8): RawByteString; overload;
+function IsValidTlv(op: PAnsiChar; len: integer): boolean;
+function IsValidRfc3925(op: PAnsiChar; len: integer): boolean;
+function TlvOptionToJson(opt: pointer; recognize: boolean): RawJson;
+
+/// convert a DNS wire format aka binary "canonical form" into plain ASCII text
+function DnsLabelToText(v: pointer; len: PtrInt; var txt: shortstring): boolean;
+function DnsLabelAppendText(var v: PByteArray; var len: PtrInt; var txt: shortstring): boolean;
+
+/// convert plain ASCII text as DNS wire format aka binary "canonical form"
+function DnsLabelAppendBin(p: PUtf8Char; var bin: shortstring): PUtf8Char;
 
 /// parse a CIDR route(s) text into a RFC 3442 compliant binary blob
 // - expect '192.168.1.0/24,10.0.0.5,10.0.0.0/8,192.168.1.1' readable format
@@ -441,18 +496,22 @@ type
   // -  - Static vs Dynamic Hits
   // - dsmStaticHits: static reservation (MAC or option 61) is used to assign an IP
   // - dsmDynamicHits: dynamic lease (from the pool) is used
+  // - dsmPoolRuleHits: an IP was assigned from a "pool" sub-range "rule"
   // -  Rate limiting / abuse
   // - dsmRateLimitHit: DECLINE packet is ignored due to rate limiting
   // - dsmInformRateLimitHit: INFORM packet is ignored due to rate limiting
   // - dsmInvalidRequest: received packet is malformed or cannot be processed
   // - dsmUnsupportedRequest: only DISCOVER/REQUEST/DECLINE/RELEASE/INFORM are handled
   // -  - Option Usage Counters
-  // - dsmOption50Hits: option 50 dhcp-requested-address is present and used to setup IP
-  // - dsmOption61Hits: option 61 dhcp-client-identifier is present and used to assign/lookup a lease
+  // - dsmOption50Hits: option 50 requested-address is present and used to setup IP
+  // - dsmOption61Hits: option 61 client-identifier is present and used to assign/lookup a lease
+  // - dsmOption81Hits: option 81 fqdn is present and has been echoed back
   // - dsmOption82Hits: option 82 relay-agent-information is present and processed
   // - dsmOption82SubnetHits: option 82 link-selection sub-option is present and processed
   // - dsmOption118Hits: option 118 subnet-selection is present and valid
+  // - dsmRule: some options have been returned according to a given rule
   // - dsmPxeBoot: PXE/iPXE options have been returned for a given architecture
+  // - dsmDdnsNotified and dsmDdnsFailed: follow option 81 DDNS notifications
   // - - Drop / Error Reasons
   // - dsmDroppedPackets: incremented for any packet dropped silently (not matching a scope or giaddr)
   // - dsmDroppedNoSubnet: packet has no matching subnet for its giaddr or option 82/118
@@ -476,16 +535,21 @@ type
     dsmLeaseReleased,
     dsmStaticHits,
     dsmDynamicHits,
+    dsmPoolRuleHits,
     dsmRateLimitHit,
     dsmInformRateLimitHit,
     dsmInvalidRequest,
     dsmUnsupportedRequest,
     dsmOption50Hits,
     dsmOption61Hits,
+    dsmOption81Hits,
     dsmOption82Hits,
     dsmOption82SubnetHits,
     dsmOption118Hits,
+    dsmRule,
     dsmPxeBoot,
+    dsmDdnsNotified,
+    dsmDdnsFailed,
     dsmDroppedPackets,
     dsmDroppedNoSubnet,
     dsmDroppedNoAvailableIP,
@@ -543,24 +607,27 @@ function MetricsToCsv(const metrics: TDhcpMetrics; withheader: boolean;
   now: PShortString): RawUtf8;
 
 
-{ **************** Middle-Level DHCP Scope and Lease Logic }
+{ **************** Middle-Level DHCP Scope, Pool and Lease Logic }
 
 type
   /// the state of one DHCP TDhcpLease entry in memory
   // - lsFree identify an lsOutdated slot which IP4 has been reused
-  // - lsReserved is used when an OFFER has been sent back to the client with IP4
-  // - lsAck is used when REQUEST has been received and ACK has been sent back
-  // - lsUnavailable is set when a DECLINE/INFORM message is received with an IP
+  // - lsStatic when the lease comes for Scope.StaticMac[] but not Scope.Entry[]
   // - lsOutdated is set once Expired timestamp has been reached, so that the
   // IP4 address could be reused on the next DISCOVER for this MAC
-  // - lsStatic when the lease comes for Scope.StaticMac[] but not Scope.Entry[]
+  // - lsReserved is used when an OFFER has been sent back to the client with IP4
+  // - lsAck is used when REQUEST has been received and ACK has been sent back,
+  // and lsAckDdns if there was a HostName for DDNS registration
+  // - lsUnavailable is set when a DECLINE/INFORM message is received with an IP
+  // - should end with lsReserved,lsAck*,lsUnavailable for TDhcpScope.DoOutdated
   TLeaseState = (
     lsFree,
+    lsStatic,
+    lsOutdated,
     lsReserved,
     lsAck,
-    lsUnavailable,
-    lsOutdated,
-    lsStatic);
+    lsAckDdns,
+    lsUnavailable);
 
   /// store one DHCP lease in memory with all its logical properties
   // - efficiently padded to 16 bytes (128-bit), so 1,000 leases would use 16KB
@@ -617,9 +684,10 @@ type
     Remote: array[dcbBios .. high(TDhcpClientBoot)] of RawUtf8;
   end;
 
-  /// store one DHCP "rules" object in a ready-to-be-processed way
-  // - pre-compiled at runtime from TDhcpRuleSettings JSON fields
-  TDhcpScopeRule = record
+  /// store one DHCP "rule" evaluation object in a ready-to-be-processed way
+  // - 8/16 bytes pre-compiled at runtime from TDhcpRuleAbstractSettings JSON
+  // - efficiently evaluated by TDhcpProcess.GetRule() from request state
+  TDhcpRule = record
     /// store AND matching fields
     all: TRuleValues;
     /// store OR matching fields
@@ -628,6 +696,15 @@ type
     notall: TRuleValues;
     /// store NOT OR matching fields
     notany: TRuleValues;
+  end;
+  PDhcpRule = ^TDhcpRule;
+  /// ready-to-be-processed DHCP "rule" evaluation objects of a given scope
+  TDhcpRules = array of TDhcpRule;
+
+  /// store one DHCP "rule" policy in a ready-to-be-processed way
+  // - pre-compiled at runtime from TDhcpRuleSettings always/requested JSON
+  // - to be applied when the associated TDhcpRule did match
+  TDhcpPolicy = record
     /// if this rule should reserve a static "ip" for these conditions
     // - usually, there is a "mac": in "all" fields with an associated IPv4
     ip: TNetIP4;
@@ -639,9 +716,111 @@ type
     /// optional identifier used in the logs (not in the internal logic itself)
     name: RawUtf8;
   end;
-  PDhcpScopeRule = ^TDhcpScopeRule;
-  /// ready-to-be-processed DHCP "rules" objects of a given scope
-  TDhcpScopeRules = array of TDhcpScopeRule;
+  PDhcpPolicy = ^TDhcpPolicy;
+  /// ready-to-be-processed DHCP "rule" policies of a given scope
+  TDhcpPolicies = array of TDhcpPolicy;
+
+  /// access to one scope/subnet definition
+  PDhcpScope = ^TDhcpScope;
+  /// access to one IP range pool definition
+  PDhcpPool = ^TDhcpPool;
+
+  /// define one IP range pool within a TDhcpScope scope/subnet
+  // - access is protected by owner TDhcpScope.Safe.Lock/Unlock
+  {$ifdef USERECORDWITHMETHODS}
+  TDhcpPool = record
+  {$else}
+  TDhcpPool = object
+  {$endif USERECORDWITHMETHODS}
+  public
+    /// the custom "name" property associated with this pool
+    Name: RawUtf8;
+    /// the owner scope/subnet of this IP range pool
+    Scope: PDhcpScope;
+    /// big-endian/network order of inclusive minimal IP range value
+    IpMin: TNetIP4;
+    /// big-endian/network order of inclusive maximum IP range value
+    IpMax: TNetIP4;
+    /// store the current leases on this IP range pool
+    Entry: TLeaseDynArray;
+    /// number of used slots in Entry[]
+    Count: integer;
+    /// list of static IPs of this IP range pool
+    // - sorted as 32-bit for efficient O(log(n)) branchless binary search
+    // - also contain the StaticMac[].IP4 values for fast lookup
+    StaticIP: TNetIP4s;
+    /// list of MAC addresses with their static IP for this IP range pool
+    // - will be checked against plain chaddr or "01+MAC" option 61 values
+    StaticMac: TLeaseDynArray;
+    /// list of binary UUID with their static IP for this pool for option 61
+    // - will be checked against not-"01+MAC" option 61 values - mainly UUID
+    // - stored as RawByteString = doClientIdentifier-binary + 4-bytes-IP
+    StaticUuid: TRawByteStringDynArray;
+    /// store all DHCP "rule" ready-to-be-processed evaluations for this pool
+    Rules: TDhcpRules;
+    /// store all DHCP "rule" ready-to-be-processed responses for this pool
+    Policies: TDhcpPolicies;
+    /// quickly check if IpMin <= ip4 <= IpMax
+    function Match(ip4: TNetIP4): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// efficient L1-cache friendly O(n) search of a MAC address in Entry[]
+    // - will also search in StaticMac[] entries
+    function FindMac(mac64: Int64): PDhcpLease;
+      {$ifdef FPC} inline; {$endif}
+    /// efficient L1-cache friendly O(n) search of an IPv4 address in Entry[]
+    // - won't search in StaticIP[] and StaticMac[]
+    function FindIp4(ip4: TNetIP4): PDhcpLease;
+      {$ifdef FPC} inline; {$endif}
+    /// quickly O(log(n)) check if an IPv4 is in StaticIP[]
+    function IsStaticIP(ip4: TNetIP4): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// compute the next IPv4 address available in this IP range
+    function NextIp4: TNetIP4;
+    /// retrieve a new lease in Entry[] - maybe recycled from ReuseIp4()
+    function NewLease(mac64: Int64): PDhcpLease;
+    /// return the index in Entry[] of a given lease
+    // - no range check is performed against the supplied p pointer
+    function LeaseIndex(p: PDhcpLease): cardinal;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// release a lease in Entry[] - add it to the recycled FreeList[]
+    function ReuseLease(p: PDhcpLease): TNetIP4;
+    /// flush the internal Entry[] lease lists but keep subnet/scope definition
+    procedure ClearLeases;
+    /// register a static IP address to the internal pool
+    // - can be associated with a fixed MAC address or option 61 UUID
+    function AddStatic(var nfo: TMacIP): boolean; overload;
+    /// register another static IP address to the internal pool
+    // - value is expected to be supplied as 'ip', 'mac=ip' or 'uuid=ip' text
+    // - CSV values are also allowed like 'mac1=ip1,mac2=ip2,uuid1=ip3'
+    function AddStatic(const macip: RawUtf8): boolean; overload;
+    /// remove one static IP address which was registered by AddStatic()
+    function RemoveStatic(ip4: TNetIP4): boolean;
+    /// add one entry in "rule" JSON object format
+    // - supplied as a concatenation of strings, to create a JSON object
+    // - will create a transient TDhcpRuleSettings instance and inject it
+    // to Rules[]/Policies[] in a thread-safe way, or raise EDhcp on error
+    // - return the index of the newly created entry in Rules[]/Policies[]
+    function AddRule(const json: array of RawByteString): PtrInt; overload;
+    /// add one entry in Rules[]/Policies[] arrays within Safe.Lock/UnLock
+    // - return the index of the newly created entry in Rules[]/Policies[]
+    function AddRule(rule: TDhcpRule; policy: TDhcpPolicy): PtrInt; overload;
+    /// remove a given entry in Rules[]/Policies[] by index - mostly for testing
+    function DeleteRule(ndx: PtrInt): boolean;
+    /// readjust all internal values according to scope.Subnet policy
+    // - raise an EDhcp exception if the parameters are not correct
+    procedure AfterFill(log: TSynLog);
+  private
+    // little-endian IP range values for NextIP
+    LastIpLE, IpMinLE, IpMaxLE, IpMaxLEPlusOne: cardinal;
+    // some internal values for fast lookup and efficient Entry[] process
+    LastDiscover, FreeListCount: integer;
+    FreeList: TIntegerDynArray;
+    // on TDhcpScope.Main, redirect to IpMinLE-ordered pointer(TDhcpScope.Pools)
+    SubPools: PDhcpPool;
+    procedure EntryPreallocate;
+  end;
+  /// store all IP range pools of a given TDhcpScope scope/subnet
+  TDhcpPools = array of TDhcpPool;
 
   /// how to refine DHCP server process for one TDhcpScopeSettings
   // - dsoInformRateLimit will track INFORM per MAC and limit to 3 per second
@@ -653,10 +832,16 @@ type
     dsoInformRateLimit,
     dsoCsvUnixTime,
     dsoPxeNoInherit,
-    dsoPxeDisable
-    );
+    dsoPxeDisable);
   /// refine DHCP server process for one TDhcpScopeSettings
   TDhcpScopeOptions = set of TDhcpScopeOption;
+
+  TOnDhcpBackgroundExecute = record
+    expiredtix32: cardinal;
+    ip4: TNetIP4;
+    cmd: TFileName;
+  end;
+  TOnDhcpBackgroundExecutes = array of TOnDhcpBackgroundExecute;
 
   /// define one scope/subnet processing context from TDhcpServerSettings
   // - fields and methods are optimized to efficiently map TDhcpProcess logic
@@ -673,70 +858,56 @@ type
     /// define the subnet of this scope
     // - Subnet.mask is the doSubnetMask option 1 of this scope
     Subnet: TIp4SubNet;
-    /// store the current leases on this scope
-    Entry: TLeaseDynArray;
-    /// number of used slots in Entry[]
-    Count: integer;
     /// the broadcast IP of this scope for doBroadcastAddress option 28
     Broadcast: TNetIP4;
     /// the gateway IP of this scope for doRouter option 3
     Gateway: TNetIP4;
-    /// the server IP of this scope for doDhcpServerIdentifier option 54
+    /// the server IP of this scope for doServerIdentifier option 54
     ServerIdentifier: TNetIP4;
     /// the Domain Name e.g. 'lan.local' for doDomainName option 15
     DomainName: RawUtf8;
     /// the DNS IPs of this scope for doDomainNameServers option 6
-    DnsServer: TIntegerDynArray;
+    DnsServers: TNetIP4s;
     /// the IP of the associated NTP servers, for doNtpServers option 42
-    NtpServers: TIntegerDynArray;
-    /// list of static IPs of this scope
-    // - sorted as 32-bit for efficient O(log(n)) branchless binary search
-    // - also contain the StaticMac[].IP4 values for fast lookup
-    StaticIP: TIntegerDynArray;
-    /// list of MAC addresses with their static IP for this scope
-    // - will be checked against plain chaddr or "01+MAC" option 61 values
-    StaticMac: TLeaseDynArray;
-    /// list of binary UUID with their static IP for this scope for option 61
-    // - will be checked against not-"01+MAC" option 61 values - mainly UUID
-    // - stored as RawByteString = doDhcpClientIdentifier-binary + 4-bytes-IP
-    StaticUuid: TRawByteStringDynArray;
-    /// store all DHCP "rules" ready-to-be-processed objects for this scope
-    Rules: TDhcpScopeRules;
+    NtpServers: TNetIP4s;
+    /// the "rule" defining an IP range reservation in Pools[]
+    PoolRules: TDhcpRules;
+    /// the custom IP range pools corresponding to PoolRules[]
+    // - Pools[].IpMinLE/IpMaxLE won't overlap and stored in increasing order
+    Pools: TDhcpPools;
+    /// the main/fallback IP range pool if not in Pools[] / PoolRules[]
+    Main: TDhcpPool;
     /// readjust all internal values according to to Subnet policy
     // - raise an EDhcp exception if the parameters are not correct
     procedure AfterFill(log: TSynLog);
+    /// retrieve the IP range pool corresponding to a given IPv4
+    // - the supplied ip should be in this subnet mask, and within Safe.Lock
+    function FindPool(ip: TNetIP4): PDhcpPool;
+      {$ifdef FPC} inline; {$endif}
+    /// quickly check if an IP is already registered as static or lease
+    function Exists(ip: TNetIP4): boolean;
+      {$ifdef FPC} inline; {$endif}
     /// register another static IP address to the internal pool
     // - can be associated with a fixed MAC address or option 61 UUID
     function AddStatic(var nfo: TMacIP): boolean; overload;
     /// register another static IP address to the internal pool
     // - value is expected to be supplied as 'ip', 'mac=ip' or 'uuid=ip' text
+    // - CSV values are also allowed like 'mac1=ip1,mac2=ip2,uuid1=ip3'
     function AddStatic(const macip: RawUtf8): boolean; overload;
     /// remove one static IP address which was registered by AddStatic()
     function RemoveStatic(ip4: TNetIP4): boolean;
-    /// efficient L1-cache friendly O(n) search of a MAC address in Entry[]
-    // - will also search in StaticMac[] entries
-    function FindMac(mac: Int64): PDhcpLease;
-    /// efficient L1-cache friendly O(n) search of an IPv4 address in Entry[]
-    // - won't search in StaticIP[] and StaticMac[]
-    function FindIp4(ip4: TNetIP4): PDhcpLease;
+    /// efficient search of a MAC address in all Pools[]/Main.Entry[]
+    function FindMac(mac: Int64; var pool: PDhcpPool): PDhcpLease;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// efficient search of a static UUID in all Pools[]/Main.Entry[]
+    function FindStaticUuid(bin: pointer; len: TStrLen; var pool: PDhcpPool): TNetIP4;
       {$ifdef FPC} inline; {$endif}
-    /// retrieve a new lease in Entry[] - maybe recycled from ReuseIp4()
-    function NewLease(mac64: Int64): PDhcpLease;
-    /// release a lease in Entry[] - add it to the recycled FreeList[]
-    function ReuseIp4(p: PDhcpLease): TNetIP4;
-    /// return the index in Entry[] of a given lease
-    // - no range check is performed against the supplied p pointer
-    function Index(p: PDhcpLease): cardinal;
-      {$ifdef HASINLINE} inline; {$endif}
-    /// quickly O(log(n)) check if an IPv4 is in StaticIP[]
-    function IsStaticIP(ip4: TNetIP4): boolean;
-      {$ifdef HASINLINE} inline; {$endif}
-    /// compute the next IPv4 address available in this scope
-    function NextIp4: TNetIP4;
     /// check all TDhcpLease.Expired against tix32
     // - return the number of leases marked as lsOutdated
     // - this method is thread safe and will call Safe.Lock/UnLock
-    function CheckOutdated(tix32: cardinal): integer;
+    function CheckOutdated(tix32: cardinal; var total: integer): integer;
+    /// compute the number of leases in this subnet/scope
+    function GetCount: integer;
     /// flush the internal Entry[] lease lists but keep subnet/scope definition
     procedure ClearLeases;
     /// reset back those per-scope Metrics[] to their initial 0 counter value
@@ -744,19 +915,24 @@ type
     /// persist all leases with "<expiry> <MAC> <IP>" dnsmasq file pattern
     // - this method is thread safe and will call Safe.Lock/UnLock
     // - returns the number of entries/lines added to the text file
+    // - will also compact in-place the internal leases storage, if needed
     function TextWrite(W: TTextWriter; tix32: cardinal; time: TUnixTime): integer;
   private
     Options: TDhcpScopeOptions;
     MetricsCsvFileMonth: byte;
-    // little-endian IP range values for NextIP
-    LastIpLE, IpMinLE, IpMaxLE: TNetIP4;
     // match scope settings values in efficient actionable format
-    LeaseTime, LeaseTimeLE, RenewalTime, Rebinding, OfferHolding: cardinal;
-    MaxDeclinePerSec, DeclineTime, GraceFactor: cardinal;
-    // some internal values for fast lookup and efficient Entry[] process
-    LastDiscover, FreeListCount: integer;
-    FreeList: TIntegerDynArray;
+    LeaseTimeLE, RenewalTimeLE, RebindingLE: cardinal;
+    LeaseTimeBE, RenewalTimeBE, RebindingBE: cardinal;
+    MaxDeclinePerSec, DeclineTime, GraceFactor, OfferHolding: cardinal;
+    DnsScriptSecs, DnsScriptLastTix32: cardinal;
+    OnBackgroundExecute: function(const ctxt: TOnDhcpBackgroundExecute): boolean of object;
+    procedure CheckSubNet(ident: PUtf8Char; ip: TNetIP4);
+    function ExecuteDnsScript(ip4: TNetIP4; m: PNetMac; host: PShortString;
+      tix32: cardinal): boolean;
+    function DoOutdated(p: PDhcpLease; tix32, n: cardinal): integer;
   public
+    /// DDNS script location e.g. '/usr/local/bin/dhcp-dyndns.sh'
+    DnsScript: TFileName;
     /// the PXE network boot settings for this scope/subnet
     Boot: TDhcpScopeBoot;
     /// where total counters are written e.g. '.../192-168-1-0_24.json'
@@ -768,9 +944,6 @@ type
     /// the subnet/scope file-compatible name, e.g. '192-168-1-0_24'
     MetricsFileSubnet: TShort23;
   end;
-
-  /// access to one scope/subnet definition
-  PDhcpScope = ^TDhcpScope;
 
   /// store all scope/subnet definitions in a dynamic array
   TDhcpScopes = array of TDhcpScope;
@@ -785,6 +958,7 @@ type
   /// state machine used by TDhcpProcess.ComputeResponse to process a request
   // - stack allocation of around 3KB memory needed for the frame processing
   // - also supplied to TOnComputeResponse callback as thread-safe context
+  // - caller should set Data.Recv/RecvLen/RecvIp4/Tix32 at input
   {$ifdef USERECORDWITHMETHODS}
   TDhcpState = record
   {$else}
@@ -794,8 +968,12 @@ type
     /// the network subnet information related to this request
     // - Scope^.Safe.Lock has been done by TOnComputeResponse callback caller
     Scope: PDhcpScope;
+    /// the IP range pool as set by TDhcpProcess.FindLease()
+    Pool: PDhcpPool;
     /// length of the Recv UDP frame received from the client
-    RecvLen: integer;
+    RecvLen: {$ifdef CPUINTEL} word {$else} cardinal {$endif};
+    // length of the Send UDP frame after Flush
+    SendLen: {$ifdef CPUINTEL} word {$else} cardinal {$endif};
     /// 32-bit binary IP address allocated for Send
     Ip4: TNetIP4;
     /// binary MAC address from the Recv frame, zero-extended to 64-bit/8-bytes
@@ -806,8 +984,8 @@ type
     /// points to the raw value of doHostName option 12 in Recv.option[]
     // - points to @NULCHAR so HostName^='' if there is no such option
     RecvHostName: PShortString;
-    /// the "rules" entry matched by this request
-    RecvRule: PDhcpScopeRule;
+    /// the policy of the "rule" entry matched by this request
+    RecvRule: PDhcpPolicy;
     /// the server IP socket which received the UDP frame
     // - allow several UDP bound server sockets to share a single TDhcpProcess
     RecvIp4: TNetIP4;
@@ -827,8 +1005,11 @@ type
     Recv: TDhcpPacket;
     /// UDP frame to be sent back to the client, after processing
     Send: TDhcpPacket;
-    /// the GetTickSec current 32-bit value
+    /// the GetTickSec current 32-bit value - as set by ComputeResponse() caller
     Tix32: cardinal;
+    /// the QueryPerformanceMicroSeconds() start value
+    // - only set if dsoVerboseLog is defined in server Options
+    StartMicroSec: Int64;
     /// some pointer value set by the UDP server for its internal process
     Opaque: pointer;
     /// IP address allocated for Send (raw Ip4) as human readable text
@@ -836,10 +1017,10 @@ type
     /// contains the client MAC address (raw Mac64) as human readable text
     // - ready for logging, with no memory allocation during the process
     // - may also contain hexadecimal UUID of static Option 61 client-identifier
-    Mac: string[63];
+    Mac: TShort63;
     /// some temporary storage for a StaticUuid[] fake DHCP lease
     Temp: TDhcpLease;
-    /// high-level 'match and append' of all "rules" entries into Send
+    /// high-level 'match and append' of all "rule" entries into Send
     procedure AddRulesOptions;
     // append regular DHCP 1,3,6,15,28,42 [+ 51,58,59] options
     procedure AddRegularOptions;
@@ -847,6 +1028,11 @@ type
     // - returns the number of bytes of response in Send[]
     function Flush: PtrUInt;
   public
+    /// parse Recv/RecvLen input fields into Mac/Mac64/RecvLens/RecvLensRai
+    function Parse: boolean;
+    /// return a pointer to one Recv.option[] value length
+    function Data(const opt: TDhcpOption): pointer;
+      {$ifdef HASINLINE} inline; {$endif}
     /// raw append of a 32-bit big-endian/IPv4 option value into Send
     procedure AddOptionOnce32(const opt: TDhcpOption; be: cardinal);
       {$ifdef FPC} inline; {$endif}
@@ -854,17 +1040,32 @@ type
     procedure AddOptionOnceU(const opt: TDhcpOption; const v: PAnsiChar);
     /// raw append of a dynamic array of 32-bit big-endian/IPv4 options into Send
     procedure AddOptionOnceA32(const opt: TDhcpOption; const v: PAnsiChar);
-    /// raw append the options of a given "rules" entry into Send
+    /// raw append the options of a given "rule" entry into Send
     procedure AddOptionFromRule(p: PRuleValue);
+      {$ifdef HASINLINE} inline; {$endif}
     /// raw append a verbatim copy of a Recv option into Send
     procedure AddOptionCopy(opt: TDhcpOption; dsm: TDhcpScopeMetric = dsmDiscover);
       {$ifdef HASINLINE} inline; {$endif}
-    /// raw search of one "rules" value in State.Recv[]
+    /// raw search of one "rule" value in State.Recv[]
+    // - this is the main processing method of TDhcpProcess.GetRule() evaluation
     function MatchOne(one: PRuleValue): boolean;
+    /// serialize the Recv/RecvType/RecvLens/RecvLensRai fields as a JSON object
+    function RecvToJson(extended: boolean = false): RawJson;
+    /// serialize the Send/SendLen fields as a JSON object
+    function SendToJson(extended: boolean = false): RawJson;
+    /// for testing: wrapper to DhcpClient() on the State.Recv[] buffer
+    // - then call e.g. DhcpAddOption32/Raw/Buf/U/Short() functions
+    // - warning: won't make Tix32 := GetTickSec
+    function ClientNew(dmt: TDhcpMessageType; const addr: TNetMac;
+      req: TDhcpOptions = DHCP_REQUEST): PAnsiChar;
+    /// for testing: properly end ClientNew() buffer with #255 and compute RecvLen
+    procedure ClientFlush(current: PAnsiChar);
   private
     // methods for internal use
     procedure AddOptionSafe(const op: byte; b: pointer; len: PtrUInt);
       {$ifdef HASINLINE} inline; {$endif}
+    function NotifyDnsScript(opt81: PAnsiChar; len: PtrInt; plain: boolean): boolean;
+    procedure AddOption81;
     procedure ParseRecvLensRai;
     function FakeLease(found: TNetIP4): PDhcpLease;
       {$ifdef HASINLINE} inline; {$endif}
@@ -872,6 +1073,8 @@ type
     procedure AppendToMac(ip4len: PtrUInt; const ident: ShortString);
   end;
   {$ifdef CPUINTEL} {$A+} {$endif CPUINTEL}
+  /// pointer to one TDhcpProcess.ComputeResponse state machine
+  PDhcpState = ^TDhcpState;
 
 
 { **************** High-Level Multi-Scope DHCP Server Processing Logic }
@@ -891,7 +1094,7 @@ type
   public
     /// compute the low-level TDhcpScope.Boot data structure for current settings
     // - will also complete/inherit configuration from sibling values
-    procedure PrepareBoot(var Data: TDhcpScopeBoot; Options: TDhcpScopeOptions);
+    procedure PrepareBoot(var Boot: TDhcpScopeBoot; Options: TDhcpScopeOptions);
   published
     /// option 66 IP address or hostname of the associated TFTP server
     property NextServer: RawUtf8
@@ -934,32 +1137,16 @@ type
       read fRemote[dcbIpxeA64] write fRemote[dcbIpxeA64];
   end;
 
-  /// define a rule to "match and send" options for a given scope/subnet
-  // - i.e. settings for vendor-specific or client-specific DHCP options
-  // - each RawJson property contain a JSON object as key/value pairs,
-  // potentially in our enhanced format e.g. with unquote keys
-  // - "all" "any" "not-all" "not-any" should all match to trigger the output,
-  // defining a "first precise rule wins" deterministic behavior in the order
-  // in the array of "rules"
-  // - "always" and "requested" define the options sent in the response
-  // - keys are a DHCP option number ("77") or DHCP_OPTION[] ("user-class"),
-  // - values are "text" "IP:x.x.x.x" "MAC:xx" "HEX:xx" "BASE64:xx" "UUID:xx"
-  //  "UINT8:x" "UINT16:x", "UINT32:x", "UINT64:x", "ESC:x$yy", "CIDR:xx" with
-  // CSV support for IP: MAC: or CIDR: to encode arrays of values
-  // - values could also be integers, booleans, or nested TLV object
-  // - array values would be internally converted into CSV for processing
-  // - most values would have their default type guessed as UINT16, IP or UUID
-  // - "all" "any" "not-all" "not-any" also support convenient "boot" key as
-  // BOOT_TXT[] values, or RAI_OPTION[] keys like "circuit-id"
-  TDhcpRuleSettings = class(TSynPersistent)
+  /// define an abstract evaluation rule with all/any/notall/notany array fields
+  // - parent of TDhcpRuleSettings class
+  TDhcpRuleAbstractSettings = class(TSynPersistent)
   protected
-    fName, fIP, fMac: RawUtf8;
-    fAll, fAny, fNotAll, fNotAny, fAlways, fRequested: RawJson;
+    fName, fMac: RawUtf8;
+    fAll, fAny, fNotAll, fNotAny: RawJson;
   public
-    /// compute the low-level TDhcpScope.Rules[] entry from current settings
-    // - raise an EDhcp exception if the parameters are not correct
-    // - return true if the Rule can be added to the scope
-    function PrepareRule(var Data: TDhcpScope; var Rule: TDhcpScopeRule): boolean;
+    /// compute low-level TDhcpScope.Rules[]/Policies[] from current settings
+    // - raise an EDhcp exception if any parameter is not correct
+    procedure PrepareRule(var Rule: TDhcpRule);
   published
     /// human-friendly identifier, not used in the internal logic
     // - added in the logs as "rule=<name>", or as useful comment in settings
@@ -992,6 +1179,51 @@ type
     // - a single key/value pairs match is enough to NOT trigger this logic
     property NotAny: RawJson
       read fNotAny write fNotAny;
+    /// root "mac" as convenient alternative to {"all":{"mac":"xxxxx"}} entry
+    // - so that you could write meaningful registration like:
+    // $ {
+    // $   "name": "printer-2",
+    // $   "mac": "00:11:22:33:44:56",
+    // $   "ip": "192.168.1.51",
+    // $   "always": {
+    // $     "domain-name": "printers.local"
+    // $   }
+    // $ }
+    // - would work also to customize options, without any "ip" reservation
+    // - exclusive to "all" "any" "not-all" "not-any" member - would raise EDhcp
+    property Mac: RawUtf8
+      read fMac write fMac;
+  end;
+
+  /// define a rule to "match and send" options for a given scope/subnet
+  // - i.e. settings for vendor-specific or client-specific DHCP options
+  // - each RawJson property contain a JSON object as key/value pairs,
+  // potentially in our enhanced format e.g. with unquote keys
+  // - "all" "any" "not-all" "not-any" should all match to trigger the output,
+  // defining a "first precise rule wins" deterministic behavior in the order
+  // in the array of "rule"
+  // - "always" and "requested" define the options sent in the response
+  // - keys are a DHCP option number ("77") or DHCP_OPTION[] ("user-class"),
+  // - values are "text" "IP:x.x.x.x" "MAC:xx" "HEX:xx" "BASE64:xx" "UUID:xx"
+  //  "UINT8:x" "UINT16:x", "UINT32:x", "UINT64:x", "ESC:x$yy", "CIDR:xx" with
+  // CSV support for IP: MAC: or CIDR: to encode arrays of values
+  // - values could also be integers, booleans, or nested TLV object
+  // - array values would be internally converted into CSV for processing
+  // - most values would have their default type guessed as UINT16, IP or UUID
+  // - "all" "any" "not-all" "not-any" also support convenient "boot" key as
+  // BOOT_TXT[] values, or RAI_OPTION[] keys like "circuit-id"
+  TDhcpRuleSettings = class(TDhcpRuleAbstractSettings)
+  protected
+    fIP: RawUtf8;
+    fAlways, fRequested: RawJson;
+  public
+    /// compute low-level TDhcpScope.Rules[]/Policies[] from current settings
+    // - raise an EDhcp exception if any parameter is not correct
+    // - return true if the Rule can be added to the scope, i.e. if not a
+    // static definition in disguise
+    function PrepareRule(var Scope: TDhcpScope; var Rule: TDhcpRule;
+      var Policy: TDhcpPolicy): boolean; reintroduce;
+  published
     /// a JSON object defining the output options regardless of Option 55
     // - client Option 55 won't be checked: those options will always be sent
     // - so we could define e.g. with proper Type-Length-Value (TLV) encoding:
@@ -1012,85 +1244,98 @@ type
     // $ "requested": { ntp-servers: ["10.0.0.5", "10.0.0.6"] }
     property Requested: RawJson
       read fRequested write fRequested;
-    /// root "mac" as convenient alternative to {"all":{"mac":"xxxxx"}} entry
-    // - so that you could write meaningful registration like:
-    // $ {
-    // $   "name": "printer-2",
-    // $   "mac": "00:11:22:33:44:56",
-    // $   "ip": "192.168.1.51",
-    // $   "always": {
-    // $     "domain-name": "printers.local"
-    // $   }
-    // $ }
-    // - would work also to customize options, without any "ip" reservation
-    // - exclusive to "all" "any" "not-all" "not-any" member - would raise EDhcp
-    property Mac: RawUtf8
-      read fMac write fMac;
     /// reserve this static "ip" for a given MAC or client-specific options
     // - could be used as an alternative to the main "static" array of TMacIP,
     // especially if you expect "always"/"requested" custom options sent back
     property IP: RawUtf8
       read fIP write fIP;
   end;
-  /// a dynamic array of "match and send" options Rules
+  /// a dynamic array of "match and send" options rule definitions
   // - store any number of vendor-specific or client-specific DHCP options
   TDhcpRuleSettingsObjArray = array of TDhcpRuleSettings;
 
-  /// main high-level options for defining one scope/subnet for our DHCP Server
-  TDhcpScopeSettings = class(TSynAutoCreateFields)
+  /// define a rule to define a pool of IP sub-range for a given scope/subnet
+  // - i.e. vendor-specific or client-specific DHCP options could define some
+  // IP ranges within the subnet, e.g. for VoIP/IoT devices or VMs
+  TDhcpPoolSettings = class(TDhcpRuleAbstractSettings)
   protected
-    fSubnetMask: RawUtf8;
     fStatic: TRawUtf8DynArray;
-    fRangeMin: RawUtf8;
-    fRangeMax: RawUtf8;
-    fDefaultGateway: RawUtf8;
-    fDnsServers: RawUtf8;
-    fNtpServers: RawUtf8;
-    fDomainName: RawUtf8;
-    fBroadCastAddress: RawUtf8;
-    fLeaseTimeSeconds: cardinal;
-    fMaxDeclinePerSecond: cardinal;
-    fDeclineTimeSeconds: cardinal;
-    fServerIdentifier: RawUtf8;
-    fOfferHoldingSecs: cardinal;
-    fGraceFactor: cardinal;
-    fOptions: TDhcpScopeOptions;
-    fBoot: TDhcpBootSettings;
-    fRules: TDhcpRuleSettingsObjArray;
+    fMin: RawUtf8;
+    fMax: RawUtf8;
+    fRule: TDhcpRuleSettingsObjArray;
   public
-    /// setup this instance with default values
-    // - default are subnet-mask = '192.168.1.1/24', lease-time-seconds = 120
-    // and OfferHoldingSecs = 5, consistent with a simple local iPXE network
-    constructor Create; override;
-    /// append at runtime a new scope/subnet "rules" settings
+    /// append at runtime a new "rule" settings for this IP pool
     // - call without any TDhcpRuleSettings parameter to create a default one
     // - supplied one will be owned by this instance from now on
     function AddRule(one: TDhcpRuleSettings = nil): TDhcpRuleSettings;
-    /// compute the low-level TDhcpScope data structure for current settings
+    /// compute the low-level TDhcpPool data structure for current settings
     // - raise an EDhcp exception if the parameters are not correct
-    procedure PrepareScope(Sender: TDhcpProcess; var Data: TDhcpScope);
+    procedure PreparePool(var Scope: TDhcpScope; var Pool: TDhcpPool);
   published
-    /// Subnet Mask (option 1) e.g. "subnet-mask": "192.168.1.1/24"
-    // - the CIDR 'ip/mask' pattern will compute range-min/range-max and
-    // server-identifier directly from this pattern
-    // - accept also plain '255.255.255.0' IP if you want to specify by hand the
-    // raw value sent in DHCP headers, and fill range-min/range-max and others
-    property SubnetMask: RawUtf8
-      read fSubnetMask write fSubnetMask;
     /// some static IP addresses potentially with their MAC or UUID, which
     // will be reserved for those on the network
     // - supplied as "ip", "mac=ip" or "uuid=ip" string items
     // - e.g. "static": ["192.168.1.2","2f:af:9e:0f:b8:2a=192.168.1.100"]
     property Static: TRawUtf8DynArray
       read fStatic write fStatic;
-    /// minimal IP range e.g. "range-min": "192.168.1.10"
+    /// minimal IP range e.g. "min": "192.168.1.10"
     // - default is '' and will be filled by "subnet-mask" value as 10
-    property RangeMin: RawUtf8
-      read fRangeMin write fRangeMin;
-    /// maximal IP range e.g. "range-max": 192.168.1.254"
+    property Min: RawUtf8
+      read fMin write fMin;
+    /// maximal IP range e.g. "max": 192.168.1.254"
     // - default is '' and will be filled by "subnet-mask" value as 254
-    property RangeMax: RawUtf8
-      read fRangeMax write fRangeMax;
+    property Max: RawUtf8
+      read fMax write fMax;
+    /// vendor-specific or client-specific DHCP options for this scope as
+    // "rule" array of JSON objects
+    // - order in this array defines "first rule wins" deterministic behavior
+    property Rule: TDhcpRuleSettingsObjArray
+      read fRule;
+  end;
+  /// a dynamic array of rules to define pools of IP sub-range
+  TDhcpPoolSettingsObjArray = array of TDhcpPoolSettings;
+
+  /// main high-level options for defining one scope/subnet for our DHCP Server
+  TDhcpScopeSettings = class(TSynAutoCreateFields)
+  protected
+    fSubnetMask: RawUtf8;
+    fDefaultGateway: RawUtf8;
+    fDnsServers: RawUtf8;
+    fNtpServers: RawUtf8;
+    fDomainName: RawUtf8;
+    fBroadCastAddress: RawUtf8;
+    fDynDnsScript: TFileName;
+    fServerIdentifier: RawUtf8;
+    fLeaseTimeSeconds: cardinal;
+    fMaxDeclinePerSecond: cardinal;
+    fDeclineTimeSeconds: cardinal;
+    fDynDnsTrustSecs: cardinal;
+    fOfferHoldingSecs: cardinal;
+    fGraceFactor: cardinal;
+    fOptions: TDhcpScopeOptions;
+    fBoot: TDhcpBootSettings;
+    fPool: TDhcpPoolSettingsObjArray;
+    fMain: TDhcpPoolSettings;
+  public
+    /// setup this instance with default values
+    // - default are subnet-mask = '192.168.1.1/24', lease-time-seconds = 120
+    // and OfferHoldingSecs = 5, consistent with a simple local iPXE network
+    constructor Create; override;
+    /// append at runtime a new "pool" settings for this scope/subnet
+    // - call without any TDhcpPoolSettings parameter to create a default one
+    // - supplied one will be owned by this instance from now on
+    function AddPool(one: TDhcpPoolSettings = nil): TDhcpPoolSettings;
+    /// compute the low-level TDhcpScope data structure for current settings
+    // - raise an EDhcp exception if the parameters are not correct
+    procedure PrepareScope(Sender: TDhcpProcess; var Scope: TDhcpScope);
+  published
+    /// Subnet Mask (option 1) e.g. "subnet-mask": "192.168.1.1/24"
+    // - the CIDR 'ip/mask' pattern will compute min/max and
+    // server-identifier directly from this pattern
+    // - accept also plain '255.255.255.0' IP if you want to specify by hand the
+    // raw value sent in DHCP headers, and fill min/max and others
+    property SubnetMask: RawUtf8
+      read fSubnetMask write fSubnetMask;
     /// Default Gateway (option 3) e.g. "default-gateway":"192.168.1.1"
     property DefaultGateway: RawUtf8
       read fDefaultGateway write fDefaultGateway;
@@ -1139,6 +1384,20 @@ type
     // - this grace delay is disabled if GraceFactor = 0 or for long leases > 1h
     property GraceFactor: cardinal
       read fGraceFactor write fGraceFactor default 2;
+    /// DDNS script location - e.g. "dyn-dns-script":"/usr/local/bin/dhcp-dyndns.sh"
+    // - from https://wiki.samba.org/index.php/Configure_DHCP_to_update_DNS_records
+    // - would enable proper doFqdn Option 81 DDNS server-side support with Samba
+    // - we could manually compute and apply changes via faster 'nsupdate -g',
+    // but this official samba script switch to samba-tool on purpose in 2020, for
+    // stability and robustness - our DHCP server should run on the DNS server
+    property DynDnsScript: TFileName
+      read fDynDnsScript write fDynDnsScript;
+    /// during many seconds a previous successful "dyn-dns-script" execution
+    // should return S=1 flag for the doFqdn option 81
+    // - default is "dyn-dns-trust-secs":300 i.e. 5 minutes
+    // - would assume DDNS success if the script worked in the last 5 minutes
+    property DynDnsTrustSecs: cardinal
+      read fDynDnsTrustSecs write fDynDnsTrustSecs default 300;
     /// refine DHCP server process for this scope
     // - default is [] but you may tune it for your actual (sub-)network needs
     // using "inform-rate-limit", "csv-unix-time", "pxe-no-inherit" and
@@ -1148,11 +1407,15 @@ type
     /// optional PXE network book settings as "boot" sub-object
     property Boot: TDhcpBootSettings
       read fBoot;
-    /// vendor-specific or client-specific DHCP options for this scope as
-    // "rules" array of JSON objects
-    // - order in this array defines "first rule wins" deterministic behavior
-    property Rules: TDhcpRuleSettingsObjArray
-      read fRules;
+    /// custom IP range pools in this scope
+    // - "min"/"max" should be within "main" "min"/"max" fields, and
+    // shouldn't overlap between "pool" items
+    property Pool: TDhcpPoolSettingsObjArray
+      read fPool;
+    /// fallback IP range pool when an IP isn't in any "pool" for this scope
+    // - "pool" items "min"/"max" should be within this "main" range
+    property Main: TDhcpPoolSettings
+      read fMain;
   end;
   /// a dynamic array of DHCP Server scope/subnet settings
   TDhcpScopeSettingsObjArray = array of TDhcpScopeSettings;
@@ -1161,9 +1424,11 @@ type
   // - dsoSystemLog would call JournalSend() in addition to default TSynLog -
   // but it will slowdown the process a lot, so should be used with caution
   // - dsoNoFileBak would disable the '.bak' renaming during SaveToFile()
+  // - dsoVerboseLog will include input/output frames to the log as JSON
   TDhcpServerOption = (
     dsoSystemLog,
-    dsoNoFileBak);
+    dsoNoFileBak,
+    dsoVerboseLog);
   /// refine DHCP server process for all scopes
   TDhcpServerOptions = set of TDhcpServerOption;
 
@@ -1174,6 +1439,7 @@ type
     fMetricsFolder: TFileName;
     fFileFlushSeconds: cardinal;
     fMetricsCsvMinutes: cardinal;
+    fDnsScriptThreads: cardinal;
     fOptions: TDhcpServerOptions;
     fScope: TDhcpScopeSettingsObjArray;
   public
@@ -1190,7 +1456,7 @@ type
     // - supplied one will be owned by this instance from now on
     function AddScope(one: TDhcpScopeSettings = nil): TDhcpScopeSettings;
   published
-    /// if set, OnIdle will persist the internal list into this file when needed
+    /// if set, OnIdle will persist the leases list into this file when needed
     // - file on disk would be regular dnsmasq-compatible format
     property FileName: TFileName
       read fFileName write fFileName;
@@ -1214,6 +1480,10 @@ type
     /// customize server-level options, when Scope[].Options are not enough
     property Options: TDhcpServerOptions
       read fOptions write fOptions;
+    /// how many threads the DNS scripts should be running from
+    // - default 1 should be enough, but it would help scaling if needed
+    property DnsScriptThreads: cardinal
+      read fDnsScriptThreads write fDnsScriptThreads default 1;
     /// store the per subnet scope settings
     property Scope: TDhcpScopeSettingsObjArray
       read fScope;
@@ -1229,11 +1499,12 @@ type
   // - store and redirect all process to TDhcpScopes in-memory per-subnet lists
   // - several sockets could be bound in TDhcpServer, each with its own IP, and
   // on its own interface, all sharing this single TDhcpProcess subnets
+  // - easily extensible by overriding its core protected virtual methods
   TDhcpProcess = class(TSynPersistent)
   protected
     fScopeSafe: TRWLightLock; // multi-read reentrant lock to protect Scope[]
     fScope: TDhcpScopes;
-    fFileFlushSeconds, fMetricsCsvSeconds: cardinal;
+    fFileFlushSeconds, fMetricsCsvSeconds, fDnsScriptThreads: cardinal;
     fIdleTix, fFileFlushTix, fMetricsCsvTix, fModifSequence, fModifSaved: cardinal;
     fLog: TSynLogClass;
     fFileName, fMetricsFolder, fMetricsJson: TFileName;
@@ -1242,14 +1513,20 @@ type
     fState: (sNone, sSetup, sSetupFailed, sShutdown);
     fMetricsDroppedPackets, fMetricsInvalidRequest: QWord; // no scope counters
     fLogPrefix: RawUtf8;
+    fBackgroundExecute: TSynBackgroundQueue;
     function GetCount: integer;
     procedure SetFileName(const name: TFileName);
     procedure SetMetricsFolder(const folder: TFileName);
+    function OnBackgroundExecute(const ctx: TOnDhcpBackgroundExecute): boolean;
+    function OnBackgroundScript(Sender: TSynBackgroundQueue; Event: pointer): boolean;
     // ComputeResponse() virtual sub-methods for proper logic customization
     procedure DoLog(Level: TSynLogLevel; const Context: ShortString;
       const State: TDhcpState); virtual;
     function DoError(var State: TDhcpState; Context: TDhcpScopeMetric;
       Lease: PDhcpLease = nil): PtrInt; virtual;
+    procedure OnLogFrame(Sender: TSynLog; Level: TSynLogLevel; Opaque: pointer;
+      Value: PtrInt; Instance: TObject); virtual;
+    function LockedResponse(var State: TDhcpState): PtrInt; virtual;
     function ParseFrame(var State: TDhcpState): boolean; virtual;
     function FindScope(var State: TDhcpState): boolean; virtual;
     function FindLease(var State: TDhcpState): PDhcpLease; virtual;
@@ -1257,10 +1534,12 @@ type
       Lease: PDhcpLease): boolean; virtual;
     procedure SetRecvBoot(var State: TDhcpState); virtual;
     procedure AddBootOptions(var State: TDhcpState); virtual;
-    procedure SetRule(var State: TDhcpState); virtual;
+    function GetRule(var State: TDhcpState; Rule: PDhcpRule): PDhcpRule; virtual;
     function RunCallbackAborted(var State: TDhcpState): boolean; virtual;
     function Flush(var State: TDhcpState): PtrInt; virtual;
   public
+    /// finalize this instance
+    destructor Destroy; override;
     /// setup this DHCP process using the specified settings
     // - raise an EDhcp exception if the parameters are not correct - see
     // TDhcpServerSettings.Verify() if you want to intercept such errors
@@ -1300,12 +1579,14 @@ type
     // standard seconds since epoch (Unix time) for the <expiry> value, e.g.
     // $ 1770034159 c2:07:2c:9d:eb:71 192.168.1.207
     // - we skip <hostname> and <client id> values since we don't handle them
-    // - by design, only lsAck and recently lsOutdated entries are included
+    // - by design, only lsAck* and recently lsOutdated entries are included
+    // - will also compact in-place the internal leases storage, if needed
     function SaveToText(SavedCount: PInteger = nil): RawUtf8;
     /// restore the internal entry list using SaveToText() format
     function LoadFromText(const Text: RawUtf8): boolean;
     /// persist the internal entry list using SaveToText() format
     // - returns the number of entries stored in the file, or -1 on write error
+    // - will also compact in-place the internal leases storage, if needed
     // - will maintain a .bak atomic copy unless dsoNoFileBak option is set
     function SaveToFile(const FileName: TFileName): integer;
     /// restore the internal entry list using SaveToText() format
@@ -1323,10 +1604,10 @@ type
     /// persist all scopes metrics as .json files and optionally all .csv files
     procedure SaveMetricsFolder(AndCsv: boolean = false);
     /// this is the main processing function of the DHCP server logic
-    // - input should be stored in Data.Recv/RecvLen/RecvIp4 - and is untouched
+    // - caller should have set Data.Recv/RecvLen/RecvIp4/Tix32 - kept untouched
     // - returns -1 if this input was invalid or unsupported
     // - returns 0 if input was valid, but no response is needed (e.g. decline)
-    // - return > 0 the number of Data.Send bytes to broadcast back as UDP
+    // - return > 0 the number of Data.Send[] bytes to broadcast back as UDP
     function ComputeResponse(var State: TDhcpState): PtrInt;
     /// raw access to the internal scope/subnet lists
     // - this property is not thread-safe by design
@@ -1397,8 +1678,19 @@ begin
 end;
 
 function FromText(const V: RawUtf8; out opt: TDhcpOption): boolean;
+var
+  i: PtrInt;
 begin
   result := GetEnumNameValue(TypeInfo(TDhcpOption), V, opt, @DHCP_OPTION);
+  if result and                           // e.g. 'leasetime' or 'lease-time'
+     (V <> '') then
+    exit;
+  i := FindNonVoidRawUtf8I(@DHCP_OPTION_ALTERNATE, pointer(V), length(V),
+         length(DHCP_OPTION_ALTERNATE)); // e.g. 'dhcp-lease-time'
+  if i < 0 then
+    exit;
+  opt := TDhcpOption(i + ord(low(DHCP_OPTION_ALTERNATE))); // adjust
+  result := true;
 end;
 
 function FromText(const V: RawUtf8; out opt: TDhcpOptionRai): boolean;
@@ -1409,11 +1701,11 @@ end;
 const
   DHCP_OPTION_NUM: array[TDhcpOption] of byte = (
     0, 1, 3, 6, 12, 15, 28, 42, 43, 50, 51, 53, 54, 55,
-    58, 59, 60, 61, 66, 67, 77, 82, 93, 97, 118, 255);
+    58, 59, 60, 61, 66, 67, 77, 81, 82, 93, 97, 118, 119, 255);
   RAI_OPTION_NUM: array[TDhcpOptionRai] of byte = (
     0, 1, 2, 5, 6, 11, 12, 19);
 var // fast O(1) inverse lookup from (sub-)option numbers to know enumerate item
-  DHCP_OPTION_INV: array[0 .. 118] of TDhcpOption;
+  DHCP_OPTION_INV: array[0 .. 119] of TDhcpOption;
   RAI_OPTION_INV:  array[0 .. 19]  of TDhcpOptionRai;
 
 procedure DhcpAddOptionByte(var p: PAnsiChar; const op, b: cardinal);
@@ -1485,7 +1777,7 @@ function DhcpAddOptionRequestList(p: PAnsiChar; op: TDhcpOptions): PAnsiChar;
 var
   o: TDhcpOption;
 begin
-  PCardinal(p)^ := DHCP_OPTION_NUM[doDhcpParameterRequestList]; // op + len=0
+  PCardinal(p)^ := DHCP_OPTION_NUM[doParameterRequestList]; // op + len=0
   inc(p); // p[0]=len
   for o := succ(low(o)) to pred(high(o)) do
     if o in op then
@@ -1528,7 +1820,7 @@ var
 function DhcpNew(var dhcp: TDhcpPacket; dmt: TDhcpMessageType; xid: cardinal;
   const addr: TNetMac; serverid: TNetIP4 = 0): PAnsiChar;
 begin
-  FillCharFast(dhcp, SizeOf(dhcp) - SizeOf(dhcp.options), 0);
+  FillCharFast(dhcp, DHCP_PACKET_HEADER, 0);
   dhcp.op := DHCP_BOOT[dmt];
   dhcp.htype := ARPHRD_ETHER;
   dhcp.hlen := SizeOf(addr);
@@ -1543,11 +1835,11 @@ begin
   PNetMac(@dhcp.chaddr)^ := addr;
   dhcp.cookie := DHCP_MAGIC_COOKIE;
   result := @dhcp.options;
-  DhcpAddOptionByte(result, {doDhcpMessageType=} 53, ord(dmt));
+  DhcpAddOptionByte(result, {doMessageType=} 53, ord(dmt));
   if serverid <> 0 then
   begin
     dhcp.siaddr := serverid;
-    DhcpAddOption32(result, doDhcpServerIdentifier, serverid);
+    DhcpAddOption32(result, doServerIdentifier, serverid);
   end;
   result^ := #255;
 end;
@@ -1556,70 +1848,9 @@ function DhcpClient(var dhcp: TDhcpPacket; dmt: TDhcpMessageType;
   const addr: TNetMac; req: TDhcpOptions): PAnsiChar;
 begin
   result := DhcpNew(dhcp, dmt, {xid=}0, addr);
-  result := DhcpAddOptionRequestList(result, req);
+  if req <> [] then
+    result := DhcpAddOptionRequestList(result, req);
   result^ := #255; // only for internal/debug use
-end;
-
-function DhcpParse(dhcp: PDhcpPacket; len: PtrInt; var lens: TDhcpParsed;
-  found: PDhcpOptions; mac: PNetMac): TDhcpMessageType;
-var
-  p: PAnsiChar;
-  m: PNetMac;
-  opt: TDhcpOption;
-  dmt: byte;   // TDhcpMessageType
-begin
-  result := dmtUndefined;
-  if found <> nil then
-    found^ := [];
-  FillCharFast(lens, SizeOf(lens), 0);
-  // validate header
-  dec(len, PtrInt(PtrUInt(@PDhcpPacket(nil)^.options)));
-  if (len <= 0) or
-     (dhcp = nil) or
-     (dhcp^.cookie <> DHCP_MAGIC_COOKIE) or
-     (dhcp^.htype <> ARPHRD_ETHER) or
-     (dhcp^.hlen <> SizeOf(TNetMac)) or
-     (dhcp^.xid = 0) or
-     not (dhcp^.op in [BOOT_REQUEST, BOOT_REPLY]) then
-    exit;
-  // parse DHCP options store as Type-Length-Value (TLV)
-  p := @dhcp^.options;
-  repeat
-    // check len to avoid buffer overflow on malformatted input
-    dec(len, ord(p[1]) + 2);
-    if len < 1 then
-      exit;
-    // fast O(1) option number lookup and lens[]/found^ filling
-    opt := doPad;
-    if ord(p[0]) <= high(DHCP_OPTION_INV) then
-      opt := DHCP_OPTION_INV[ord(p[0])];
-    if opt <> doPad then
-    begin
-      if found <> nil then
-        include(found^, opt);
-      lens[opt] := (p + 1) - PAnsiChar(@dhcp^.options);
-    end;
-    // just ignore unsupported options
-    p := @p[ord(p[1]) + 2];
-  until p^ = #255;
-  // validate message consistency
-  dmt := lens[doDhcpMessageType];
-  if (dmt = 0) or                   // not set
-     (dhcp^.options[dmt] <> 1) then // length
-    exit;
-  dmt := dhcp^.options[dmt + 1];    // value
-  if (dmt > byte(high(TDhcpMessageType))) or
-     (DHCP_BOOT[TDhcpMessageType(dmt)] <> dhcp^.op) then // inconsistent type
-    exit;
-  // here we have a valid DHCP frame
-  if mac <> nil then
-  begin
-    m := DhcpMac(dhcp, lens[doDhcpClientIdentifier]);
-    if m = nil then
-      m := @dhcp^.chaddr; // option 61 is no MAC: fallback to BOOTP value
-    mac^ := m^; // copy
-  end;
-  result := TDhcpMessageType(dmt);
 end;
 
 function DhcpFindOption(dhcp: PDhcpPacket; op: byte): PAnsiChar;
@@ -1643,16 +1874,17 @@ end;
 
 function DhcpIdem(dhcp: PDhcpPacket; len: PtrUInt; const P2: ShortString): boolean;
 begin
-  result := (len <> 0) and
-            PropNameEquals(PShortString(@dhcp^.options[len]), @P2);
+  result := false;
+  if len <> 0 then
+    result := IdemPropName(PShortString(@dhcp^.options[len])^, P2);
 end;
 
 function DhcpIP4(dhcp: PDhcpPacket; len: PtrUInt): TNetIP4;
 begin
-  result := 0;
+  result := len;
   if len = 0 then
     exit;
-  inc(len, PtrUInt(@dhcp.options));
+  len := PtrUInt(@dhcp.options[len]);
   if PByte(len)^ = SizeOf(result) then
     result := PCardinal(len + 1)^;
 end;
@@ -1667,7 +1899,7 @@ begin
   result := nil;
   if len = 0 then
     exit;
-  inc(len, PtrUInt(@dhcp.options));
+  len := PtrUInt(@dhcp.options[len]);
   case PByte(len)^ of // e.g. client identifier
     SizeOf(TNetMac):
       // PXE clients often use MAC-only (6 bytes)
@@ -1679,13 +1911,83 @@ begin
   end;
 end;
 
+function DhcpParseHeader(dhcp: PDhcpPacket; len: PtrInt): boolean;
+  {$ifdef FPC} inline; {$endif}
+begin
+  result := (dhcp <> nil) and
+            (len >= DHCP_PACKET_HEADER) and
+            (len <= SizeOf(dhcp^)) and
+            (dhcp^.cookie = DHCP_MAGIC_COOKIE) and
+            (dhcp^.htype = ARPHRD_ETHER) and
+            (dhcp^.hlen = SizeOf(TNetMac)) and
+            (dhcp^.xid <> 0) and
+            (dhcp^.op in [BOOT_REQUEST, BOOT_REPLY]);
+end;
+
+function DhcpParse(dhcp: PDhcpPacket; len: PtrInt; var lens: TDhcpParsed;
+  found: PDhcpOptions; mac: PNetMac): TDhcpMessageType;
+var
+  p: PAnsiChar;
+  m: PNetMac;
+  opt: TDhcpOption;
+  dmt: byte;   // TDhcpMessageType
+begin
+  result := dmtUndefined;
+  if found <> nil then
+    found^ := [];
+  FillCharFast(lens, SizeOf(lens), 0);
+  // validate header
+  if not DhcpParseHeader(dhcp, len) then
+    exit;
+  // parse DHCP options store as Type-Length-Value (TLV)
+  dec(len, DHCP_PACKET_HEADER);
+  p := @dhcp^.options;
+  repeat
+    // check len to avoid buffer overflow on malformatted input
+    dec(len, ord(p[1]) + 2);
+    if len < 1 then
+      exit;
+    // fast O(1) option number lookup and lens[]/found^ filling
+    opt := doPad;
+    if ord(p[0]) <= high(DHCP_OPTION_INV) then
+      opt := DHCP_OPTION_INV[ord(p[0])];
+    inc(p);
+    if opt <> doPad then
+    begin
+      if found <> nil then
+        include(found^, opt);
+      lens[opt] := p - PAnsiChar(@dhcp^.options); // p[0]=len p[1]=value
+    end;
+    // just ignore unsupported options
+    p := @p[ord(p^) + 1];
+  until p^ = #255;
+  // validate message consistency
+  dmt := lens[doMessageType];
+  if (dmt = 0) or                   // not set
+     (dhcp^.options[dmt] <> 1) then // length
+    exit;
+  dmt := dhcp^.options[dmt + 1];    // value
+  if (dmt > byte(high(TDhcpMessageType))) or
+     (DHCP_BOOT[TDhcpMessageType(dmt)] <> dhcp^.op) then // inconsistent type
+    exit;
+  // here we have a valid DHCP frame
+  if mac <> nil then
+  begin
+    m := DhcpMac(dhcp, lens[doClientIdentifier]);
+    if m = nil then
+      m := @dhcp^.chaddr; // option 61 is no MAC: fallback to BOOTP value
+    mac^ := m^; // copy
+  end;
+  result := TDhcpMessageType(dmt);
+end;
+
 function DhcpRequestList(dhcp: PDhcpPacket; const lens: TDhcpParsed): TDhcpOptions;
 var
   p, n: PtrUInt;
   opt: TDhcpOption;
 begin
   result := [];
-  p := lens[doDhcpParameterRequestList];
+  p := lens[doParameterRequestList];
   if p = 0 then
     exit;
   inc(p, PtrUInt(@dhcp.options));
@@ -1702,25 +2004,158 @@ begin
     until n = 0;
 end;
 
-function Ip4sFromText(p: PUtf8Char; var v: RawByteString): boolean;
+// uncompressed DNS label format: [len + part] + ending len=0
+
+function DnsLabelAppendText(var v: PByteArray; var len: PtrInt; var txt: shortstring): boolean;
+var
+  vlen: PtrInt;
 begin
-  v := IP4sToBinary(ToIP4s(p)); // allow CSV of IPs
-  result := v <> '';
+  result := false;
+  if len = 0 then
+    exit;
+  if v[0] <> 0 then
+    repeat
+      if v[0] > len then
+        exit;                          // avoid buffer overflow
+      vlen := v[0] + 1;
+      dec(len, vlen);
+      AppendShortBuffer(PAnsiChar(v) + 1, v[0], high(txt), @txt);
+      inc(PByte(v), vlen);
+      if v[0] = 0 then
+        break;
+      AppendShortCharSafe('.', txt);  // '.' between parts
+      if ord(txt[0]) = high(txt) then
+        exit;                          // output overflow
+    until false;
+  // reached final #0 marker = uncompressed buffer
+  inc(PByte(v));
+  dec(len);
+  result := true;
 end;
 
-function MacsFromText(p: PUtf8Char; var v: RawByteString): boolean;
+function DnsLabelToText(v: pointer; len: PtrInt; var txt: shortstring): boolean;
 begin
-  v := MacsToBinary(ToMacs(p)); // allow CSV of MACs
-  result := v <> '';
+  txt[0] := #0;
+  result := DnsLabelAppendText(PByteArray(v), len, txt);
+end;
+
+function DnsLabelAppendBin(p: PUtf8Char; var bin: shortstring): PUtf8Char;
+var
+  len: PtrInt;
+begin
+  result := nil; // error parsing
+  if p = nil then
+    exit;
+  repeat
+    p := GotoNextNotSpace(p);
+    len := 0;
+    while not (p[len] in [#0, '.', ',', ';']) do
+      inc(len);
+    if (len = 0) or
+       (len > high(bin)) then
+      exit;
+    AppendShortCharSafe(AnsiChar(len), bin);
+    AppendShortBuffer(pointer(p), len, high(bin), @bin);
+    if ord(bin[0]) >= high(bin) then
+      exit;
+    inc(p, len);
+    if p^ <> '.' then             // end of value
+      break;
+    inc(p);                       // skip '.'
+  until false;
+  AppendShortCharSafe(#0, bin);   // final #0
+  if p^ <> #0 then
+    inc(p);                       // skip CSV ',' and ';' delimiters
+  result := p;
+end;
+
+function SetDnsSearch(p: PUtf8Char; var v: RawByteString): boolean;
+var
+  bin: ShortString;
+begin
+  result := false;
+  bin[0] := #0;
+  repeat
+    p := DnsLabelAppendBin(p, bin);
+    if (p = nil) or           // invalid input
+       (bin[0] > #250) then   // avoid TLV overflow - TODO: concatenate TLV?
+      exit;
+    p := GotoNextNotSpace(p);
+  until p^ = #0;
+  FastSetRawByteString(v, @bin[1], ord(bin[0]));
+  result := true;
+end;
+
+const
+  CLIENT_SERVER: array[0..1] of RawUtf8 = ('client', 'server');
+  RFC4702_FLAG_S = 1; // server SHOULD or SHOULD NOT perform DNS updates
+  RFC4702_FLAG_E = 4; // FQDN canonical wire format of Domain Name field
+
+function Rfc4702FromJson(p: PUtf8Char; out v: RawByteString): boolean;
+var
+  d: PAnsiChar;
+  parser: TJsonParserContext;
+  s: byte;
+begin
+  // encode a RFC 4702 client/server:"fqdn" response value with E=0=ASCII
+  result := false;
+  if p = nil then
+    exit;
+  parser.InitParser(p);
+  if not parser.ParseObject or
+     not parser.GetJsonFieldName or
+     not parser.ValueEnumFromConst(@CLIENT_SERVER, 2, s) or // s=0/1
+     not parser.ParseNext or
+     not parser.WasString or
+     (parser.ValueLen = 0) then
+    exit;
+  d := FastNewRawByteString(v, parser.ValueLen + 3);
+  PCardinal(d)^ := s * RFC4702_FLAG_S;    // flags=S=0/1 + rcode1=rcode2=0
+  MoveFast(parser.Value^, d[3], parser.ValueLen); // append as ASCII (E=0)
+  result := true;
 end;
 
 type
   TParseRule = (prMatch, prValue, prTlv);
+  TParseType = (ptTextBin, ptIp4, ptMac, ptUuid, ptUuid97, ptBool,
+                ptUInt8, ptUInt16, ptUInt32, ptUInt64,
+                ptVendor43, ptMsg53, ptParam55, ptClient61, ptFqdn81, ptRelay82,
+                ptDom119, ptCidr121, ptVendor12x);
 const
-  RULE_VALUE_PREFIX: array[0 .. 12] of PAnsiChar = (
-    'IP:', 'MAC:', 'HEX:', 'BASE64:', 'UUID:', 'GUID:',
-    'UINT8:', 'UINT16:', 'UINT32:', 'UINT64:', 'ESC:', 'CIDR:', nil);
+  // O(1) lookup of raw DHCP option number to its value type
+  PARSE_TYPE: array[0 .. 125] of TParseType = (
+    ptTextBin, ptIp4, ptUInt32, ptIp4, ptIp4, ptIp4, ptIp4, ptIp4, ptIp4,
+    ptIp4, ptIp4, ptIp4, ptTextBin, ptUInt16, ptTextBin, ptTextBin, ptIp4, // 16
+    ptTextBin, ptTextBin, ptBool, ptBool, ptIp4, ptUInt16, ptUInt8, ptUInt32,
+    ptUInt16, ptUInt16, ptBool, ptIp4, ptBool, ptBool, ptBool, ptIp4, ptIp4,
+    ptBool, ptUInt32, ptBool, ptUInt8, ptUInt32, ptBool, ptTextBin, ptIp4, // 41
+    ptIp4, ptVendor43, ptIp4, ptIp4, ptUInt8, ptTextBin, ptIp4, ptIp4,
+    ptIp4, ptUInt32, ptUInt8, ptMsg53, ptIp4, ptParam55, ptTextBin,        // 56
+    ptUInt16, ptUInt32, ptUInt32, ptTextBin, ptClient61, ptTextBin,
+    ptTextBin, ptTextBin, ptIp4, ptTextBin, ptTextBin, ptIp4, ptIp4, ptIp4,
+    ptIp4, ptIp4, ptIp4, ptIp4, ptIp4, ptIp4, ptTextBin, ptTextBin,        // 78
+    ptTextBin, ptTextBin, ptFqdn81, ptRelay82, ptTextBin, ptTextBin, ptIp4,
+    ptTextBin, ptTextBin, ptTextBin, ptIp4, ptTextBin, ptUInt32, ptIp4,    // 92
+    ptUInt16, ptTextBin, ptTextBin, ptTextBin, ptUuid97, ptTextBin,
+    ptTextBin, ptTextBin, ptTextBin, ptTextBin, ptTextBin, ptTextBin,     // 104
+    ptTextBin, ptTextBin, ptTextBin, ptUInt32, ptTextBin, ptTextBin,
+    ptTextBin, ptIp4, ptTextBin, ptTextBin, ptTextBin, ptUInt8, ptUInt16, // 117
+    ptIp4, ptDom119, ptTextBin, ptCidr121, ptTextBin, ptTextBin,
+    ptVendor12x, ptVendor12x);                                            // 125
   FAKE_OP_MAC = 255; // to parse "mac": content
+
+function ParseType(op: byte): TParseType;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  if op <= high(PARSE_TYPE) then
+    result := PARSE_TYPE[op]
+  else if op = 249 then
+    result := ptCidr121 // Windows specific alias introduced for compatibility
+  else if op = FAKE_OP_MAC then
+    result := ptMac
+  else
+    result := ptTextBin;
+end;
 
 function SetRuleValue(var p: TJsonParserContext; var v: RawByteString;
   op: byte): boolean;
@@ -1741,14 +2176,19 @@ begin
   // actually decode the value
   len := p.ValueLen;
   if len = 0 then
+  begin
+    FastAssignNew(v);
+    result := true;
     exit;
+  end;
   if p.WasString then
     // handle "ip:..." .. "cidr:..." prefixes in string values
-    case IdemPPChar(p.Value, @RULE_VALUE_PREFIX) of
+    case IdemPCharSep(p.Value,
+      'IP:|MAC:|HEX:|BASE64:|UUID:|GUID:|UINT8:|UINT16:|UINT32:|UINT64:|ESC:|CIDR:|') of
       0:    // ip:
-        result := Ip4sFromText(p.Value + 3, v); // allow CSV of IPs
+        result := ToIP4Binary(p.Value + 3, v) >= 0; // allow CSV of IPs
       1:    // mac:
-        result := MacsFromText(p.Value + 4, v); // allow CSV of MACs
+        result := ToMacBinary(p.Value + 4, v) >= 0; // allow CSV of MACs
       2:    // hex:
         result := (len > 4) and
                   (len < (255 * 2) + 4) and
@@ -1763,7 +2203,7 @@ begin
           if not result then
             exit;
           if op = 97 then
-            goto uuid97; // special encoding as 17-bytes with initial #0
+            goto uuid97; // special encoding as 17-bytes with type=#0 prefix
           FastSetRawByteString(v, @tmp.guid, SizeOf(TGuid));
         end;
       6:    // uint8:
@@ -1800,29 +2240,49 @@ begin
         result := CidrRoutes(p.Value + 5, v);
     else
       begin
-        // recognize configurable options in string value
-        case op of
-          3 .. 11, 16, 21, 28, 32, 33, 41, 42, 44, 45, 48, 49, 54, 65,
-          68 .. 76, 85, 89, 112, 136, 138:
+        // recognize configurable options in "string" value
+        case ParseType(op) of
+          ptIp4:
             begin
-              result := Ip4sFromText(p.Value, v); // allow CSV of IP4
+              result := ToIP4Binary(p.Value, v) >= 0; // allow CSV of IP4
               if result then
                 exit;
             end;
-          97:
+          ptFqdn81:
+            begin
+              // set a RFC 4702 {client:"fqdn"} response value with flags=0
+              d := FastNewRawByteString(v, p.ValueLen + 3);
+              PCardinal(d)^ := 0; // flags=rcode1=rcode2=0
+              MoveFast(p.Value^, d[3], p.ValueLen); // E=0=ASCII
+              result := true;
+              exit;
+            end;
+          ptUuid97:
             begin
               result := RawUtf8ToGuid(p.Value, len, tmp.guid);
               if result then
               begin
 uuid97:         d := FastNewRawByteString(v, 17); // specific to RFC 4578 (PXE)
-                d^ := #0;
+                d^ := #0;                         // type=#0 prefix
                 PGuid(d + 1)^ := tmp.guid;
                 exit;
               end;
             end;
-          FAKE_OP_MAC: // fake call with op=255 to parse "mac": content
+          ptDom119:
             begin
-              result := MacsFromText(p.Value, v); // allow CSV of MACs
+              result := SetDnsSearch(p.Value, v);
+              if result then
+                exit;
+            end;
+          ptCidr121:
+            begin
+              result := CidrRoutes(p.Value, v);
+              if result then
+                exit;
+            end;
+          ptMac: // fake call with op=255 to parse "mac": content
+            begin
+              result := ToMacBinary(p.Value, v) >= 0; // allow CSV of MACs
               exit;
             end;
         end;
@@ -1840,13 +2300,13 @@ uuid97:         d := FastNewRawByteString(v, 17); // specific to RFC 4578 (PXE)
         begin
           // recognize most JSON number size from configurable options
           tmp.c0 := GetCardinal(p.Value);
-          case op of
-            23, 37, 46, 52, 116:
-              len := 1; // uint8
-            13, 22, 25, 26, 57, 93, 117:
+          case ParseType(op) of
+            ptUInt8:
+              len := 1;
+            ptUInt16:
               begin
                 tmp.c0 := bswap16(tmp.c0);
-                len := 2; // uint16
+                len := 2;
               end;
           else
             begin
@@ -1865,9 +2325,424 @@ uuid97:         d := FastNewRawByteString(v, 17); // specific to RFC 4578 (PXE)
           result := true;
         end;
       '{':
-        // try to parse a JSON object into a TLV value
-        result := TlvFromJson(p.Value, v);
+        case op of
+          81:
+            // support {client:"fqdn"} or {server:"fqdn"} format
+            result := Rfc4702FromJson(p.Value, v);
+        else
+         // try to parse a JSON object into a TLV value
+          result := TlvFromJson(p.Value, v);
+        end;
     end;
+end;
+
+function DhcpOptName(op: byte): PRawUtf8; // PRawUtf8 to avoid try..finally
+  {$ifdef HASINLINE} inline; {$endif}
+var
+  opt: TDhcpOption;
+begin
+  opt := doPad;
+  if op <= high(DHCP_OPTION_INV) then
+    opt := DHCP_OPTION_INV[op];
+  if opt = doPad then
+    result := @SmallUInt32Utf8[op]
+  else
+    result := @DHCP_OPTION[opt];
+end;
+
+procedure AddTextBinJson(v: PAnsiChar; len: integer; W: TJsonWriter);
+begin
+  W.AddDirect('"');
+  if IsValidUtf8WithoutControlChars(pointer(v), len) then
+    W.AddJsonEscape(v, len)    // ASCII/UTF-8
+  else if len <= 32 then
+    W.AddBinToHumanHex(v, len) // e.g. for MAC or UUID
+  else
+  begin
+    W.AddDirect('h', 'e', 'x', ':');
+    W.AddBinToHex(v, len, {lower=}true);
+  end;
+  W.AddDirect('"');
+end;
+
+procedure AddTlvJson(v: PAnsiChar; len: integer; W: TJsonWriter; rai: boolean);
+var
+  l: PtrInt;
+begin
+  W.AddDirect('{');
+  repeat
+    if rai and
+       (ord(v[0]) <= high(RAI_OPTION_INV)) then
+      W.AddFieldName(RAI_OPTION[RAI_OPTION_INV[ord(v[0])]])
+    else
+      W.AddPropName(ord(v[0]));
+    AddTextBinJson(@v[2], ord(v[1]), W);
+    l := ord(v[1]) + 2;
+    dec(len, l);
+    if len = 0 then
+      break;
+    inc(v, l);
+    W.AddComma;
+  until false;
+  W.AddDirect('}');
+end;
+
+function IsValidTlv(op: PAnsiChar; len: integer): boolean;
+begin
+  result := false;
+  repeat
+    dec(len, 2);          // type + len=op[1]
+    if len < 0 then
+      exit;
+    dec(len, ord(op[1])); // value
+    if len = 0 then
+      break;
+    op := @op[ord(op[1]) + 2];
+  until false;
+  result := true;
+end;
+
+function IsValidRfc3925(op: PAnsiChar; len: integer): boolean;
+begin
+  result := false;
+  repeat
+    dec(len, 5);          // entreprise-number + data-len=op[4]
+    if len < 0 then
+      exit;
+    dec(len, ord(op[4])); // jump vendor-data
+    if len = 0 then
+      break;
+    op := @op[ord(op[4]) + 5];
+  until false;
+  result := true;
+end;
+
+function AddJsonWriterDns(W: TJsonWriter; v: pointer; len: PtrInt; csv: boolean): boolean;
+var
+  tmp: ShortString;
+begin
+  result := false;
+  tmp[0] := #0;
+  repeat
+    if not DnsLabelAppendText(PByteArray(v), len, tmp) then
+      exit;                                               // invalid input
+    if (len = 0) or                                       // last item
+       not csv then                                       // single item
+      break;
+    AppendShortCharSafe(',', tmp);
+  until false;
+  if csv then
+    W.AddDirect('"');
+  W.AddJsonEscape(@tmp[1], ord(tmp[0]));                  // send at once
+  if csv then
+    W.AddDirect('"');
+  result := true;
+end;
+
+procedure AddJsonWriterRfc4702(W: TJsonWriter; v: PAnsiChar; len: PtrInt);
+begin
+  // https://kea.readthedocs.io/en/kea-3.1.4/arm/dhcp4-srv.html#ddns-for-dhcpv4
+  // we support S+E flags; O=0 from a client; N is ignored (no DDNS anyway here)
+  W.AddDirect('{'); // {client/server:"fqdn"}
+  W.AddFieldName(CLIENT_SERVER[ord(v[0]) and RFC4702_FLAG_S]);
+  W.AddDirect('"');
+  dec(len, 3);
+  if ord(v[0]) and RFC4702_FLAG_E = 0 then
+    // E=0: plain ASCII
+    W.AddJsonEscape(v + 3, len)
+  else
+    // E=1: wire format aka "canonical form"
+    AddJsonWriterDns(W, v + 3, len, {csv=}false);
+  W.AddDirect('"', '}');
+end;
+
+procedure ParseTypeJson(tlv: PByteArray; W: TJsonWriter; recognize: boolean);
+var
+  len: cardinal;
+  v: PAnsiChar;
+begin
+  len := tlv[1];
+  if len = 0 then
+  begin
+    W.AddNull;
+    exit;
+  end;
+  v := @tlv[2];
+  // recognize and handle most common option types
+  if recognize then
+    case ParseType(tlv[0]) of
+      ptIp4:
+        if len and 3 = 0 then
+        begin
+          len := len shr 2;
+          if len = 1 then                          // as JSON "1.2.3.4"
+          begin
+            AddJsonWriterIP4(W, v);
+            exit;
+          end;
+          W.AddDirect('[');                        // as JSON array
+          repeat
+            AddJsonWriterIP4(W, v);
+            dec(len);
+            if len = 0 then
+              break;
+            inc(PNetIP4(v));
+            W.AddComma;
+          until false;
+          W.AddDirect(']');
+          exit;
+        end;
+      ptMac:
+        if len = SizeOf(TNetMac) then              // as JSON string "xx:xx:.."
+        begin
+          W.AddBinToHumanHex(v, SizeOf(TNetMac), '"');
+          exit;
+        end
+        else if len mod SizeOf(TNetMac) = 0 then   // as JSON array
+        begin
+          W.AddDirect('[');
+          repeat
+            W.AddBinToHumanHex(v, SizeOf(TNetMac), '"');
+            dec(len, SizeOf(TNetMac));
+            if len = 0 then
+              break;
+            inc(PNetMac(v));
+            W.AddComma;
+          until false;
+          W.AddDirect(']');
+          exit;
+        end;
+      ptUInt8:
+        begin
+          if len = 1 then
+          begin
+            W.AddB(PByte(v)^);
+            exit;
+          end;
+          W.AddDirect('[');                        // as JSON array
+          repeat
+            W.AddB(PByte(v)^);
+            dec(len);
+            if len = 0 then
+              break;
+            inc(PByte(v));
+            W.AddComma;
+          until false;
+          W.AddDirect(']');
+          exit;
+        end;
+      ptUInt16:
+        if len and 1 = 0 then
+        begin
+          len := len shr 1;
+          if len = 1 then
+          begin
+            W.AddU(bswap16(PWord(v)^));
+            exit;
+          end;
+          W.AddDirect('[');                        // as JSON array
+          repeat
+            W.AddU(bswap16(PWord(v)^));
+            dec(len);
+            if len = 0 then
+              break;
+            inc(PWord(v));
+            W.AddComma;
+          until false;
+          W.AddDirect(']');
+          exit;
+        end;
+      ptUInt32:
+        if len and 3 = 0 then
+        begin
+          len := len shr 2;
+          if len = 1 then
+          begin
+            W.AddU(bswap32(PCardinal(v)^));
+            exit;
+          end;
+          W.AddDirect('[');                        // as JSON array
+          repeat
+            W.AddU(bswap32(PCardinal(v)^));
+            dec(len);
+            if len = 0 then
+              break;
+            inc(PCardinal(v));
+            W.AddComma;
+          until false;
+          W.AddDirect(']');
+          exit;
+        end;
+      ptBool:
+        if len = 1 then
+        begin
+          W.Add(PBoolean(v)^);                     // will normalize value byte
+          exit;
+        end;
+      ptVendor43, // most vendor-encapsulated-options use nested TLV
+      ptRelay82:  // relay-agent-information sub-options are always TLV encoded
+        if IsValidTlv(v, len) then
+        begin
+          AddTlvJson(v, len, W, tlv[0] = 82);      // as JSON object
+          exit;
+        end;
+      ptMsg53:
+        if len = 1 then
+        begin
+          W.AddJsonString(DHCP_TXT[TDhcpMessageType(v^)]);
+          exit;
+        end;
+      ptParam55:
+        begin
+          W.AddDirect('[');                        // as JSON array of "names"
+          repeat
+            if twoForceJsonStandard in W.CustomOptions then
+              W.AddJsonString(DhcpOptName(PByte(v)^)^)
+            else
+              W.AddB(PByte(v)^); // shorter and simple enough in extended/log
+            dec(len);
+            if len = 0 then
+              break;
+            inc(PByte(v));
+            W.AddComma;
+          until false;
+          W.AddDirect(']');
+          exit;
+        end;
+      ptClient61:
+        if (len = 6) or
+           ((len = 7) and
+            (ord(v[0]) = ARPHRD_ETHER)) then
+        begin
+          if len = 7 then
+            inc(v);
+          W.AddBinToHumanHex(v, 6, '"');           // as JSON string "xx:xx:.."
+          exit;
+        end;
+      ptFqdn81:
+        if (len > 3) and                           // RFC 4702
+           (v[1] = #0) and                         // rcode1 = 0
+           (v[2] = #0) then                        // rcode2 = 0
+        begin
+          AddJsonWriterRfc4702(W, v, len);         // {client/server:"fqdn"}
+          exit;
+        end;
+      ptUuid97:
+        if len in [16, 17] then
+        begin
+          if len = 17 then
+            inc(v);
+          W.AddJsonShort(UuidToShort(PGuid(v)^));  // as "uuid-xxx-xxx"
+          exit;
+        end;
+      ptDom119:
+         if AddJsonWriterDns(W, v, len, {csv=}true) then
+           exit;
+      ptVendor12x:
+        if IsValidRfc3925(v, len) then             // 124/125
+        begin
+          W.AddDirect('{');                        // as JSON object
+          repeat
+            W.AddPropName(bswap32(PCardinal(v)^)); // entreprise-number
+            inc(PCardinal(v));                     // data-len + vendor-data
+            if IsValidTlv(v + 1, ord(v[0])) then
+              AddTlvJson(v + 1, ord(v[0]), W, {rai=}false)
+            else
+              AddTextBinJson(v + 1, ord(v[0]), W);
+            dec(len, ord(v[0]) + 5);
+            if len <= 0 then
+              break;
+            v := @v[ord(v[0]) + 1];
+            W.AddComma;
+          until false;
+          W.AddDirect('}');
+          exit;
+        end;
+  end;
+  // if we reached here, we have either binary or plain text
+  AddTextBinJson(v, len, w);
+end;
+
+procedure DoDhcpToJson(W: TJsonWriter; p: PDhcpPacket; len: PtrInt; s: PDhcpState);
+var
+  o: PAnsiChar;
+begin
+  W.AddDirect('{');
+  // main DHCP packet fields
+  if p^.op = BOOT_REQUEST then
+    W.AddPropJsonShort('op', 'request')
+  else
+    W.AddPropJsonShort('op', 'reply');
+  if p^.ciaddr <> 0 then
+    W.AddPropJsonShort('ciaddr', IP4ToShort(@p^.ciaddr));
+  if p^.yiaddr <> 0 then
+    W.AddPropJsonShort('yiaddr', IP4ToShort(@p^.yiaddr));
+  if p^.siaddr <> 0 then
+    W.AddPropJsonShort('siaddr', IP4ToShort(@p^.siaddr));
+  if p^.giaddr <> 0 then
+    W.AddPropJsonShort('giaddr', IP4ToShort(@p^.giaddr));
+  if not IsZero(PNetMac(@p^.chaddr)^) then
+    W.AddPropJsonShort('chaddr', MacToShort(@p^.chaddr));
+  // parse and serialize all option fields in packet order
+  dec(len, DHCP_PACKET_HEADER);
+  o := @p^.options;
+  repeat
+    dec(len, ord(o[1]) + 2);
+    if len < 1 then
+      break; // avoid buffer overflow
+    W.AddFieldName(DhcpOptName(ord(o[0]))^);
+    ParseTypeJson(pointer(o), W, true);
+    W.AddComma;
+    o := @o[ord(o[1]) + 2];
+  until o^ = #255;
+  // end with main sllServer decoded/parsed state fields in fields
+  if s <> nil then
+  begin
+    if s^.RecvIp4 <> 0 then
+      W.AddPropJsonShort('via', IP4ToShort(@s^.RecvIp4));
+    if (s^.RecvHostName <> nil) and
+       (s^.RecvHostName^[0] <> #0) then
+      W.AddPropJsonShort('host', s^.RecvHostName^);
+    if s^.RecvBoot <> dcbDefault then
+      W.AddPropJsonString('boot', BOOT_TXT[s^.RecvBoot]);
+    if s^.Ip[0] <> #0 then
+      W.AddPropJsonShort('ip', s^.Ip);
+  end;
+  W.CancelLastComma('}');
+end;
+
+function DhcpParseToJson(dhcp: PDhcpPacket; len: PtrInt; extended: boolean): RawJson;
+var
+  tmp: TTextWriterStackBuffer; // 8KB static
+  W: TJsonWriter;
+begin
+  result := '';
+  if not DhcpParseHeader(dhcp, len) then
+    exit;
+  W := TJsonWriter.CreateOwnedStream(tmp);
+  try
+    if extended then
+      W.CustomOptions := [twoForceJsonExtended];
+    DoDhcpToJson(W, dhcp, len, {state=}nil); // as a single JSON object
+    W.SetText(RawUtf8(result));
+  finally
+    W.Free;
+  end;
+end;
+
+function TlvOptionToJson(opt: pointer; recognize: boolean): RawJson;
+var
+  tmp: TTextWriterStackBuffer; // 8KB static
+  W: TJsonWriter;
+begin
+  W := TJsonWriter.CreateOwnedStream(tmp);
+  try
+    W.CustomOptions := [twoForceJsonExtended];
+    ParseTypeJson(opt, W, recognize);
+    W.SetText(RawUtf8(result));
+  finally
+    W.Free;
+  end;
 end;
 
 const
@@ -1898,14 +2773,22 @@ begin
       v.kind := pvkRaw
   else if parser.ValueEnumFromConst(@DHCP_OPTION, length(DHCP_OPTION), v.mac[0]) then
   begin
+    // "lease-time": 7200
+    v.num := DHCP_OPTION_NUM[TDhcpOption(v.mac[0])];
+    v.kind := pvkOpt;
+  end
+  else if parser.ValueEnumFromConst(@DHCP_OPTION_ALTERNATE,
+            length(DHCP_OPTION_ALTERNATE), v.mac[0]) then
+  begin
     // "dhcp-lease-time": 7200
+    inc(v.mac[0], ord(low(DHCP_OPTION_ALTERNATE))); // adjust
     v.num := DHCP_OPTION_NUM[TDhcpOption(v.mac[0])];
     v.kind := pvkOpt;
   end
   else if pp <> prMatch then
-    exit
+    exit // prValue requires a v.num to be sent back as "always" or "requested"
   else
-    // prMatch e.g. as "boot" "mac" "circuit-id" "remote-id"
+    // prMatch-only identifiers e.g. "boot" "mac" "circuit-id" "remote-id"
     case FindNonVoidRawUtf8I(@MAIN_RULE_VALUE, parser.Value, parser.ValueLen,
            length(MAIN_RULE_VALUE)) of
       0:
@@ -1972,6 +2855,7 @@ function TlvFromJson(p: PUtf8Char; out v: RawByteString): boolean;
 var
   one: TRuleValue;
   parser: TJsonParserContext;
+  tmp: TSynTempAdder; // no transient memory allocation
 begin
   result := false;
   if p = nil then
@@ -1979,11 +2863,14 @@ begin
   parser.InitParser(p);
   if not parser.ParseObject then
     exit;
+  tmp.Init;
   repeat
     if not ParseRuleValue(parser, one, prTlv) then
       exit;
-    Append(v, [AnsiChar(one.num), AnsiChar(length(one.value)), one.value])
+    tmp.AddDirect(AnsiChar(one.num), AnsiChar(length(one.value)));
+    tmp.Add(one.value)
   until parser.EndOfObject = '}';
+  tmp.Done(v, CP_RAWBYTESTRING);
   result := true;
 end;
 
@@ -2003,18 +2890,20 @@ function CidrRoutes(p: PUtf8Char; var bin: RawByteString): boolean;
 var
   dest, router: TNetIP4;
   w: PtrUInt;
-  tmp: TShort15;
+  tmp: TSynTempAdder;
 begin
   bin := '';
   result := false;
+  tmp.Init;
   if p <> nil then
     repeat
-      if not NetIsIP4(p, @dest) then
+      if not NetIsIP4(p, @dest) then             // parse destination IP
         exit;
+      inc(p, 7);                                 // minimal '1.2.3.4' length
       while not (p^ in [#0, '/', ',']) do
         inc(p);
-      w := 32; // default mask
-      if p^ = '/' then
+      w := 32;                                   // default mask
+      if p^ = '/' then                           // parse /mask value
       begin
         w := MinPtrUInt(32, GetCardinal(p + 1)); // clamp mask width
         repeat
@@ -2022,21 +2911,22 @@ begin
         until p^ in [#0, ','];
       end;
       if p^ = #0 then
-        exit; // premature
-      inc(p); // jump ','
-      if not NetIsIP4(p, @router) then
+        exit;                                    // premature
+      inc(p);                                    // jump ','
+      if not NetIsIP4(p, @router) or             // parse router/next-hop IP
+         (router = 0) then                       // should not be void
         exit;
-      tmp[0] := #1;
-      tmp[1] := AnsiChar(w);                                    // mask width
-      AppendShortBuffer(@dest, (w + 7) shr 3, high(tmp), @tmp); // only prefix
-      AppendShortBuffer(@router, 4, high(tmp), @tmp);           // router
-      Append(bin, @tmp[1], ord(tmp[0]));
+      tmp.AddDirect(AnsiChar(w));                // prefix length (1 byte)
+      tmp.Add(@dest, (w + 7) shr 3);             // significant prefix bytes
+      tmp.Add(@router, 4);                       // router IP (4 bytes)
+      inc(p, 7);                                 // minimal '1.2.3.4' length
       while not (p^ in [#0, ';', ',']) do
         inc(p);
       if p^ = #0 then
         break;
-      inc(p); // jump ',' or ';' between routes
+      inc(p);                                    // skip ',' ';' between routes
     until p^ = #0;
+  tmp.Done(bin, CP_RAWBYTESTRING);
   result := true;
 end;
 
@@ -2075,7 +2965,8 @@ begin
   result := false;
   FillZero(nfo.mac);
   nfo.uuid := '';
-  if TrimSplit(macip, mac, ip, '=') then // 'mac=ip' or 'uuid=ip' format
+  if TrimSplit(macip, mac, ip, '=') or   // 'mac=ip' or 'uuid=ip' format
+     TrimSplit(macip, mac, ip, ' ') then // 'mac ip' or 'uuid ip' format
     if ((length(mac) = 17) and
         (TextToMac(pointer(mac), @nfo.mac))) then
       // exact 'xx:xx:xx:xx:xx:xx' format
@@ -2176,7 +3067,7 @@ begin
 end;
 
 
-{ **************** Middle-Level DHCP Scope and Lease Logic }
+{ **************** Middle-Level DHCP Scope, Pool and Lease Logic }
 
 function ToText(st: TLeaseState): PShortString;
 begin
@@ -2184,12 +3075,8 @@ begin
 end;
 
 const
-  // truncate 64-bit integer to 6-bytes TNetMac - efficient on Intel and aarch64
-  MAC_MASK = $0000ffffffffffff;
   // hardcore limit of dmtInform to 3 IPs per second
   MAX_INFORM = 3;
-  // pre-allocate 4KB of working entries e.g. in TDhcpScope.AfterFill
-  PREALLOCATE_LEASES = 250;
 
 // some sensitive O(n) functions which could favor specific alignment
 
@@ -2231,26 +3118,6 @@ end;
   {$CODEALIGN LOOP=16}  // may favor bigger loops in the next 2 functions
 {$endif FPC_CODEALIGN}
 
-function DoOutdated(p: PDhcpLease; tix32, n: cardinal): integer;
-begin // dedicated sub-function for better codegen (100ns for 200 entries)
-  result := 0;
-  if n <> 0 then
-    repeat
-      if (p^.Expired < tix32) and
-         (p^.State in [lsReserved, lsAck, lsUnavailable]) then
-      begin
-        inc(result);
-        p^.State := lsOutdated;
-      end;
-      {$ifndef CPUINTEL}        // seems actually slower on modern Intel/AMD
-      if p^.RateLimit <> 0 then // don't invalidate L1 cache
-      {$endif CPUINTEL}
-        p^.RateLimit := 0;      // reset the rate limiter every second
-      inc(p);
-      dec(n);
-    until n = 0;
-end;
-
 const
   MIN_UUID_BYTES = 4; // < 4 bytes is too short to reliably identify a client
 
@@ -2282,77 +3149,73 @@ end;
 {$endif FPC_CODEALIGN}
 
 
-{ TDhcpScope }
+{ TDhcpPool }
 
-function TDhcpScope.FindMac(mac: Int64): PDhcpLease;
+function TDhcpPool.Match(ip4: TNetIP4): boolean;
 begin
-  mac := mac and MAC_MASK;
+  ip4 := bswap32(ip4);
+  result := (ip4 >= IpMinLE) and // should be within inclusive range
+            (ip4 <= IpMaxLE);
+end;
+
+function TDhcpPool.FindMac(mac64: Int64): PDhcpLease;
+begin
   // naive but efficient lookup of the last added lease during DHCP negotiation
   if cardinal(LastDiscover) < cardinal(Count) then
   begin
     result := @Entry[LastDiscover];
-    if PInt64(result)^ shr 16 = mac then
+    if PInt64(result)^ shr 16 = mac64 then
       exit;
   end;
   // search if this MAC has a static IP allocated
-  result := DoFindMac(pointer(StaticMac), mac, length(StaticMac));
+  result := DoFindMac(pointer(StaticMac), mac64, length(StaticMac));
   if result <> nil then
     result^.State := lsStatic // force for ComputeResponse() logic
   else
     // O(n) brute force search in L1/L2 cache is fine up to 100,000 items
-    result := DoFindMac(pointer(Entry), mac, Count);
+    result := DoFindMac(pointer(Entry), mac64, Count);
 end;
 
-function TDhcpScope.FindIp4(ip4: TNetIP4): PDhcpLease;
+function TDhcpPool.FindIp4(ip4: TNetIP4): PDhcpLease;
 begin
-  result := DoFindIp(pointer(Entry), ip4, Count);
+  if @self <> nil then
+    result := DoFindIp(pointer(Entry), ip4, Count)
+  else
+    result := nil;
 end;
 
-function TDhcpScope.NewLease(mac64: Int64): PDhcpLease;
-var
-  n: PtrInt;
-begin
-  inc(Metrics.Current[dsmLeaseAllocated]);
-  // first try if we have any lsFree entries from ReuseIp4()
-  if FreeListCount <> 0 then
-  begin
-    dec(FreeListCount);
-    result := @Entry[FreeList[FreeListCount]]; // LIFO is the fastest
-    PInt64(result)^ := mac64 shl 16; // also reset State+RateLimit
-    if result^.State = lsFree then   // paranoid
-      exit;
-  end;
-  // we need to add a new entry - maybe with reallocation
-  n := Count;
-  if n = length(Entry) then
-    SetLength(Entry, NextGrow(n));
-  result := @Entry[n];
-  PInt64(result)^ := mac64 shl 16; // also reset State+RateLimit
-  inc(Count);
-end;
-
-function TDhcpScope.Index(p: PDhcpLease): cardinal;
-begin
-  result := cardinal(PtrUInt(p) - PtrUInt(Entry)) shr 4;
-end;
-
-function TDhcpScope.IsStaticIP(ip4: TNetIP4): boolean;
+function TDhcpPool.IsStaticIP(ip4: TNetIP4): boolean;
 begin // use branchless asm on x86_64
-  result := FastFindIntegerSorted(StaticIP, ip4) >= 0;
+  result := FastFindIntegerSorted(TIntegerDynArray(StaticIP), ip4) >= 0;
 end;
 
-function TDhcpScope.ReuseIp4(p: PDhcpLease): TNetIP4;
+function SkipSubPools(p: PDhcpPool; ip: TNetIP4): TNetIP4;
+  {$ifdef HASINLINE} inline; {$endif}
+var
+  hi: TDALen;
+  max: TNetIP4;
 begin
-  AddInteger(FreeList, FreeListCount, Index(p));
-  result := p^.IP4;       // return this IP4
-  FillZero(THash128(p^)); // set MAC=0 IP=0 State=lsFree
+  result := ip;
+  hi := PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1); // optimized for FPC
+  repeat
+    if result < p^.IpMinLE then // increasing little-endian order in SubPools[]
+      exit;                     // not in any sub for sure
+    max := p^.IpMaxLEPlusOne;
+    if result < max then        // FPC compiles this as branchless cmovnbe
+      result := max;            // continue searching after this pool
+    if hi = 0 then
+      exit;
+    inc(p);
+    dec(hi);
+  until false;
 end;
 
-function TDhcpScope.NextIp4: TNetIP4;
+function TDhcpPool.NextIp4: TNetIP4;
 var
   le: TNetIP4;
   looped: boolean;
   existing, outdated: PDhcpLease;
+  p: PDhcpPool;
 begin
   result := LastIpLE; // all those f*LE variables are in little-endian order
   if (result < IpMinLE) or
@@ -2362,6 +3225,10 @@ begin
   looped := false;
   repeat
     inc(result);
+    p := SubPools;
+    if p <> nil then
+      // Main: ensure result is not in any SubPools[].IpMin/IpMax
+      result := SkipSubPools(p, result);
     if result > IpMaxLE then
       // we reached the end of IP range
       if looped then
@@ -2369,7 +3236,7 @@ begin
         // all IPs are already used in the internal list
         if outdated <> nil then
           // reuse the oldest outdated slot
-          result := ReuseIP4(outdated) // set MAC=0 IP=0 State=lsFree
+          result := ReuseLease(outdated) // set MAC=0 IP=0 State=lsFree
         else
           // pool exhausted: consider shorten the lease duration to 60-300 secs
           result := 0;
@@ -2401,47 +3268,226 @@ begin
   until false;
 end;
 
-procedure TDhcpScope.AfterFill(log: TSynLog);
+function TDhcpPool.NewLease(mac64: Int64): PDhcpLease;
+var
+  n: PtrInt;
+begin
+  inc(Scope^.Metrics.Current[dsmLeaseAllocated]);
+  // first try if we have any lsFree entries from ReuseIp4()
+  if FreeListCount <> 0 then
+  begin
+    dec(FreeListCount);
+    result := @Entry[FreeList[FreeListCount]]; // LIFO is the fastest
+    PInt64(result)^ := mac64 shl 16;           // also reset State+RateLimit
+    if result^.State = lsFree then             // paranoid
+      exit;
+  end;
+  // we need to add a new entry - maybe with reallocation
+  n := Count;
+  if n = length(Entry) then
+    SetLength(Entry, NextGrow(n));
+  result := @Entry[n];
+  PInt64(result)^ := mac64 shl 16; // also reset State+RateLimit
+  inc(Count);
+end;
+
+function TDhcpPool.LeaseIndex(p: PDhcpLease): cardinal;
+begin
+  result := cardinal(PtrUInt(p) - PtrUInt(Entry)) div SizeOf(p^);
+end;
+
+function TDhcpPool.ReuseLease(p: PDhcpLease): TNetIP4;
+var
+  ndx: cardinal;
+begin
+  if @self = nil then
+  begin
+    result := 0;
+    exit;
+  end;
+  ndx := LeaseIndex(p);
+  if ndx < cardinal(Count) then // paranoid
+    AddInteger(FreeList, FreeListCount, ndx);
+  result := p^.IP4;             // return this IP4
+  FillZero(THash128(p^));       // set MAC=0 IP=0 State=lsFree
+end;
+
+procedure TDhcpPool.EntryPreallocate;
+begin // default to 75% of full range, up to 250 entries = 4KB
+  SetLength(Entry, MinPtrUInt(250, ((IpMaxLE - IpMinLE) * 3) shr 2));
+end;
+
+procedure TDhcpPool.ClearLeases;
+begin
+  Entry := nil;
+  EntryPreallocate;
+  Count := 0;
+  FreeListCount := 0;
+end;
+
+function TDhcpPool.AddStatic(var nfo: TMacIP): boolean;
+var
+  n: PtrInt;
+  p: PDhcpLease;
+begin
+  result := false;
+  if (@self = nil) or
+     not Match(nfo.ip) then
+    exit;
+  // duplicated static MAC or UUID (check first) - but allow leases override
+  if not IsZero(nfo.mac) then
+    if (nfo.uuid <> '') or
+       (DoFindMac(pointer(StaticMac), PInt64(@nfo.mac)^ and MAC_MASK,
+          length(StaticMac)) <> nil) then
+      exit;
+  n := length(nfo.uuid);
+  if n <> 0 then
+    if (n < MIN_UUID_BYTES) or
+       (DoFindUuid(pointer(StaticUuid), pointer(nfo.uuid), n) <> 0) then
+      exit;
+  // register IP, properly sorted, and rejecting any duplicate
+  if AddSortedInteger(TIntegerDynArray(StaticIP), nfo.ip) < 0 then
+    exit;
+  // register the MAC or UUID value
+  if not IsZero(nfo.mac) then
+  begin
+    n := length(StaticMac);
+    SetLength(StaticMac, n + 1);
+    p := @StaticMac[n];
+    p^.Mac := nfo.mac;
+    p^.IP4 := nfo.ip;
+  end
+  else if nfo.uuid <> '' then
+  begin
+    Append(nfo.uuid, @nfo.ip, 4); // stored as raw BIN+IP
+    AddRawUtf8(TRawUtf8DynArray(StaticUuid), nfo.uuid);
+  end;
+  result := true;
+end;
+
+function TDhcpPool.AddStatic(const macip: RawUtf8): boolean;
+var
+  nfo: TMacIP;
+  l, r: RawUtf8;
+begin
+  result := false;
+  l := macip;
+  while TrimSplit(l, l, r, ',') do
+    if ParseMacIP(nfo, l) and
+       AddStatic(nfo) then
+      l := r
+    else
+      exit;
+  result := ParseMacIP(nfo, l) and
+            AddStatic(nfo);
+end;
+
+function TDhcpPool.RemoveStatic(ip4: TNetIP4): boolean;
 var
   i, n: PtrInt;
   p: PDhcpLease;
-  dcb: TDhcpClientBoot;
-  bootlog: RawUtf8;
-
-  procedure CheckSubNet(ident: PUtf8Char; ip: TNetIP4);
-  begin
-    if not Subnet.Match(ip) then
-      EDhcp.RaiseUtf8(
-        'PrepareScope: subnet-mask=% does not match %=%',
-        [Subnet.Mask, ident, IP4ToShort(@ip)]);
-  end;
-
+  u: PPAnsiChar;
 begin
-  // validate all settings values from the actual subnet
-  if Gateway <> 0 then
-    CheckSubnet('default-gateway', Gateway);
-  CheckSubnet('server-identifier', ServerIdentifier);
-  if IpMinLE = 0 then
-    IpMinLE := Subnet.ip + $0a000000; // e.g. 192.168.0.10
-  CheckSubnet('range-min', IpMinLE);
-  if IpMaxLE = 0 then
-    // e.g. 192.168.0.0 + pred(not(255.255.255.0)) = 192.168.0.254
-    IpMaxLE := bswap32(bswap32(Subnet.ip) +
-                    pred(not(bswap32(Subnet.mask))));
-  CheckSubnet('range-max', IpMaxLE);
-  if bswap32(IpMaxLE) <= bswap32(IpMinLE) then
+  result := false;
+  // remove this IP from the main sorted StaticIP[] list
+  i := FastFindIntegerSorted(TIntegerDynArray(StaticIP), ip4);
+  if i < 0 then
+    exit; // no previous AddStatic(ip4)
+  DeleteInteger(TIntegerDynArray(StaticIP), i);
+  result := true;
+  // remove this IP from StaticMac[]
+  n := length(StaticMac) - 1;
+  p := pointer(StaticMac);
+  for i := 0 to n do
+    if p^.IP4 = ip4 then
+    begin
+      UnmanagedDynArrayDelete(StaticMac, n, i, SizeOf(TNetMac));
+      SetLength(StaticMac, n);
+      exit; // one IP should not be in StaticMac[] and StaticUuid[]
+    end
+    else
+      inc(p);
+  // remove this IP from StaticUuid[] storing raw BIN+IP
+  u := pointer(StaticUuid);
+  for i := 0 to length(StaticUuid) - 1 do
+    if PCardinal(u^ + PStrLen(u^ - _STRLEN)^ - 4)^ = ip4 then
+    begin
+      DeleteRawUtf8(TRawUtf8DynArray(StaticUuid), i);
+      break;
+    end
+    else
+      inc(u);
+end;
+
+function TDhcpPool.AddRule(const json: array of RawByteString): PtrInt;
+var
+  s: TDhcpRuleSettings;
+  rule: TDhcpRule;
+  policy: TDhcpPolicy;
+begin
+  s := TDhcpRuleSettings.Create;
+  try
+    // JSON is parsed outside of the lock
+    if not JsonSettingsToObject(Join(json), s) then
+      EDhcp.RaiseU('AddRule: incorrect JSON');
+    if s.PrepareRule(Scope^, rule, policy) then // not inserted via AddStatic()
+      // append to Rules[]/Policies[] within Safe.Lock
+      result := AddRule(rule, policy)
+    else
+      result := -1;
+  finally
+    s.Free;
+  end;
+end;
+
+function TDhcpPool.AddRule(rule: TDhcpRule; policy: TDhcpPolicy): PtrInt;
+begin
+  Scope^.Safe.Lock;
+  try
+    result := length(Rules);
+    SetLength(Rules, result + 1);
+    SetLength(Policies, result + 1);
+    Rules[result] := rule;
+    Policies[result] := policy;
+  finally
+    Scope^.Safe.UnLock;
+  end;
+end;
+
+function TDhcpPool.DeleteRule(ndx: PtrInt): boolean;
+begin
+  Scope^.Safe.Lock;
+  try
+    result := DynArrayDelete(TypeInfo(TDhcpRules), Rules, ndx) and
+              DynArrayDelete(TypeInfo(TDhcpPolicies), Policies, ndx);
+  finally
+    Scope^.Safe.UnLock;
+  end;
+end;
+
+procedure TDhcpPool.AfterFill(log: TSynLog);
+var
+  i, n: PtrInt;
+  p: PDhcpLease;
+begin
+  // validate IpMin/IpMax values from the actual owner scope subnet
+  Scope^.CheckSubnet('min', IpMin);
+  Scope^.CheckSubnet('max', IpMax);
+  if bswap32(IpMax) <= bswap32(IpMin) then
     EDhcp.RaiseUtf8('PrepareScope: unexpected %..% range',
-      [IP4ToShort(@IpMinLE), IP4ToShort(@IpMaxLE)]);
-  if Broadcast <> 0 then
-    CheckSubNet('broadcast-address', Broadcast);
+      [IP4ToShort(@IpMin), IP4ToShort(@IpMax)]);
   for i := 0 to high(StaticIP) do
-    CheckSubnet('static', StaticIP[i]);
+    Scope^.CheckSubnet('static', StaticIP[i]);
   for i := 0 to high(StaticMac) do
-    CheckSubnet('static', StaticMac[i].IP4);
-  AddStatic(IP4ToText(@ServerIdentifier));
+    Scope^.CheckSubnet('static', StaticMac[i].IP4);
+  // store internal values in the more efficient endianess for direct usage
+  IpMinLE := bswap32(IpMin);
+  IpMaxLE := bswap32(IpMax);
+  IpMaxLEPlusOne := IpMaxLE + 1; // for branchless SkipSubPools()
+  LastIpLE := 0;
   // prepare the leases in-memory database
   if Entry = nil then
-    SetLength(Entry, PREALLOCATE_LEASES)
+    EntryPreallocate
   else
   begin
     // filter/validate all current leases from the actual subnet and statics
@@ -2449,7 +3495,8 @@ begin
     p := pointer(Entry);
     for i := 0 to Count - 1 do
     begin
-      if Subnet.Match(p^.IP4) and
+      if (p^.IP4 <> 0) and
+         Match(p^.IP4) and
          not IsStaticIP(p^.IP4) then
       begin
         if n <> i then
@@ -2461,24 +3508,188 @@ begin
     if n <> Count then
     begin
       if Assigned(log) then
-        log.Log(sllTrace, 'PrepareScope: subnet-mask adjust count=% from %',
-          [n, Count]);
+        log.Log(sllTrace, 'PrepareScope: compacted % leases into count=%',
+          [n - Count, n]);
       Count := n;
     end;
-    FreeListCount := 0;
+    FreeListCount := 0; // lsFree have p^.IP4=0 so would be just trimmed
+  end;
+  // log the IP range settings and the computed sub-network context
+  if Assigned(log) then
+    log.Log(sllInfo, 'PrepareScope: pool range min=% max=% static=%',
+      [IP4ToShort(@IpMin), IP4ToShort(@IpMax), IP4sToText(StaticIP)]);
+end;
+
+
+{ TDhcpScope }
+
+function DoFindPool(iple: cardinal; sub: PDhcpPool): PDhcpPool;
+var
+  n: integer;
+begin // increasing little-endian order in Pools[]
+  result := sub;
+  n := PDALen(PAnsiChar(sub) - _DALEN)^ + _DAOFF;
+  repeat // brute force O(n) search seems fast enough
+    if iple < result^.IpMinLE then
+      break; // not in any sub for sure
+    if iple <= result^.IpMaxLE then
+      exit;  // found in this inclusive min..max range
+    inc(result);
+    dec(n);
+  until n = 0;
+  result := nil;
+end;
+
+function TDhcpScope.FindPool(ip: TNetIP4): PDhcpPool;
+begin
+  result := pointer(Pools);
+  if result <> nil then
+  begin
+    result := DoFindPool(bswap32(ip), result);
+    if result <> nil then
+      exit;
+  end;
+  result := @Main; // fallback
+end;
+
+function TDhcpScope.Exists(ip: TNetIP4): boolean;
+var
+  pool: PDhcpPool;
+begin
+  pool := FindPool(ip);
+  result := pool^.IsStaticIP(ip) or
+            (DoFindIp(pointer(pool^.Entry), ip, pool^.Count) <> nil);
+end;
+
+function TDhcpScope.FindMac(mac: Int64; var pool: PDhcpPool): PDhcpLease;
+var
+  n: integer;
+begin
+  mac := mac and MAC_MASK;
+  pool := @Main;
+  result := Main.FindMac(mac);
+  if result <> nil then
+    exit;
+  pool := pointer(Pools);
+  if pool = nil then
+    exit;
+  n := PDALen(PAnsiChar(pool) - _DALEN)^ + _DAOFF;
+  repeat
+    result := pool^.FindMac(mac);
+    if result <> nil then
+      exit;
+    inc(pool);
+    dec(n);
+  until n = 0;
+  pool := nil;
+end;
+
+function TDhcpScope.FindStaticUuid(bin: pointer; len: TStrLen; var pool: PDhcpPool): TNetIP4;
+var
+  n: integer;
+begin
+  result := 0;
+  if len < MIN_UUID_BYTES then
+    exit;
+  pool := @Main;
+  result := DoFindUuid(pointer(pool^.StaticUuid), bin, len);
+  if result <> 0 then
+    exit;
+  pool := pointer(Pools);
+  if pool = nil then
+    exit;
+  n := PDALen(PAnsiChar(pool) - _DALEN)^ + _DAOFF;
+  repeat
+    result := DoFindUuid(pointer(pool^.StaticUuid), bin, len);
+    if result <> 0 then
+      exit;
+    inc(pool);
+    dec(n);
+  until n = 0;
+  pool := nil;
+end;
+
+procedure TDhcpScope.CheckSubNet(ident: PUtf8Char; ip: TNetIP4);
+begin
+  if not Subnet.Match(ip) then
+    EDhcp.RaiseUtf8('PrepareScope: subnet-mask=% does not match %=%',
+      [IP4ToShort(@Subnet.mask), ident, IP4ToShort(@ip)]);
+end;
+
+procedure InvalidRange(ident: PUtf8Char; ip: TNetIP4);
+begin
+  EDhcp.RaiseUtf8('PrepareScope: %:% in "pool"', [ident, IP4ToShort(@ip)]);
+end;
+
+function SortPoolByIpMin(const A, B): integer;
+begin // ensure p[i].IpMinLE <= p[i + 1].IpMinLE
+  result := CompareCardinal(TDhcpPool(A).IpMinLE, TDhcpPool(B).IpMinLE);
+end;
+
+procedure TDhcpScope.AfterFill(log: TSynLog);
+var
+  i, n: PtrInt;
+  dcb: TDhcpClientBoot;
+  bootlog: RawUtf8;
+  ndx: TIntegerDynArray;
+  dp: PDhcpPool;
+  p: TDhcpPools;
+  r: TDhcpRules;
+begin
+  // validate all settings values from the actual subnet
+  if Gateway <> 0 then
+    CheckSubnet('default-gateway', Gateway);
+  CheckSubnet('server-identifier', ServerIdentifier);
+  if Broadcast <> 0 then
+    CheckSubNet('broadcast-address', Broadcast);
+  AddStatic(IP4ToText(@ServerIdentifier));
+  // validate IP range pools settings
+  if Main.IpMin = 0 then
+    Main.IpMin := Subnet.ip + $0a000000; // e.g. 192.168.0.10
+  if Main.IpMax = 0 then
+    // e.g. 192.168.0.0 + pred(not(255.255.255.0)) = 192.168.0.254
+    Main.IpMax := bswap32(bswap32(Subnet.ip) + pred(not(bswap32(Subnet.mask))));
+  Main.SubPools := pointer(Pools); // for NextIp4
+  Main.AfterFill(log);
+  n := length(Pools);
+  if n <> 0 then
+  begin
+    // validate IP range pools
+    dp := pointer(Pools);
+    for i := 1 to n do
+    begin
+      dp^.AfterFill(log);
+      if dp^.IpMinLE < Main.IpMinLE then
+        InvalidRange('too small min', dp^.IpMin)
+      else if dp^.IpMaxLE > Main.IpMaxLE then
+        InvalidRange('too big max', dp^.IpMax);
+      inc(dp);
+    end;
+    // ensure Pools[] and PoolRules[] stored in little-endian increasing order
+    DynArray(TypeInfo(TDhcpPools), Pools).CreateOrderedIndex(ndx, SortPoolByIpMin);
+    SetLength(p, n);
+    SetLength(r, n);
+    dec(n);
+    for i := 0 to n do
+      p[i] := Pools[ndx[i]];
+    for i := 0 to n do
+      r[i] := PoolRules[ndx[i]];
+    for i := 0 to n - 1 do
+      if p[i].IpMaxLE <= p[i + 1].IpMinLE then
+        InvalidRange('overlap in max', p[i].IpMax);
+    Pools := p;
+    PoolRules := r;
   end;
   // log the scope settings and the computed sub-network context
   if Assigned(log) then
   begin
-    log.Log(sllInfo, 'PrepareScope: scope=% subnet=% min=% max=% server=% ' +
-      'broadcast=% gateway=% static=% dns=% lease=%s renew=%s rebind=%s ' +
-      'offer=%s maxdecline=% declinetime=%s grace=%',
-      [Subnet.ToShort, IP4ToShort(@Subnet.mask), IP4ToShort(@IpMinLE),
-       IP4ToShort(@IpMaxLE), IP4ToShort(@ServerIdentifier),
-       IP4ToShort(@Broadcast), IP4ToShort(@Gateway),
-       IP4sToText(TNetIP4s(StaticIP)),  IP4sToText(TNetIP4s(DnsServer)),
-       LeaseTime, RenewalTime, Rebinding, OfferHolding,
-       MaxDeclinePerSec, DeclineTime, GraceFactor]);
+    log.Log(sllInfo, 'PrepareScope: scope=% subnet=% server=% ' +
+      'broadcast=% gateway=% dns=% lease=%s renew=%s rebind=%s ' +
+      'offer=%s maxdecline=% declinetime=%s grace=% pools=%',
+      [Subnet.ToShort, IP4ToShort(@Subnet.mask), IP4ToShort(@ServerIdentifier),
+       IP4ToShort(@Broadcast), IP4ToShort(@Gateway), IP4sToText(DnsServers),
+       LeaseTimeLE, RenewalTimeLE, RebindingLE, OfferHolding,
+       MaxDeclinePerSec, DeclineTime, GraceFactor, length(Pools)]);
     for dcb := low(Boot.Remote) to high(Boot.Remote) do
       if Boot.Remote[dcb] <> '' then
         Append(bootlog, [' ', BOOT_TXT[dcb], '=', Boot.Remote[dcb]]);
@@ -2487,28 +3698,23 @@ begin
         [Boot.NextServer, bootlog]);
   end;
   // store internal values in the more efficient endianess for direct usage
-  IpMinLE     := bswap32(IpMinLE);      // little-endian
-  IpMaxLE     := bswap32(IpMaxLE);
-  LeaseTimeLE := LeaseTime;
-  LeaseTime   := bswap32(LeaseTime);    // big-endian
-  RenewalTime := bswap32(RenewalTime);
-  Rebinding   := bswap32(Rebinding);
+  LeaseTimeBE   := bswap32(LeaseTimeLE);    // big-endian
+  RenewalTimeBE := bswap32(RenewalTimeLE);
+  RebindingBE   := bswap32(RebindingLE);
 end;
 
 procedure TDhcpScope.ClearLeases;
+var
+  i: PtrInt;
 begin
   Safe.Lock;
-  Entry := nil;
-  SetLength(Entry, PREALLOCATE_LEASES); // as in TDhcpScope.AfterFill
-  Count := 0;
-  FreeListCount := 0;
+  for i := 0 to length(Pools) - 1 do
+    Pools[i].ClearLeases;
+  Main.ClearLeases;
   Safe.UnLock;
 end;
 
 function TDhcpScope.AddStatic(var nfo: TMacIP): boolean;
-var
-  n: PtrInt;
-  p: PDhcpLease;
 begin
   result := false;
   if (@self = nil) or
@@ -2516,35 +3722,7 @@ begin
     exit;
   Safe.Lock;
   try
-    // duplicated static MAC or UUID (check first) - but allow leases override
-    if not IsZero(nfo.mac) then
-      if (nfo.uuid <> '') or
-         (DoFindMac(pointer(StaticMac), PInt64(@nfo.mac)^ and MAC_MASK,
-            length(StaticMac)) <> nil) then
-      exit;
-    n := length(nfo.uuid);
-    if n <> 0 then
-      if (n < MIN_UUID_BYTES) or
-         (DoFindUuid(pointer(StaticUuid), pointer(nfo.uuid), n) <> 0) then
-        exit;
-    // register IP, properly sorted, and rejecting any duplicate
-    if AddSortedInteger(StaticIP, nfo.ip) < 0 then
-      exit;
-    // register the MAC or UUID value
-    if not IsZero(nfo.mac) then
-    begin
-      n := length(StaticMac);
-      SetLength(StaticMac, n + 1);
-      p := @StaticMac[n];
-      p^.Mac := nfo.mac;
-      p^.IP4 := nfo.ip;
-    end
-    else if nfo.uuid <> '' then
-    begin
-      Append(nfo.uuid, @nfo.ip, 4); // stored as raw BIN+IP
-      AddRawUtf8(TRawUtf8DynArray(StaticUuid), nfo.uuid);
-    end;
-    result := true;
+    result := FindPool(nfo.ip)^.AddStatic(nfo);
   finally
     Safe.UnLock;
   end;
@@ -2553,16 +3731,21 @@ end;
 function TDhcpScope.AddStatic(const macip: RawUtf8): boolean;
 var
   nfo: TMacIP;
+  l, r: RawUtf8;
 begin
-  result := ParseMacIP(nfo, macip) and
+  result := false;
+  l := macip;
+  while TrimSplit(l, l, r, ',') do
+    if ParseMacIP(nfo, l) and
+       AddStatic(nfo) then
+      l := r
+    else
+      exit;
+  result := ParseMacIP(nfo, l) and
             AddStatic(nfo);
 end;
 
 function TDhcpScope.RemoveStatic(ip4: TNetIP4): boolean;
-var
-  i, n: PtrInt;
-  p: PDhcpLease;
-  u: PPAnsiChar;
 begin
   result := false;
   if (@self = nil) or
@@ -2570,109 +3753,171 @@ begin
     exit;
   Safe.Lock;
   try
-    // remove this IP from the main sorted StaticIP[] list
-    i := FastFindIntegerSorted(StaticIP, ip4);
-    if i < 0 then
-      exit; // no previous AddStatic(ip4)
-    DeleteInteger(StaticIP, i);
-    result := true;
-    // remove this IP from StaticMac[]
-    n := length(StaticMac) - 1;
-    p := pointer(StaticMac);
-    for i := 0 to n do
-      if p^.IP4 = ip4 then
-      begin
-        UnmanagedDynArrayDelete(StaticMac, n, i, SizeOf(TNetMac));
-        SetLength(StaticMac, n);
-        exit; // one IP should not be in StaticMac[] and StaticUuid[]
-      end
-      else
-        inc(p);
-    // remove this IP from StaticUuid[] storing raw BIN+IP
-    u := pointer(StaticUuid);
-    for i := 0 to length(StaticUuid) - 1 do
-      if PCardinal(u^ + PStrLen(u^ - _STRLEN)^ - 4)^ = ip4 then
-      begin
-        DeleteRawUtf8(TRawUtf8DynArray(StaticUuid), i);
-        break;
-      end
-      else
-        inc(u);
+    result := FindPool(ip4)^.RemoveStatic(ip4);
   finally
     Safe.UnLock;
   end;
 end;
 
-function DoWrite(W: TTextWriter; p: PDhcpLease; n, tix32, grace: cardinal;
-  boot: TUnixTime; subnet: PShortString): integer;
+type
+  // transient state machine for TDhcpScope.TextWrite
+  TDoWrite = record
+    W: TTextWriter;
+    tix32, grace: cardinal;
+    boot: TUnixTime;
+    subnet: PShortString;
+    compacted: PDhcpLease;
+    remain, total: integer;
+  end;
+
+procedure DoWriteAndCompact(var ctx: TDoWrite; p: PDhcpLease);
 var
   d, e: PAnsiChar;
 begin // dedicated sub-function for better codegen
-  result := 0;
   repeat
+    dec(ctx.remain);
     // OFFERed leases are temporary; the client hasn't accepted this IP
     // DECLINE/INFORM IPs (with MAC = 0) are ephemeral internal-only markers
     if (PInt64(p)^ shr 16 <> 0) and  // Mac64 <> 0
        (p^.IP4 <> 0) and
-       (((p^.State = lsAck) or
+       (((p^.State in [lsAck, lsAckDdns]) or
         ((p^.State = lsOutdated) and // detected as p^.Expired < tix32
-         (cardinal(tix32 - p^.Expired) < grace)))) then // still realistic
+         (cardinal(ctx.tix32 - p^.Expired) < ctx.grace)))) then // reusable
     begin
-      if subnet <> nil then
+      if ctx.subnet <> nil then
       begin
         // add once the subnet mask as '# 192.168.0.1/24 subnet' comment line
-        W.AddShort(subnet^);
-        subnet := nil; // append once, and only if necessary
+        ctx.W.AddShort(ctx.subnet^);
+        ctx.subnet := nil; // append once, and only if necessary
       end;
       // format is "1770034159 c2:07:2c:9d:eb:71 192.168.1.207" + LF
-      W.AddQ(boot + Int64(p^.Expired), {reserve=}48);
-      d := PAnsiChar(W.B) + 1; // directly write to the output buffer
+      ctx.W.AddQ(ctx.boot + Int64(p^.Expired), {reserve=}48);
+      d := PAnsiChar(ctx.W.B) + 1; // directly write to the output buffer
       d[0] := ' ';
-      ToHumanHexP(d + 1, @p^.mac, 6);
+      ToHumanHexP(d + 1, @p^.mac, SizeOf(p^.mac));
       d[18] := ' ';
       e := IP4TextAppend(@p^.IP4, d + 19);
       e[0] := #10;
-      inc(W.B, e - d + 1);
-      inc(result);
-    end;
+      inc(ctx.W.B, e - d + 1);
+      inc(ctx.total);
+      if ctx.compacted <> nil then
+      begin
+        ctx.compacted^ := p^; // compact the leases array in-place
+        inc(ctx.compacted);
+      end;
+    end
+    else if p^.State in [lsReserved, lsUnavailable] then
+    begin
+      if ctx.compacted <> nil then
+      begin
+        ctx.compacted^ := p^; // keep pending OFFER and DECLINE entries
+        inc(ctx.compacted);
+      end;
+    end
+    else if ctx.compacted = nil then // lsFree or really lsOutdated
+      ctx.compacted := p; // start compacting the array in-place
     inc(p);
-    dec(n);
-  until n = 0;
+  until ctx.remain = 0;
+end;
+
+procedure WriteAndCompact(var ctx: TDoWrite; var pool: TDhcpPool);
+begin
+  if pool.Count = 0 then
+    exit;
+  ctx.remain := pool.Count;
+  ctx.compacted := nil;
+  DoWriteAndCompact(ctx, pointer(pool.Entry));
+  if ctx.compacted = nil then
+    exit;
+  pool.Count := pool.LeaseIndex(ctx.compacted);
+  pool.FreeListCount := 0;
 end;
 
 function TDhcpScope.TextWrite(W: TTextWriter; tix32: cardinal; time: TUnixTime): integer;
 var
-  grace: cardinal;
+  n: integer;
+  p: PDhcpPool;
+  ctx: TDoWrite;
   subtxt: TShort47;
 begin
   result := 0;
-  if Count = 0 then
+  if (Pools = nil) and
+     (Main.Count = 0) then
     exit;
   subtxt := '# ';
+  ctx.W := W;
+  ctx.tix32 := tix32;
+  ctx.boot := time;
+  ctx.subnet := @subtxt;
+  ctx.total := 0;
   Safe.Lock;
   try
-    if Count = 0 then
-      exit;
     // prepare the subnet mask as '# 192.168.0.1/24 subnet' comment line
-    subtxt[0] := #2;
     AppendShort(SubNet.ToShort, subtxt);
     AppendShort(' subnet'#10, subtxt);
-    // persist all leases of this subnet as text
-    grace := LeaseTimeLE * MaxPtrUInt(GraceFactor, 2); // not too deprecated
-    result := DoWrite(W, pointer(Entry), Count, tix32, grace, time, @subtxt);
+    // persist (and compact) all leases of this subnet as text
+    ctx.grace := LeaseTimeLE * MaxPtrUInt(GraceFactor, 2); // not too deprecated
+    p := pointer(Pools);
+    if p <> nil then
+    begin
+      n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
+      repeat
+        WriteAndCompact(ctx, p^);
+        inc(p);
+        dec(n);
+      until n = 0;
+    end;
+    WriteAndCompact(ctx, Main);
   finally
     Safe.UnLock;
   end;
+  result := ctx.total;
 end;
 
-function TDhcpScope.CheckOutdated(tix32: cardinal): integer;
+function TDhcpScope.DoOutdated(p: PDhcpLease; tix32, n: cardinal): integer;
 begin
   result := 0;
-  if Count = 0 then
+  if n <> 0 then
+    repeat
+      if (p^.Expired < tix32) and
+         (p^.State >= lsReserved) then // [lsReserved, lsAck*, lsUnavailable]
+      begin
+        if (p^.State = lsAckDdns) and
+           (DnsScript <> '') then
+          ExecuteDnsScript(p^.IP4, @p^.Mac, {host/add=}nil, tix32);
+        inc(result);
+        p^.State := lsOutdated;
+      end;
+      p^.RateLimit := 0;      // reset the rate limiter every second
+      inc(p);
+      dec(n);
+    until n = 0;
+end;
+
+function TDhcpScope.CheckOutdated(tix32: cardinal; var total: integer): integer;
+var
+  n: integer;
+  p: PDhcpPool;
+begin
+  result := 0;
+  if (Pools = nil) and
+     (Main.Count = 0) then
     exit;
   Safe.Lock;
   try
-    result := DoOutdated(pointer(Entry), tix32, Count);
+    p := pointer(Pools);
+    if p <> nil then
+    begin
+      n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
+      repeat
+        inc(result, DoOutdated(pointer(p^.Entry), tix32, p^.Count));
+        inc(total, p^.Count);
+        inc(p);
+        dec(n);
+      until n = 0;
+    end;
+    inc(result, DoOutdated(pointer(Main.Entry), tix32, Main.Count));
+    inc(total, Main.Count);
     if result <> 0 then
       inc(Metrics.Current[dsmLeaseExpired], result);
   finally
@@ -2687,10 +3932,74 @@ begin
   Safe.UnLock;
 end;
 
+function TDhcpScope.GetCount: integer;
+var
+  n: integer;
+  p: PDhcpPool;
+begin
+  result := 0;
+  if (Pools = nil) and
+     (Main.Count = 0) then
+    exit;
+  Safe.Lock;
+  try
+    result := Main.Count - Main.FreeListCount;
+    p := pointer(Pools);
+    if p = nil then
+      exit;
+    n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
+    repeat
+      inc(result, p^.Count - p^.FreeListCount);
+      inc(p);
+      dec(n);
+    until n = 0;
+  finally
+    Safe.UnLock;
+  end;
+end;
+
+function TDhcpScope.ExecuteDnsScript(ip4: TNetIP4; m: PNetMac;
+  host: PShortString; tix32: cardinal): boolean;
+var
+  ctx: TOnDhcpBackgroundExecute;
+  ip, mac: TShort16;
+begin
+  result := false;
+  if (DnsScript = '') or
+     (ip4 = 0) or
+     (m = nil) or
+     not Assigned(OnBackgroundExecute) then
+    exit;
+  // prepare the command to be executed
+  IP4Short(@ip4, ip);
+  mac[0] := #17;
+  ToHumanHexP(@mac, @m, 6);
+  if host <> nil then
+    // from TDhcpState.AddOption81 -> add A/PTR
+    ctx.cmd := MakeString([DnsScript, ' IPV4 add ', ip, ' ', mac, ' ', host^])
+  else
+    // from TDhcpProcess.DoError(dsmLeaseReleased) or DoOutdated -> delete
+    ctx.cmd := MakeString([DnsScript, ' IPV4 delete', ip, ' ', mac]);
+  // trigger the execution in a background thread
+  ctx.ip4 := ip4;
+  ctx.expiredtix32 := tix32 + DnsScriptSecs;
+  result := OnBackgroundExecute(ctx);
+end;
+
 
 { **************** Middle-Level DHCP State Machine }
 
 { TDhcpState }
+
+function TDhcpState.Data(const opt: TDhcpOption): pointer;
+var
+  len: PtrUInt;
+begin
+  result := @RecvLens[opt];
+  len := PWord(result)^;
+  if len <> 0 then
+    result := @Recv.options[len];
+end;
 
 procedure TDhcpState.AddOptionOnce32(const opt: TDhcpOption; be: cardinal);
 var
@@ -2779,14 +4088,15 @@ var
   len, n: PtrUInt;
   requested: PByteArray;
 begin
-  p := pointer(RecvRule.send);
+  p := pointer(RecvRule^.send);
   if p = nil then
     exit;
+  inc(Scope^.Metrics.Current[dsmRule]);
   n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
   // append "always" - should be as send[0].kind=pvkAlways
   if p^.kind = pvkAlways then
   begin
-    SendOptions := SendOptions + RecvRule.always;
+    SendOptions := SendOptions + RecvRule^.always;
     len := PStrLen(PAnsiChar(pointer(p^.value)) - _STRLEN)^;
     MoveFast(pointer(p^.value)^, SendEnd^, len); // as a pre-computed blob
     inc(SendEnd, len);
@@ -2796,10 +4106,10 @@ begin
       exit;
   end;
   // access option 55 list
-  len := RecvLens[doDhcpParameterRequestList];
+  len := RecvLens[doParameterRequestList];
   if len = 0 then
     exit;
-  requested := @Recv.options[len + 1]; // len + [1,3,6,15,51,54]
+  requested := @Recv.options[len]; // len + [1,3,6,15,51,54]
   // process "requested" options, filtering each op
   repeat
     if ByteScanIndex(@requested[1], requested[0], p^.num) >= 0 then // SSE2 asm
@@ -2809,110 +4119,182 @@ begin
   until n = 0;
 end;
 
-{$ifdef FPC_CODEALIGN}
+{$ifdef FPC_CODEALIGN} // manually tuned for FPC x86_64
   {$PUSH}
-  {$CODEALIGN LOOP=16} // worth it on this very sensitive function
+  {$CODEALIGN LOOP=2}  // worth it on this very sensitive function
 {$endif FPC_CODEALIGN}
 
 function TDhcpState.MatchOne(one: PRuleValue): boolean;
 var
   len: PtrUInt;
   option, value: PAnsiChar;
+label
+  optlen, optval; // optimized for FPC 64-bit CPU like x86_64 and aarch64
 begin
   result := false;
-  // locate the option value in Recv[]
-  case one^.kind of
+  case one^.kind of // locate the option value in Recv[]
     pvkMac:
-      begin                                    // single inlined one^.mac value
-        result := PInt64(one)^ shr 16 = Mac64;
-        exit;                                  // no need to check one^.value
+      result := PInt64(one)^ shr 16 = Mac64;   // fast inlined TNetMac compare
+    pvkOpt:
+      begin                                    // O(1) lookup of known option
+        len := RecvLens[TDhcpOption(one^.mac[0])];
+        if len = 0 then
+          exit;                                // no such option
+optlen: option := @Recv.options[len];          // option[0] = len in Recv[]
+        // compare the one^.value with the option located in Recv[]
+optval: value := pointer(one^.value);
+        len := PStrLen(value - _STRLEN)^;      // we know value<>nil and len>0
+        if len <> ord(option[0]) then
+          exit;                                // length mismatch
+        inc(option);
+        repeat
+          dec(len);                            // endings mismatch more likely
+          if option[len] <> value[len] then    // faster than CompareMem() here
+            exit;
+        until len = 0;
+        result := true;                        // exact case-sensitive match
+       end;
+    pvkRai:
+      begin                                    // O(1) lookup of sub-option
+        len := RecvLensRai[TDhcpOptionRai(one^.num)];
+        if len <> 0 then
+          goto optlen;
       end;
-     pvkOpt:
-       begin                                   // O(1) lookup of known option
-         len := RecvLens[TDhcpOption(one^.mac[0])];
-         if len = 0 then
-           exit;                               // no such option
-         option := @Recv.options[len];         // option[0] = len in Recv[]
-       end;
-     pvkRai:
-       begin                                   // O(1) lookup of sub-option
-         len := RecvLensRai[TDhcpOptionRai(one^.num)];
-         if len = 0 then
-           exit;                               // no such sub-option
-         option := @Recv.options[len];         // option[0] = len in Recv[]
-       end;
-     pvkMacs:
-       begin                                   // specific TNetMacs lookup
-         value := pointer(one^.value);         // we know value<>nil
-         len := PtrUInt(value) + PtrUInt(PStrLen(value - _STRLEN)^);
-         result := true;
-         repeat
-           if PInt64(value)^ and MAC_MASK = Mac64 then
-             exit;                             // found one
-           inc(PNetMac(value));                // search next
-         until PtrUInt(value) >= len;
-         result := false;
-         exit;                                 // we did check one^.value
-       end;
-     pvkBoot:
-       begin                                   // compare with SetRecvBoot()
-         result := RecvBoot = TDhcpClientBoot(one^.num);
-         exit;                                 // no need to check one^.value
-       end;
-     pvkRaw:
-       begin
-         option := @Recv.options;              // inlined DhcpFindOption()
-         repeat
-           if option[0] = AnsiChar(one^.num) then
-             break;                            // found this num
-           option := @option[ord(option[1]) + 2];
-           if option[0] = #255 then            // reached end of list
-             exit;                             // no such option
-         until false;
-         inc(option);                          // option[0] = len in Recv[]
-       end;
-  else
-    exit; // pvkUndefined/pvkTlv/pvkAlways should not appear here
+    pvkBoot:
+      result := RecvBoot = TDhcpClientBoot(one^.num);
+    pvkRaw:
+      begin
+        option := @Recv.options;               // inlined DhcpFindOption()
+        repeat
+          if option[0] = AnsiChar(one^.num) then
+            break;                             // found this TLV num
+          option := @option[ord(option[1]) + 2];
+          if option[0] = #255 then             // reached end of list
+            exit;                              // no such option
+        until false;
+        inc(option);                           // option[0] = len in Recv[]
+        goto optval;
+      end;
+    pvkMacs:
+      begin                                    // specific TNetMacs lookup
+        value := pointer(one^.value);          // we know value<>nil
+        len := PtrUInt(@value[PStrLen(value - _STRLEN)^ - 2]);
+        dec(PWord(value));                     // for "PInt64() shr 16" below
+        repeat
+          if PInt64(value)^ shr 16 = Mac64 then
+            break;                             // found one
+          inc(PNetMac(value));                 // search next
+          if PtrUInt(value) >= len then
+            exit;                              // no match
+        until false;
+        result := true;
+      end;
   end;
-  // compare the one^.value with the option located in Recv[]
-  value := pointer(one^.value);
-  len := PStrLen(value - _STRLEN)^;      // we know value<>nil and len>0
-  if len <> ord(option[0]) then
-    exit;
-  repeat
-    dec(len);                            // endings are more likely to change
-    if option[len] <> value[len] then    // faster than CompareMem() here
-      exit;
-  until len = 0;
-  result := true;                        // exact case-sensitive match
 end;
 
 {$ifdef FPC_CODEALIGN}
   {$POP}
 {$endif FPC_CODEALIGN}
 
+function TDhcpState.NotifyDnsScript(opt81: PAnsiChar; len: PtrInt; plain: boolean): boolean;
+var
+  fqdn: ShortString;
+begin
+  result := false;
+  if opt81 <> nil then
+  begin
+    // get full fqdn directly from option 81 doFqdn content
+    if plain then
+      SetString(fqdn, opt81, len)  // copy E=0 plain
+    else if not DnsLabelToText(opt81, len, fqdn) then
+      exit;                        // failed E=1 decoding
+  end
+  else
+  begin
+    // compute fqdn from option 12 + 15 = RecvHostName + '.' + DomainName
+    if RecvHostName^[0] = #0 then
+      exit;
+    fqdn := RecvHostName^;
+    if Scope^.DomainName <> '' then
+    begin
+      AppendShortCharSafe('.', fqdn);
+      AppendShortAnsi7String(Scope^.DomainName, fqdn);
+    end;
+  end;
+  // notify DNS server e.g. as "dns add fqdn A ip" via a custom script
+  result := Scope^.ExecuteDnsScript(Ip4, @Mac64, @fqdn, Tix32);
+end;
+
+procedure TDhcpState.AddOption81;
+var
+  p: PAnsiChar;
+  len: PtrInt;
+  flags, flagsbak: set of (S, O, E, N); // match RFC4702_FLAG_* constants
+begin
+  // see https://www.rfc-editor.org/rfc/rfc4702.html#section-2
+  p := @Recv.options[RecvLens[doFqdn]];   // caller ensured <> 0
+  len := ord(p[0]);
+  inc(p);
+  if (len < 3) or
+     (PWord(p + 1)^ <> 0) then            // rcode1=rcode2=0
+    exit;
+  inc(Scope^.Metrics.Current[dsmOption81Hits]);
+  // Windows client send typically 0x05 (E=1 for wire format + S=1 to ask
+  // server for updates) -> reset all flags but E+N and set S=1 on active DDNS
+  byte(flags) := ord(p[0]);
+  flags := flags * [E, N];
+  if (RecvType = dmtRequest) and
+     (SendType = dmtAck) and
+     (not (N in flags)) and // not disabled by client
+     (Scope^.DnsScript <> '') then
+    if NotifyDnsScript(p + 3, len - 3, {plain=}not(E in flags)) then
+      if (Scope^.DnsScriptLastTix32 <> 0) and
+         (cardinal(Tix32 - Scope^.DnsScriptLastTix32) < Scope^.DnsScriptSecs) then
+        // return S=1 if DnsScript succeeded recently enough (in last 300 secs)
+        include(flags, S);
+  // echo raw encoded fqdn value
+  if doFqdn in SendOptions then
+    exit;
+  include(SendOptions, doFqdn);
+  byte(flagsbak) := ord(p[0]);
+  if (S in flags) <> (S in flagsbak) then
+    include(flags, O);        // server has overridden the client's S preference
+  p[0] := AnsiChar(flags);
+  AddOptionSafe(81, p, len);
+  p[0] := AnsiChar(flagsbak); // keep Recv[] untouched
+end;
+
 procedure TDhcpState.AddRegularOptions;
 begin
-  // append 1,3,6,15,28,42 network options - if not already from "rules"
+  // append 1,3,6,15,28,42 network options - if not already from "rule"
   AddOptionOnce32(doSubnetMask,         Scope^.Subnet.mask);
   AddOptionOnce32(doBroadcastAddress,   Scope^.Broadcast);
   AddOptionOnce32(doRouters,            Scope^.Gateway);
-  AddOptionOnceA32(doDomainNameServers, pointer(Scope^.DnsServer));
+  AddOptionOnceA32(doDomainNameServers, pointer(Scope^.DnsServers));
   AddOptionOnceA32(doNtpServers,        pointer(Scope^.NtpServers));
   // optional 51,58,59 lease timing options
   if (RecvType <> dmtInform) and
-     not (doDhcpLeaseTime in SendOptions) then
+     not (doLeaseTime in SendOptions) then
   begin
-    AddOptionOnce32(doDhcpLeaseTime,     Scope^.LeaseTime); // big-endian
-    AddOptionOnce32(doDhcpRenewalTime,   Scope^.RenewalTime);
-    AddOptionOnce32(doDhcpRebindingTime, Scope^.Rebinding);
+    AddOptionOnce32(doLeaseTime,     Scope^.LeaseTimeBE);
+    AddOptionOnce32(doRenewalTime,   Scope^.RenewalTimeBE);
+    AddOptionOnce32(doRebindingTime, Scope^.RebindingBE);
   end;
+  // append back option 81 with no associated DDNS flags
+  if RecvLens[doFqdn] <> 0 then
+    AddOption81
+  else if (RecvType = dmtRequest) and
+          (SendType = dmtAck) and
+          (Scope^.DnsScript <> '') and
+          (RecvHostName^[0] <> #0) then
+    // register option 12 + 15 to DNS
+    NotifyDnsScript(nil, 0, false);
 end;
 
 function TDhcpState.Flush: PtrUInt;
 begin
-  // send back verbatim Option 61 if any
-  AddOptionCopy(doDhcpClientIdentifier, dsmOption61Hits);
+  // send back verbatim Option 61 if any - by RFC 6842
+  AddOptionCopy(doClientIdentifier, dsmOption61Hits);
   // send back Option 82 if any - should be the very last option by RFC 3046
   AddOptionCopy(doRelayAgentInformation, dsmOption82Hits);
   // append #255 trailer in the Send frame and returns its final size in bytes
@@ -2921,6 +4303,7 @@ begin
     result := 0 // too many options: do not send anything
   else
     SendEnd^ := #255; // end this valid frame
+  SendLen := result;
 end;
 
 procedure TDhcpState.ParseRecvLensRai;
@@ -2935,7 +4318,7 @@ begin
     dec(len, ord(p[1]) + 2)  ; // O(1) decode sub-option binary as TLV
     if len < 0 then            // avoid buffer overdloas
     begin
-      FillZero(THash128(RecvLensRai)); // ignore any previously decoded sub-options
+      FillZero(THash128(RecvLensRai)); // ignore previously decoded sub-options
       exit;
     end;
     if ord(p[0]) <= high(RAI_OPTION_INV) then // O(1) fast inverse lookup
@@ -2960,7 +4343,7 @@ var
   len: PtrUInt;
 begin
   result := nil;
-  // locate opt = doDhcpClientIdentifier or doUuidClientIdentifier value
+  // locate opt = doClientIdentifier or doUuidClientIdentifier value
   v := @Recv.options[RecvLens[opt]]; // v^[0] <> 0
   len := v^;
   inc(v);     // v^ points to the specified binary value
@@ -2979,8 +4362,8 @@ begin
         dec(len);
       end;
   end;
-  // O(n) fast search
-  fnd := DoFindUuid(pointer(Scope^.StaticUuid), pointer(v), len);
+  // O(n) fast search in all IP ranges static reservations
+  fnd := Scope^.FindStaticUuid(pointer(v), len, Pool);
   if fnd = 0 then
     exit;
   // append /GUID or /UUID in logs after the MAC address (up to 63 chars)
@@ -3012,6 +4395,91 @@ begin
   Ip[0] := #0;
 end;
 
+function TDhcpState.Parse: boolean;
+begin
+  SendLen := 0;
+  Ip4 := 0;
+  Mac64 := 0;
+  RecvRule := nil;
+  RecvBoot := dcbDefault;
+  SendType := dmtUndefined;
+  RecvType := DhcpParse(@Recv, RecvLen, RecvLens, nil, @Mac64);
+  Ip[0] := #0;
+  if Mac64 <> 0 then
+  begin
+    // valid DHCP frame with RecvType <> dmtUndefined
+    Mac[0] := #17;
+    ToHumanHexP(@Mac[1], @Mac64, SizeOf(TNetMac));
+    RecvHostName := Data(doHostName);
+    FillZero(THash128(RecvLensRai));
+    if RecvLens[doRelayAgentInformation] <> 0 then
+      ParseRecvLensRai;
+    result := true;
+  end
+  else
+  begin
+    Mac[0] := #0;
+    RecvHostName := @NULCHAR;
+    result := false;
+  end;
+end;
+
+function TDhcpState.RecvToJson(extended: boolean): RawJson;
+var
+  tmp: TTextWriterStackBuffer; // 8KB static
+  W: TJsonWriter;
+begin
+  result := '';
+  if Mac64 = 0 then
+    exit;
+  W := TJsonWriter.CreateOwnedStream(tmp);
+  try
+    if extended then
+      W.CustomOptions := [twoForceJsonExtended];
+    DoDhcpToJson(W, @Recv, RecvLen, {state=}nil); // as a single JSON object
+    W.SetText(RawUtf8(result));
+  finally
+    W.Free;
+  end;
+end;
+
+function TDhcpState.SendToJson(extended: boolean): RawJson;
+var
+  tmp: TTextWriterStackBuffer; // 8KB static
+  W: TJsonWriter;
+begin
+  result := '';
+  if SendLen = 0 then
+    exit;
+  W := TJsonWriter.CreateOwnedStream(tmp);
+  try
+    if extended then
+      W.CustomOptions := [twoForceJsonExtended];
+    DoDhcpToJson(W, @Send, SendLen, {state=}nil); // as a single JSON object
+    W.SetText(RawUtf8(result));
+  finally
+    W.Free;
+  end;
+end;
+
+function TDhcpState.ClientNew(dmt: TDhcpMessageType; const addr: TNetMac;
+  req: TDhcpOptions): PAnsiChar;
+begin
+  result := DhcpClient(Recv, dmt, addr, req);
+end;
+
+procedure TDhcpState.ClientFlush(current: PAnsiChar);
+var
+  size: PtrUInt;
+begin
+  size := current - PAnsiChar(@Recv) + 1;
+  RecvLen := 0; // avoid GPF
+  if size > SizeOf(Recv) then
+    exit;
+  RecvLen := size;
+  current^ := #255;
+end;
+
 
 { **************** High-Level Multi-Scope DHCP Server Processing Logic }
 
@@ -3027,64 +4495,57 @@ begin
     p^ := boot.Remote[ref];
 end;
 
-procedure TDhcpBootSettings.PrepareBoot(var Data: TDhcpScopeBoot;
+procedure TDhcpBootSettings.PrepareBoot(var Boot: TDhcpScopeBoot;
   Options: TDhcpScopeOptions);
 var
   dcb, ref: TDhcpClientBoot;
 begin
   if dsoPxeDisable in Options then
   begin
-    Finalize(Data); // reset all RawUtf8/RawByteString to ''
+    Finalize(Boot); // reset all RawUtf8/RawByteString to ''
     exit;
   end;
   // copy the working parameters from the settings
-  TrimU(fNextServer, Data.NextServer);
-  for dcb := low(Data.Remote) to high(Data.Remote) do
-    TrimU(fRemote[dcb], Data.Remote[dcb]);
+  TrimU(fNextServer, Boot.NextServer);
+  for dcb := low(Boot.Remote) to high(Boot.Remote) do
+    TrimU(fRemote[dcb], Boot.Remote[dcb]);
   // complete configuration from sibling values
   if dsoPxeNoInherit in Options then
     exit;
   // 1. HTTP aware architecture fallback to their TFTP value
-  InheritOption(Data, dcbX64, dcbX64Http);
-  InheritOption(Data, dcbA64, dcbA64Http);
+  InheritOption(Boot, dcbX64, dcbX64Http);
+  InheritOption(Boot, dcbA64, dcbA64Http);
   // 2. assume we could share the main x64/x86 IPXE URI
   ref := dcbDefault;
-  if Data.Remote[dcbIpxeX64] <> '' then
+  if Boot.Remote[dcbIpxeX64] <> '' then
     ref := dcbIpxeX64
-  else if Data.Remote[dcbIpxeX86] <> '' then
+  else if Boot.Remote[dcbIpxeX86] <> '' then
     ref := dcbIpxeX86;
   if ref <> dcbDefault then
-    for dcb := dcbIpxeX86 to high(Data.Remote) do
+    for dcb := dcbIpxeX86 to high(Boot.Remote) do
       if dcb <> ref then
-        InheritOption(Data, ref, dcb);
+        InheritOption(Boot, ref, dcb);
 end;
 
 
-{ TDhcpRuleSettings }
+{ TDhcpRuleAbstractSettings}
 
-function TDhcpRuleSettings.PrepareRule(var Data: TDhcpScope; var Rule: TDhcpScopeRule): boolean;
-var
-  alw, req: TRuleValues;
-  p: PRuleValue;
-  v: TRuleValue;
-  i: PtrInt;
-  nfo: TMacIP;
+procedure DoParseRule(const json: RawUtf8; var v: TRuleValues; pr: TParseRule;
+  ctx: PUtf8Char);
 begin
-  result := true; // parsing OK and need to add a rule (e.g. not static mac+ip)
-  // parse main "rules" JSON object fields
-  Rule.name := fName;
-  if not ParseRule(fAll, Rule.all, prMatch) then
-    EDhcp.RaiseUtf8('PrepareRule: invalid all:%', [fAll]);
-  if not ParseRule(fAny, Rule.any, prMatch) then
-    EDhcp.RaiseUtf8('PrepareRule: invalid any:%', [fAny]);
-  if not ParseRule(fNotAll, Rule.notall, prMatch) then
-    EDhcp.RaiseUtf8('PrepareRule: invalid not-all:%', [fNotAll]);
-  if not ParseRule(fNotAny, Rule.notany, prMatch) then
-    EDhcp.RaiseUtf8('PrepareRule: invalid not-any:%', [fNotAny]);
-  if not ParseRule(fAlways, alw, prValue) then
-    EDhcp.RaiseUtf8('PrepareRule: invalid always:%', [fAlways]);
-  if not ParseRule(fRequested, req, prValue) then
-    EDhcp.RaiseUtf8('PrepareRule: invalid requested:%', [fRequested]);
+  if not ParseRule(json, v, pr) then
+    EDhcp.RaiseUtf8('PrepareRule: invalid %:%', [ctx, json]);
+end;
+
+procedure TDhcpRuleAbstractSettings.PrepareRule(var Rule: TDhcpRule);
+var
+  v: TRuleValue;
+begin
+  // parse main "rule" JSON array of objects fields
+  DoParseRule(fAll, Rule.all, prMatch, 'all');
+  DoParseRule(fAny, Rule.any, prMatch, 'any');
+  DoParseRule(fNotAll, Rule.notall, prMatch, 'not-all');
+  DoParseRule(fNotAny, Rule.notany, prMatch, 'not-any');
   // parse optional "mac" alias
   if fMac <> '' then
   begin
@@ -3101,41 +4562,63 @@ begin
     v.kind := pvkMac;
     AddRuleValue(Rule.all, v);
   end;
+end;
+
+
+{ TDhcpRuleSettings }
+
+function TDhcpRuleSettings.PrepareRule(var Scope: TDhcpScope;
+  var Rule: TDhcpRule; var Policy: TDhcpPolicy): boolean;
+var
+  alw, req: TRuleValues;
+  p: PRuleValue;
+  v: TRuleValue;
+  i: PtrInt;
+  nfo: TMacIP;
+begin
+  // parse main "rule" JSON array of objects fields
+  inherited PrepareRule(Rule);
+  DoParseRule(fAlways, alw, prValue, 'always');
+  DoParseRule(fRequested, req, prValue, 'requested');
   // parse specific static "ip" reservation
-  Rule.ip := 0;
+  Policy.ip := 0;
   if fIP <> '' then
   begin
-    if not NetIsIP4(pointer(fIp), @Rule.ip) then
+    if not NetIsIP4(pointer(fIp), @Policy.ip) or
+       not Scope.Subnet.Match(Policy.ip) then
       EDhcp.RaiseUtf8('PrepareRule: invalid ip:%', [fIp]);
     if (Rule.all = nil) and
        (Rule.any = nil) then
       EDhcp.RaiseUtf8('PrepareRule: missing any/all for ip=%', [fIp]);
-    nfo.ip := Rule.ip;
+    nfo.ip := Policy.ip;
     FillZero(nfo.mac);
     if (Rule.any = nil) and
-       (alw = nil) and
-       (req = nil) and
        (length(Rule.all) = 1) then
       case Rule.all[0].kind of
         pvkMac:
           begin
             // plain {"all":{"mac":...}},"ip":...} entry = regular 'mac=ip'
             nfo.mac := Rule.all[0].mac;     // to register in StaticMac[]
-            if not Data.AddStatic(nfo) then // add in main statics mac/ip list
-              EDhcp.RaiseUtf8('PrepareRule: duplicated ip=% mac=%',
-                [fIp, MacToShort(@nfo.mac)]);
-            result := false; // no rule
-            exit;
+            if (alw = nil) and
+               (req = nil) then
+            begin
+              // the main statics mac/ip list is enough for this definition
+              if not Scope.AddStatic(nfo) then
+                EDhcp.RaiseUtf8('PrepareRule: duplicated ip=% mac=%',
+                  [fIp, MacToShort(@nfo.mac)]);
+              result := false; // no rule needed
+              exit;
+            end;
           end;
         pvkMacs:
           EDhcp.RaiseUtf8('PrepareRule: ip=% requires a single mac', [fIp]);
       end;
-    if not Data.AddStatic(nfo) then // add in main statics ip list
+    if not Scope.AddStatic(nfo) then // add in main statics ip list
       EDhcp.RaiseUtf8('PrepareRule: duplicated ip=%', [fIp]);
   end;
   // Rule.send[0] is "always" and should be stored as pvkAlways binary blob
-  Rule.send := nil;
-  Rule.always := [];
+  Policy.send := nil;
+  Policy.always := [];
   if alw <> nil then
   begin
     PInt64(@v)^ := 0; // set kind+num+mac=0
@@ -3146,25 +4629,71 @@ begin
     begin
       Append(v.value, [AnsiChar(p^.num), AnsiChar(length(p^.value)), p^.value]);
       if p^.kind = pvkOpt then
-        if TDhcpOption(p^.mac[0]) in Rule.always then
+        if TDhcpOption(p^.mac[0]) in Policy.always then
           EDhcp.RaiseUtf8('PrepareRule: duplicated % in always:%',
             [DHCP_OPTION[TDhcpOption(p^.mac[0])], fAlways])
         else
-          include(Rule.always, TDhcpOption(p^.mac[0]));
+          include(Policy.always, TDhcpOption(p^.mac[0]));
       inc(p);
     end;
-    AddRuleValue(Rule.send, v);
+    AddRuleValue(Policy.send, v);
   end;
   // append "requested" with their op, ready to be filtered against option 55
   p := pointer(req);
   for i := 1 to length(req) do
   begin
     if (p^.kind = pvkOpt) and
-       (TDhcpOption(p^.mac[0]) in Rule.always) then
+       (TDhcpOption(p^.mac[0]) in Policy.always) then
       EDhcp.RaiseUtf8('PrepareRule: duplicated % in requested:%',
         [DHCP_OPTION[TDhcpOption(p^.mac[0])], fRequested]);
-    AddRuleValue(Rule.send, p^);
+    AddRuleValue(Policy.send, p^);
     inc(p);
+  end;
+  // return true if there is some condition to append: void entries are skipped
+  TrimU(fName, Policy.name);
+  result := Policy.send <> nil;
+end;
+
+
+{ TDhcpPoolSettings }
+
+function TDhcpPoolSettings.AddRule(one: TDhcpRuleSettings): TDhcpRuleSettings;
+begin
+  if one = nil then
+    one := TDhcpRuleSettings.Create;
+  if self <> nil then
+    PtrArrayAdd(fRule, one); // will be owned by this instance
+  result := one;
+end;
+
+procedure TDhcpPoolSettings.PreparePool(var Scope: TDhcpScope; var Pool: TDhcpPool);
+var
+  i, n: PtrInt;
+begin
+  // define main fields from settings
+  Pool.Scope        := @Scope;
+  Pool.IpMin        := ToIP4(fMin);
+  Pool.IpMax        := ToIP4(fMax);
+  Pool.StaticIP     := nil;
+  Pool.StaticMac    := nil;
+  TrimU(fName, Pool.name);
+  for i := 0 to high(fStatic) do
+    if not Pool.AddStatic(fStatic[i]) then // add sorted, from 'ip' 'mac/hex=ip'
+      EDhcp.RaiseUtf8('PrepareScope: invalid static=%', [fStatic[i]]);
+  // convert "rule" into ready-to-be-processed objects
+  n := length(fRule);
+  Pool.Rules := nil;
+  Pool.Policies := nil;
+  SetLength(Pool.Rules, n);
+  SetLength(Pool.Policies, n);
+  n := 0;
+  for i := 0 to high(fRule) do
+    if fRule[i].PrepareRule(Scope, Pool.Rules[n], Pool.Policies[n]) then
+      inc(n);
+  if n <> length(fRule) then
+  begin
+    SetLength(Pool.Rules, n); // some "rule" were statics in disguise
+    SetLength(Pool.Policies, n);
   end;
 end;
 
@@ -3181,88 +4710,91 @@ begin
   fGraceFactor := 2;
 end;
 
-function TDhcpScopeSettings.AddRule(one: TDhcpRuleSettings): TDhcpRuleSettings;
+function TDhcpScopeSettings.AddPool(one: TDhcpPoolSettings): TDhcpPoolSettings;
 begin
   if one = nil then
-    one := TDhcpRuleSettings.Create;
+    one := TDhcpPoolSettings.Create;
   if self <> nil then
-    PtrArrayAdd(fRules, one); // will be owned by this instance
+    PtrArrayAdd(fPool, one); // will be owned by this instance
   result := one;
 end;
 
 procedure TDhcpScopeSettings.PrepareScope(Sender: TDhcpProcess;
-  var Data: TDhcpScope);
+  var Scope: TDhcpScope);
 var
   mask: TNetIP4;
   i, n: PtrInt;
 begin
-  // convert the main settings into Data.* fields - raise EDhcp on error
-  Data.Gateway           := ToIP4(fDefaultGateway);
-  Data.Broadcast         := ToIP4(fBroadCastAddress);
-  Data.ServerIdentifier  := ToIP4(fServerIdentifier);
-  Data.LastIpLE          := 0;
-  Data.IpMinLE           := ToIP4(fRangeMin);
-  Data.IpMaxLE           := ToIP4(fRangeMax);
-  Data.DnsServer         := TIntegerDynArray(ToIP4s(fDnsServers));
-  Data.NtpServers        := TIntegerDynArray(ToIP4s(fNtpServers));
-  Data.DomainName        := fDomainName;
-  Data.StaticIP          := nil;
-  Data.StaticMac         := nil;
-  for i := 0 to high(fStatic) do
-    if not Data.AddStatic(fStatic[i]) then // add sorted, from 'ip' 'mac/hex=ip'
-      EDhcp.RaiseUtf8('PrepareScope: invalid static=%', [fStatic[i]]);
-  Data.LeaseTime         := fLeaseTimeSeconds; // 100%
-  if Data.LeaseTime < 30 then
-    Data.LeaseTime := 30;                      // 30 seconds minimum lease
-  Data.RenewalTime       := Data.LeaseTime shr 1;       // 50%
-  Data.Rebinding         := (Data.LeaseTime * 7) shr 3; // 87.5%
-  Data.OfferHolding      := fOfferHoldingSecs; // 5 seconds
-  if Data.OfferHolding < 1 then
-    Data.OfferHolding := 1
-  else if Data.OfferHolding > Data.RenewalTime then
-    Data.OfferHolding := Data.RenewalTime;
-  Data.MaxDeclinePerSec  := fMaxDeclinePerSecond; // max 5 DECLINE per sec
-  Data.DeclineTime       := fDeclineTimeSeconds;
-  if Data.DeclineTime = 0 then
-    Data.DeclineTime := Data.LeaseTime;
-  Data.GraceFactor       := fGraceFactor;         // * 2
-  Data.Options           := fOptions;
-  fBoot.PrepareBoot(Data.Boot, Data.Options);
-  // convert "rules" into ready-to-be-processed objects
-  Data.Rules := nil;
-  SetLength(Data.Rules, length(fRules));
-  n := 0;
-  for i := 0 to high(fRules) do
-    if fRules[i].PrepareRule(Data, Data.Rules[n]) then
-      inc(n);
-  if n <> length(fRules) then
-    SetLength(Data.Rules, n); // some "rules" were TMacIP static in disguise
+  // convert the main settings into Scope.* fields - raise EDhcp on error
+  Scope.Gateway           := ToIP4(fDefaultGateway);
+  Scope.Broadcast         := ToIP4(fBroadCastAddress);
+  Scope.ServerIdentifier  := ToIP4(fServerIdentifier);
+  Scope.DnsServers        := ToIP4s(fDnsServers);
+  Scope.NtpServers        := ToIP4s(fNtpServers);
+  Scope.DomainName        := fDomainName;
+  Scope.LeaseTimeLE       := fLeaseTimeSeconds; // 100%
+  if Scope.LeaseTimeLE < 30 then
+    Scope.LeaseTimeLE     := 30;                // 30 seconds minimum lease
+  Scope.RenewalTimeLE     := Scope.LeaseTimeLE shr 1;       // 50%
+  Scope.RebindingLE       := (Scope.LeaseTimeLE * 7) shr 3; // 87.5%
+  Scope.OfferHolding      := fOfferHoldingSecs; // 5 seconds
+  if Scope.OfferHolding < 1 then
+    Scope.OfferHolding    := 1
+  else if Scope.OfferHolding > Scope.RenewalTimeLE then
+    Scope.OfferHolding    := Scope.RenewalTimeLE;
+  Scope.MaxDeclinePerSec  := fMaxDeclinePerSecond; // max 5 DECLINE per sec
+  Scope.DeclineTime       := fDeclineTimeSeconds;
+  if Scope.DeclineTime = 0 then
+    Scope.DeclineTime     := Scope.LeaseTimeLE;
+  Scope.GraceFactor       := fGraceFactor;         // * 2
+  Scope.Options           := fOptions;
+  Scope.DnsScript         := '';
+  Scope.OnBackgroundExecute := nil;
+  if (fDynDnsTrustSecs <> 0) and
+     FileExists(fDynDnsScript) then
+  begin
+    Scope.DnsScript := fDynDnsScript;
+    Scope.DnsScriptSecs := fDynDnsTrustSecs;
+    Scope.DnsScriptLastTix32 := 0;
+    Scope.OnBackgroundExecute := Sender.OnBackgroundExecute;
+  end;
+  // prepare complex "boot" "pool" "main" sub-properties
+  fBoot.PrepareBoot(Scope.Boot, Scope.Options);
+  n := length(fPool);
+  SetLength(Scope.PoolRules, n);
+  SetLength(Scope.Pools, n);
+  for i := 0 to n - 1 do
+  begin
+    fPool[i].PrepareRule(Scope.PoolRules[i]);
+    fPool[i].PreparePool(Scope, Scope.Pools[i]);
+  end;
+  fMain.PreparePool(Scope, Scope.Main);
   // retrieve and adjust the subnet mask from settings
-  if not Data.Subnet.From(fSubnetMask) then
+  if not Scope.Subnet.From(fSubnetMask) then
     EDhcp.RaiseUtf8(
       'PrepareScope: unexpected subnet-mask=% (should be mask ip or ip/sub)',
       [fSubnetMask]);
-  if Data.Subnet.mask = cAnyHost32 then
+  if Scope.Subnet.mask = cAnyHost32 then
   begin
     // subnet-mask was not '192.168.0.1/24': is expected to be '255.255.255.0'
-    if IP4Prefix(Data.Subnet.ip) = 0 then
+    if IP4Prefix(Scope.Subnet.ip) = 0 then
       EDhcp.RaiseUtf8('PrepareScope: subnet-mask=% is not a valid IPv4 mask',
         [fSubnetMask]);
-    mask := Data.Subnet.ip;
+    mask := Scope.Subnet.ip;
     // we expect other parameters to be set specifically: compute final Subnet
-    if Data.ServerIdentifier = 0 then
+    if Scope.ServerIdentifier = 0 then
       EDhcp.RaiseUtf8('PrepareScope: subnet-mask=% but without server-identifier',
         [fSubnetMask]);
-    Data.Subnet.mask := mask;
-    Data.Subnet.ip := Data.ServerIdentifier and mask; // normalize as in From()
+    Scope.Subnet.mask := mask;
+    Scope.Subnet.ip := Scope.ServerIdentifier and mask; // normalize as in From()
   end
   else
     // subnet-mask was e.g. '192.168.0.1/24'
-    if Data.ServerIdentifier = 0 then
+    if Scope.ServerIdentifier = 0 then
       // extract from exact subnet-mask text, since Subnet.ip = 192.168.0.0
-      Data.ServerIdentifier := ToIP4(SubnetMask);
+      Scope.ServerIdentifier := ToIP4(SubnetMask);
   // validate all settings values from the actual subnet
-  Data.AfterFill(Sender.Log.Add); // may raise an EDhcp exception
+  Scope.AfterFill(Sender.Log.Add); // may raise an EDhcp exception
   // trigger SaveToFile() in next OnIdle()
   inc(Sender.fModifSequence);
 end;
@@ -3275,6 +4807,7 @@ begin
   inherited Create;
   fFileFlushSeconds := 30; // good tradeoff: low disk writes, still safe for PXE
   fMetricsCsvMinutes := 5;
+  fDnsScriptThreads := 1;
 end;
 
 function TDhcpServerSettings.Verify: string;
@@ -3308,6 +4841,16 @@ end;
 
 { TDhcpProcess }
 
+destructor TDhcpProcess.Destroy;
+begin
+  if Assigned(fBackgroundExecute) then
+  begin
+    fBackgroundExecute.Terminate;
+    fBackgroundExecute := nil;
+  end;
+  inherited Destroy;
+end;
+
 function TDhcpProcess.GetCount: integer;
 var
   n: integer;
@@ -3322,7 +4865,7 @@ begin
   begin
     n := PDALen(PAnsiChar(s) - _DALEN)^ + _DAOFF;
     repeat
-      inc(result, s^.Count - s^.FreeListCount);
+      inc(result, s^.GetCount);
       inc(s);
       dec(n);
     until n = 0;
@@ -3394,6 +4937,7 @@ begin
     if aSettings.FileName <> '' then
       SetFileName(aSettings.FileName); // LoadFromFile() once fScope[] are set
     fFileFlushSeconds := aSettings.FileFlushSeconds;
+    fDnsScriptThreads := aSettings.DnsScriptThreads;
     fMetricsCsvSeconds := aSettings.MetricsCsvMinutes * SecsPerMin;
     fMetricsFolder := '';
     if aSettings.MetricsFolder <> '' then
@@ -3523,8 +5067,7 @@ begin
     begin
       n := PDALen(PAnsiChar(s) - _DALEN)^ + _DAOFF;
       repeat
-        inc(result, s^.CheckOutdated(tix32)); // 5us for 20k leases
-        inc(total, s^.Count);
+        inc(result, s^.CheckOutdated(tix32, total)); // 5us for 20k leases
         inc(s);
         dec(n);
       until n = 0;
@@ -3542,7 +5085,7 @@ begin
         QueryPerformanceMicroSeconds(start);         // saved=100000 in 5.65ms
         saved := SaveToFile(fFileName); // make fScopeSafe.ReadLock/ReadUnLock
         FormatShort(' saved=% in %', [saved, MicroSecFrom(start)], tmp);
-        // notes: 1) do not aggressively retry if saved<0 (write failed)
+        // notes: 1) do not aggressively retry if saved < 0 (write failed)
         //        2) no background thread needed - SaveToFile() takes only
         //           5.65ms with 100K leases for a 4.2MB text file
         if fMetricsFolder <> '' then
@@ -3567,13 +5110,14 @@ end;
 
 function TDhcpProcess.SaveToText(SavedCount: PInteger): RawUtf8;
 var
-  tmp: TTextWriterStackBuffer; // 8KB static, then up to 1MB buffer
+  tmp: TTextWriterStackBuffer; // 8KB static, then up to 1MB buffer (20K leases)
   W: TTextWriter;
   tix32, saved, n: cardinal;
   boot: TUnixTime;
   s: PDhcpScope;
 begin
   result := CRLF; // returns something not void
+  // prepare the export context
   if SavedCount <> nil then
     SavedCount^ := 0;
   n := GetCount;
@@ -3581,7 +5125,7 @@ begin
     exit;
   tix32 := GetTickSec;
   boot := UnixTimeUtc - tix32;    // = UnixTimeUtc at computer boot
-  if boot < UNIXTIME_MINIMAL then // we should have booted after 08 Dec 2016
+  if boot < UNIXTIME_MINIMAL then // we should have booted after 08 Dec 2016 :)
     exit;
   // save all leases in all scopes in dnsmasq format
   saved := 0;
@@ -3615,12 +5159,13 @@ end;
 function TDhcpProcess.LoadFromText(const Text: RawUtf8): boolean;
 var
   tix32, entries: cardinal;
+  ip4, ip4le: TNetIP4;
   boot, expiry: TUnixTime;
   mac64: Int64;
-  ip4: TNetIP4;
-  p, b: PUtf8Char;
+  u, b: PUtf8Char;
   new: PDhcpLease;
-  s, last: PDhcpScope;
+  s, lasts: PDhcpScope;
+  p, lastp: PDhcpPool;
 begin
   result := false;
   tix32 := GetTickSec;
@@ -3629,62 +5174,79 @@ begin
     exit;
   mac64 := 0;
   entries := 0;
-  last := nil;
+  lasts := nil;
+  lastp := nil;
   ClearLeases({keepWriteLock=}true); // easier than complex s^.Lock/UnLock
   try
-    p := pointer(Text);
-    if (p <> nil) and
+    u := pointer(Text);
+    if (u <> nil) and
        (fScope <> nil) then
     repeat
       // line format is "<expiry> <mac> <ip4>" as for dnsmasq leases
-      p := GotoNextNotSpace(p);
-      if p^ in ['0' .. '9'] then // parse <expiry> but ignore e.g. '# 1.2.3.4/24'
+      u := GotoNextNotSpace(u);
+      if u^ in ['0' .. '9'] then // parse <expiry> but ignore e.g. '# 1.2.3.4/24'
       begin
-        b := p;
+        b := u;
         expiry := GetNextItemQWord(b, ' ');
         if (expiry >= boot - SecsPerMonth) and  // not too old
            (expiry < TUnixTime(UNIXTIME_MINIMAL) * 2) then // range in seconds
         begin
-          p := GotoNextSpace(b);
-          if (p - b = 17) and
-             (p^ = ' ') and
+          u := GotoNextSpace(b);
+          if (u - b = 17) and
+             (u^ = ' ') and
              TextToMac(b, @mac64) and
              (mac64 <> 0) and
-             NetIsIP4(p + 1, @ip4) and
+             NetIsIP4(u + 1, @ip4) and
              (ip4 <> 0) then
           begin
-            // we parsed a valid lease into expiry/mac/ip4: locate its scope
-            s := last;
-            if (s = nil) or
-               not s^.Subnet.Match(ip4) then
+            // we parsed a valid lease into expiry/mac/ip4: locate its range
+            ip4le := bswap32(ip4);
+            p := lastp;
+            if (p = nil) or
+               (ip4le < p^.IpMinLE) or
+               (ip4le > p^.IpMaxLE) then
             begin
-              s := GetScope(ip4); // called once per sub-net or incorrect IP
+              p := nil;
+              s := lasts;
+              if (s = nil) or
+                 not s^.Subnet.Match(ip4) then
+                s := GetScope(ip4); // called once per sub-net or incorrect IP
               if s <> nil then
-                last := s;        // is likely not to change for the next line
+              begin
+                // inlined p := s^.FindPool
+                p := pointer(s^.Pools);
+                if p <> nil then
+                  p := DoFindPool(ip4le, p);
+                if p = nil then
+                  p := @s^.Main; // fallback
+                lasts := s; // is likely not to change for the next line
+                lastp := p;
+              end;
             end;
-            if s <> nil then
+            if p <> nil then
             begin
-              // add this lease to the internal list of this scope
-              if s^.Count = length(s^.Entry) then
-                SetLength(s^.Entry, NextGrow(s^.Count));
-              new := @s^.Entry[s^.Count];
-              inc(s^.Count);
+              // add this lease to the corresponding IP range list of this scope
+              if p^.Count = length(p^.Entry) then
+                SetLength(p^.Entry, NextGrow(p^.Count));
+              new := @p^.Entry[p^.Count];
+              inc(p^.Count);
               PInt64(new)^ := mac64 shl 16; // also set State+RateLimit
               new^.IP4 := ip4;
               new^.Expired := expiry - boot;
-              if new^.Expired < tix32 then // same logic than s^.CheckOutdated()
+              if new^.Expired < tix32 then // see s^.CheckOutdated()
                 new^.State := lsOutdated
               else
                 new^.State := lsAck;
               inc(entries);
             end;
+            inc(u, 8); // minimal '1.2.3.4' text length after (u + 1) = <ip4>
           end;
         end;
       end;
       // invalid lines are just skipped
-      p := GotoNextLine(p);
-    until (p = nil) or
-          (p^ = #0);
+      u := GotoNextLine(u);
+    until (u = nil) or
+          (u^ = #0);
   finally
     fScopeSafe.WriteUnLock;
   end;
@@ -3949,13 +5511,109 @@ begin
     result := LoadFromText(txt); // make fScopeSafe.WriteLock/WriteUnlock
 end;
 
+function TDhcpProcess.OnBackgroundScript(Sender: TSynBackgroundQueue;
+  Event: pointer): boolean;
+var
+  ctx: ^TOnDhcpBackgroundExecute absolute Event;
+  res: integer; // not PtrInt
+  scope: PDhcpScope;
+  start, stop: Int64;
+  msg: RawUtf8;
+  us: TShort16;
+begin
+  result := true; // continue de-queuing as much as possible
+  // ensure this notification is not expired (may happen if script is broken)
+  if ctx^.expiredtix32 < GetTickSec then
+  begin
+    msg := 'deprecated';
+    res := -2;
+    us[0] := #0;
+  end
+  else
+  begin
+    QueryPerformanceMicroSeconds(start);
+    try
+      // execute the notification script in this background thread
+      res := 0;
+      // safer to use a timeout at 20s - even if typically < 100ms
+      msg := RunRedirect(ctx^.cmd, @res, nil, {ms=}20 * MilliSecsPerSec);
+    except
+      on E: Exception do
+      begin
+        Make([PClass(E)^, ': ', E.Message], msg);
+        res := -3;
+      end;
+    end;
+    QueryPerformanceMicroSeconds(stop);
+    MicroSecToString(stop - start, us);
+    AppendShortCharSafe(' ', us);
+  end;
+  // notify the scope
+  fScopeSafe.ReadLock;
+  try
+    scope := GetScope(ctx^.ip4); // safer to make a quick lookup
+    if scope <> nil then
+      if res = 0 then
+      begin
+        scope^.DnsScriptLastTix32 := GetTickSec; // notify success for option 81
+        inc(scope^.Metrics.Current[dsmDdnsNotified]);
+      end
+      else
+      begin
+        scope^.DnsScriptLastTix32 := 0;          // force S=0 for option 81
+        inc(scope^.Metrics.Current[dsmDdnsFailed]);
+      end;
+  finally
+    fScopeSafe.ReadUnLock;
+  end;
+  // log and cleanup
+  if res = 0 then
+  begin
+    Sender.OnProcessMS := 1000; // back to normal retry pace
+    fLog.Add.Log(sllTrace, 'Background %%', [us, ctx^.cmd]);
+  end
+  else
+  begin
+    if msg <> 'deprecated' then
+    begin
+      // error execution or timeout: retry with an increasing delay up to 1 min
+      Sender.EnQueue(ctx, {now=}false);
+      Sender.DelayProcess(MilliSecsPerMin);
+      result := false; // stop de-queeing until next delayed OnProcessMS
+    end;
+    fLog.Add.Log(sllWarning, 'Background %% = % [%]', [us, ctx^.cmd, res, msg]);
+  end;
+end;
+
+function TDhcpProcess.OnBackgroundExecute(const ctx: TOnDhcpBackgroundExecute): boolean;
+begin
+  try
+    if fBackgroundExecute = nil then
+    begin
+      GlobalLock;
+      try
+        if fBackgroundExecute = nil then
+          fBackgroundExecute := TSynBackgroundQueue.Create(
+            'dhcp ddns', TypeInfo(TOnDhcpBackgroundExecutes), 1000,
+            OnBackgroundScript, fDnsScriptThreads);
+      finally
+        GlobalUnLock;
+      end;
+    end;
+    fBackgroundExecute.EnQueue(@ctx, {now=}not fBackgroundExecute.Processing);
+    result := true;
+  except
+    result := false;
+  end;
+end;
+
 procedure TDhcpProcess.DoLog(Level: TSynLogLevel; const Context: ShortString;
   const State: TDhcpState);
 var
   fam: TSynLogFamily;
   one: TSynLog;
-  msg: ShortString;
-  prefixlen: PtrInt;
+  msg: ShortString; // shared by TSynLog and JournalSend()
+  prefixlen, msglen: PtrInt;
 begin
   // this method could be overriden to extend or replace the default logging
   fam := fLog.Family;
@@ -3970,7 +5628,7 @@ begin
   prefixlen := length(fLogPrefix); // 'ComputeResponse: ' by default
   msg[0] := AnsiChar(prefixlen);
   MoveFast(pointer(fLogPrefix)^, msg[1], prefixlen);
-  AppendShortAnsi7String(DHCP_TXT[State.RecvType], msg);
+  AppendShortAnsi7String(DHCP_TXT[State.RecvType], msg); // Undefined='invalid'
   AppendShortChar(' ', @msg);
   if State.Mac[0] <> #0 then
   begin
@@ -3990,26 +5648,57 @@ begin
     AppendShortChar(' ', @msg);
     AppendShort(State.RecvHostName^, msg);
   end;
+  if (State.Pool <> nil) and
+     (State.Pool^.Name <> '') then
+  begin
+    AppendShort(' pool=', msg); // e.g. 'pool=printers'
+    AppendShortAnsi7String(State.Pool^.Name, msg);
+  end;
   if State.RecvBoot <> dcbDefault then
   begin
     AppendShort(' boot=', msg); // e.g. 'boot=ipxe-x64'
     AppendShortAnsi7String(BOOT_TXT[State.RecvBoot], msg);
   end;
   if (State.RecvRule <> nil) and
-     (State.RecvRule.name <> '') then
+     (State.RecvRule^.name <> '') then
   begin
-    AppendShort(' rule=', msg);
-    AppendShortAnsi7String(State.RecvRule.name, msg);
-    if msg[0] = #255 then
-      dec(msg[0]); // avoid buffer overflow on next line
+    AppendShort(' rule=', msg); // e.g. 'rule=guest-wifi'
+    AppendShortAnsi7String(State.RecvRule^.name, msg);
   end;
-  msg[ord(msg[0]) + 1] := #0; // ensure ASCIIZ
+  msglen := ord(msg[0]);
+  inc(msglen, ord(msglen < high(msg))); // avoid buffer overflow on next line
+  PByteArray(@msg)[msglen] := 0;        // ensure ASCIIZ
   // efficiently append to local TSynLog
   if one <> nil then
     one.LogText(Level, PUtf8Char(@msg[1]), nil); // this is the fastest API
   // optionnally send 'REQUEST MAC...' text to system logs (much slower)
   if dsoSystemLog in fOptions then
-    JournalSend(Level, @msg[prefixlen + 1], ord(msg[0]) - prefixlen, false);
+    JournalSend(Level, @msg[prefixlen + 1], msglen - prefixlen, false);
+end;
+
+procedure TDhcpProcess.OnLogFrame(Sender: TSynLog; Level: TSynLogLevel;
+  Opaque: pointer; Value: PtrInt; Instance: TObject);
+var
+  s: PDhcpState absolute Opaque;
+  us: Int64;
+  W: TJsonWriter;
+begin
+  W := Sender.Writer; // called within TSynLog global lock
+  case Level of
+    sllClient:
+      DoDhcpToJson(W, @s^.Recv, s^.RecvLen, {state=}nil);
+    sllServer:
+      begin
+        QueryPerformanceMicroSeconds(us);
+        DoDhcpToJson(W, @s^.Send, s^.SendLen, s);
+        W.CancelLastChar;
+        W.AddShorter(',us:'); // twoForceJsonExtended from within logs
+        W.AddQ(us - s^.StartMicroSec);
+        W.AddDirect('}');
+      end;
+  else
+    W.AddShorter('LogFrame'); // paranoid
+  end;
 end;
 
 function TDhcpProcess.DoError(var State: TDhcpState; Context: TDhcpScopeMetric;
@@ -4050,7 +5739,9 @@ begin
       begin
         IP4Short(@Lease^.IP4, State.Ip);
         DoLog(sllTrace, 'as', State);
-        State.Scope^.ReuseIp4(Lease); // set MAC=0 IP=0 State=lsFree
+        if Lease^.State = lsAckDdns then // unregister to DDNS
+          State.Scope^.ExecuteDnsScript(Lease^.IP4, @Lease^.Mac, nil, State.Tix32);
+        State.Pool^.ReuseLease(Lease); // set MAC=0 IP=0 State=lsFree
         inc(fModifSequence); // trigger SaveToFile() in next OnIdle()
       end;
     dsmUnsupportedRequest:
@@ -4068,30 +5759,11 @@ end;
 
 function TDhcpProcess.ParseFrame(var State: TDhcpState): boolean;
 begin
-  State.Mac64 := 0;
-  State.Ip4 := 0;
-  State.SendType := dmtUndefined;
-  State.RecvBoot := dcbDefault;
-  State.RecvRule := nil;
-  State.RecvType := DhcpParse(@State.Recv, State.RecvLen, State.RecvLens, nil, @State.Mac64);
-  State.Ip[0] := #0;
-  if State.Mac64 <> 0 then
-  begin
-    // valid DHCP frame with RecvType <> dmtUndefined
-    State.Mac[0] := #17;
-    ToHumanHexP(@State.Mac[1], @State.Mac64, 6);
-    State.RecvHostName := DhcpData(@State.Recv, State.RecvLens[doHostName]);
-    FillZero(THash128(State.RecvLensRai));
-    if State.RecvLens[doRelayAgentInformation] <> 0 then
-      State.ParseRecvLensRai;
-    result := true;
-  end
-  else
-  begin
-    State.Mac[0] := #0;
-    State.RecvHostName := @NULCHAR;
-    result := false;
-  end;
+  result := State.Parse;
+  if result and
+     (dsoVerboseLog in fOptions) and
+     Assigned(fLog) then
+    fLog.Add.RawLog(sllClient, OnLogFrame, @State);
 end;
 
 function TDhcpProcess.RetrieveFrameIP(
@@ -4099,18 +5771,18 @@ function TDhcpProcess.RetrieveFrameIP(
 var
   ip4: TNetIP4;
 begin
-  // called from DISCOVER and REQUEST
+  // from DISCOVER or REQUEST to validate option 50 hint (not authoritative)
   result := false;
-  ip4 := DhcpIP4(@State.Recv, State.RecvLens[doDhcpRequestedAddress]); // opt 50
+  ip4 := DhcpIP4(@State.Recv, State.RecvLens[doRequestedAddress]); // opt 50
   if ip4 = 0 then
     exit;
   if (Lease = nil) or
      (Lease^.IP4 <> ip4) then
     if (not State.Scope^.SubNet.Match(ip4)) or
-       State.Scope^.IsStaticIP(ip4) or
-       (State.Scope^.FindIp4(ip4) <> nil) then
+       (not State.Pool^.Match(ip4)) or
+       State.Scope^.Exists(ip4) then
     begin
-      // this IP seems already used by another MAC
+      // this IP seems already used by another MAC, or in another subnet/pool
       IP4Short(@ip4, State.Ip);
       DoLog(sllTrace, 'ignore requested', State); // transient info: no DoError
       inc(State.Scope^.Metrics.Current[dsmDroppedInvalidIP]);
@@ -4124,6 +5796,7 @@ end;
 function TDhcpProcess.FindScope(var State: TDhcpState): boolean;
 begin
   result := true;
+  State.Pool := nil; // all those are about subnet selection, not IP range pools
   State.Scope := GetScope(DhcpIP4(@State.Recv, State.RecvLensRai[dorLinkSelection]));
   if State.Scope <> nil then
   begin
@@ -4158,25 +5831,16 @@ end;
 
 function TDhcpProcess.FindLease(var State: TDhcpState): PDhcpLease;
 begin
-  // from reserved static "ip" in "rules"
-  if (State.RecvRule <> nil) and
-     (State.RecvRule.ip <> 0) then
-  begin
-    result := State.FakeLease(State.RecvRule.ip);
-    exit;
-  end;
-  // from StaticUuid[]
-  result := pointer(State.Scope^.StaticUuid);
-  if result <> nil then
-    if State.RecvLens[doDhcpClientIdentifier] <> 0 then  // computer MAC/UUID
-      result := State.ClientUuid(doDhcpClientIdentifier)
-    else if State.RecvLens[doUuidClientIdentifier] <> 0 then  // IPXE/VM
-      result := State.ClientUuid(doUuidClientIdentifier)
-    else
-      result := nil;
-  // from Entry[] and StaticMac[]
+  // from StaticUuid[] reservations
+  if State.RecvLens[doClientIdentifier] <> 0 then  // computer MAC/UUID
+    result := State.ClientUuid(doClientIdentifier)
+  else if State.RecvLens[doUuidClientIdentifier] <> 0 then  // IPXE/VM
+    result := State.ClientUuid(doUuidClientIdentifier)
+  else
+    result := nil;
+  // from Entry[] dynamic list and StaticMac[] reservations in all pools
   if result = nil then
-    result := State.Scope^.FindMac(State.Mac64);
+    result := State.Scope^.FindMac(State.Mac64, State.Pool);
 end;
 
 const
@@ -4192,7 +5856,7 @@ procedure TDhcpProcess.SetRecvBoot(var State: TDhcpState);
 var
   b: TDhcpClientBoot;
   o: PByteArray;
-  vendor: PShortString;
+  vendor, user: PAnsiChar;
   a: PtrUInt;
 begin
   b := dcbDefault;
@@ -4206,24 +5870,30 @@ begin
        (o[2] <= high(ARCH_DCB)) then
       b := ARCH_DCB[o[2]];
   end;
-  vendor := DhcpData(@State.Recv, State.RecvLens[doVendorClassIdentifier]);
+  vendor := State.Data(doVendorClassIdentifier);
   if b = dcbDefault then
     // fallback to Option 60 parsing - e.g. 'PXEClient:Arch:00007:UNDI:003016'
-    if (vendor^[0] >= #17) and
-       IdemPChar(@vendor^[1], 'PXECLIENT:ARCH:0') then
+    if (vendor[0] >= #17) and
+       (PCardinal(vendor + 1)^ = // fast case-sensitive 'PXEC' exact check
+         ord('P') + ord('X') shl 8 + ord('E') shl 16 + ord('C') shl 24) and
+       CompareShort(vendor + 5, 'lient:Arch:0') then
     begin
-      a := GetCardinal(@vendor^[17]);
+      a := GetCardinal(PUtf8Char(vendor + 17));
       if a <= high(ARCH_DCB) then
         b := ARCH_DCB[a];
     end;
   if b = dcbDefault then
     exit; // normal DHCP boot
   // detect iPXE from RFC 3004 Option 77
-  if DhcpIdem(@State.Recv, State.RecvLens[doUserClass], 'iPXE') then
+  user := State.Data(doUserClass);
+  if (user[0] = #4) and
+     (PCardinal(user + 1)^ = // fast case-sensitive 'iPXE' exact check
+       ord('i') + ord('P') shl 8 + ord('X') shl 16 + ord('E') shl 24) then
     // change dcbBios..dcbA64 into dcbIpxeBios..dcbIpxeA64
     inc(b, ord(dcbIpxeBios) - ord(dcbBios))
-  else if (vendor^[0] >= #10) and
-          IdemPChar(@vendor^[1], 'HTTPCLIENT') then
+  else if (vendor[0] >= #10) and
+          (PCardinal(vendor + 1)^ = HTTP_32) and
+          CompareShort(vendor + 5, 'Client') then
     // HTTPClient in Option 60 indicates native UEFI firmware HTTP boot
     // - will fallback to TFTP is no HTTP URI is supplied
     case b of
@@ -4259,20 +5929,19 @@ begin
   State.AddOptionCopy(doUuidClientIdentifier);
 end;
 
-procedure TDhcpProcess.SetRule(var State: TDhcpState);
+function TDhcpProcess.GetRule(var State: TDhcpState; Rule: PDhcpRule): PDhcpRule;
 var
-  rule: PDhcpScopeRule;
-  rules, hi: TDALen; // use hi=high(TRuleValues) to favor FPC
+  n, hi: TDALen; // use hi=high(TRuleValues) to favor FPC
   r: PRuleValue;
 label
   ko; // unrolled logic for very efficient runtime execution
 begin
-  // implement "first precise rule wins" deterministic behavior
-  rule := pointer(State.Scope^.Rules); // caller ensured rule <> nil
-  rules := PDALen(PAnsiChar(rule) - _DALEN)^ + _DAOFF;
+  // implements a "first precise rule wins" deterministic Virtual Machine
+  result := nil;
+  n := PDALen(PAnsiChar(Rule) - _DALEN)^ + _DAOFF; // Rule <> nil by caller
   repeat
     // AND conditions (all must match) = "all"
-    r := pointer(rule^.all);
+    r := pointer(Rule^.all);
     if r <> nil then
     begin
       hi := PDALen(PAnsiChar(r) - _DALEN)^ + (_DAOFF - 1);
@@ -4287,7 +5956,7 @@ begin
       // all did match
     end;
     // OR conditions (at least one must match) = "any"
-    r := pointer(rule^.any);
+    r := pointer(Rule^.any);
     if r <> nil then
     begin
       hi := PDALen(PAnsiChar(r) - _DALEN)^ + (_DAOFF - 1);
@@ -4301,7 +5970,7 @@ begin
       until false;
     end;
     // NOT AND conditions (all must NOT match) = "not-all"
-    r := pointer(rule^.notall);
+    r := pointer(Rule^.notall);
     if r <> nil then
     begin
       hi := PDALen(PAnsiChar(r) - _DALEN)^ + (_DAOFF - 1);
@@ -4315,7 +5984,7 @@ begin
       until false;
     end;
     // NOT OR conditions (at least one must NOT match) = "not-any"
-    r := pointer(rule^.notany);
+    r := pointer(Rule^.notany);
     if r <> nil then
     begin
       hi := PDALen(PAnsiChar(r) - _DALEN)^ + (_DAOFF - 1);
@@ -4329,17 +5998,17 @@ begin
       until false;
     end;
     // if we reached here, all conditions did apply
-    State.RecvRule := rule;
+    result := Rule;
     // all=any=nil as fallback if nothing more precise did apply
     // "not-all"/"not-any" without any "all"/"any" are just ignored
     // unless they are the eventual default - last default wins
-    if (rule^.all <> nil) or
-       (rule^.any <> nil) then
-      // first exact matching rule wins (deterministic)
+    if (Rule^.all <> nil) or
+       (Rule^.any <> nil) then
+      // first exact matching Rule wins (deterministic)
       exit;
-ko: inc(rule);      // next "rules" object
-    dec(rules);
-  until rules = 0;
+ko: inc(Rule);      // next "rule" object
+    dec(n);
+  until n = 0;
 end;
 
 function TDhcpProcess.RunCallbackAborted(var State: TDhcpState): boolean;
@@ -4359,7 +6028,7 @@ function TDhcpProcess.Flush(var State: TDhcpState): PtrInt;
 begin
   // recognize State.RecvBoot from options 60/77/93
   SetRecvBoot(State);
-  // append "rules" custom options - always first since have precedence
+  // append "rule" custom options - always first since have precedence
   integer(State.SendOptions) := 0;
   if State.RecvRule <> nil then
     State.AddRulesOptions;
@@ -4378,13 +6047,290 @@ begin
     // append verbatim options 61/82 copy + end Send buffer stream
     result := State.Flush;
     if result = 0 then
-      result := DoError(State, dsmDroppedTooManyOptions);
+      result := DoError(State, dsmDroppedTooManyOptions)
+    else if (dsoVerboseLog in fOptions) and
+            Assigned(fLog) then
+      fLog.Add.RawLog(sllServer, OnLogFrame, @State);
   end;
 end;
 
-function TDhcpProcess.ComputeResponse(var State: TDhcpState): PtrInt;
+function TDhcpProcess.LockedResponse(var State: TDhcpState): PtrInt;
 var
+  r: PDhcpRule;
   p: PDhcpLease;
+begin
+  // find any existing dynamic lease - or StaticMac[] StaticUuid[] fake lease
+  p := FindLease(State);
+  // identify the IP range pool within this scope (if not known from the lease)
+  if State.Pool = nil then
+  begin
+    r := pointer(State.Scope^.PoolRules);
+    if r <> nil then
+    begin
+      r := GetRule(State, r);
+      if r <> nil then
+      begin
+        State.Pool := @State.Scope.Pools[
+           (PtrUInt(r) - PtrUInt(State.Scope^.PoolRules)) div SizeOf(r^)];
+        inc(State.Scope^.Metrics.Current[dsmPoolRuleHits]);
+      end;
+    end;
+    if State.Pool = nil then
+      State.Pool := @State.Scope^.Main; // default
+  end;
+  // identify any matching input from this pool "rule" definition
+  r := pointer(State.Pool^.Rules);
+  if r <> nil then
+  begin
+    r := GetRule(State, r);
+    if r <> nil then // found a matching entry in "rule": apply the policy
+    begin
+      State.RecvRule := @State.Pool^.Policies[
+        (PtrUInt(r) - PtrUInt(State.Pool^.Rules)) div SizeOf(r^)];
+      // there may be a reserved static "ip" for this rule
+      if (p = nil) and
+         (State.RecvRule^.ip <> 0) then
+        p := State.FakeLease(State.RecvRule^.ip);
+    end;
+  end;
+  // process the received DHCP message
+  case State.RecvType of
+    dmtDiscover:
+      begin
+        inc(State.Scope^.Metrics.Current[dsmDiscover]);
+        if (p = nil) or    // first time this MAC is seen
+           (p^.IP4 = 0) or // may happen after DECLINE
+           (p^.State = lsReserved) then // reserved = client refused this IP
+        begin
+          // first time seen (most common case), or renewal
+          if not RetrieveFrameIP(State, p) then // IP from option 50
+          begin
+            State.Ip4 := State.Pool^.NextIp4; // guess a free IP from pool
+            if State.Ip4 = 0 then
+            begin
+              // IPv4 exhausted: don't return NAK, but silently ignore
+              // - client will retry after a small temporisation
+              result := DoError(State, dsmDroppedNoAvailableIP);
+              exit;
+            end;
+          end;
+          if p = nil then
+          begin
+            p := State.Pool^.NewLease(State.Mac64);
+            State.Pool^.LastDiscover := State.Pool^.LeaseIndex(p);
+          end;
+          p^.IP4 := State.Ip4;
+        end
+        else
+          // keep existing/previous/static IP4
+          State.Ip4 := p^.IP4;
+        // update the lease information
+        if p^.State = lsStatic then
+        begin
+          p^.Expired := State.Tix32;
+          inc(State.Scope^.Metrics.Current[dsmStaticHits]);
+        end
+        else
+        begin
+          inc(fModifSequence); // trigger SaveToFile() in next OnIdle()
+          p^.State := lsReserved;
+          p^.Expired := State.Tix32 + State.Scope^.OfferHolding;
+          inc(State.Scope^.Metrics.Current[dsmDynamicHits]);
+        end;
+        // respond with an OFFER
+        inc(State.Scope^.Metrics.Current[dsmOffer]);
+        State.SendType := dmtOffer;
+      end;
+    dmtRequest:
+      begin
+        inc(State.Scope^.Metrics.Current[dsmRequest]);
+        if (p <> nil) and
+           (p^.IP4 <> 0) and
+           ((p^.State in [lsReserved, lsAck, lsAckDdns, lsStatic]) or
+            ((p^.State = lsOutdated) and
+             (State.Scope^.GraceFactor > 1) and
+             (State.Scope^.LeaseTimeLE < SecsPerHour) and // grace period
+             (State.Tix32 - p^.Expired <
+                State.Scope^.LeaseTimeLE * State.Scope^.GraceFactor))) then
+          // RFC 2131: lease is Reserved after OFFER = SELECTING
+          //           lease is Ack/Static/Outdated = RENEWING/REBINDING
+          inc(State.Scope^.Metrics.Current[dsmLeaseRenewed])
+        else if RetrieveFrameIP(State, p) then // IP from option 50
+        begin
+          // no lease, but Option 50 = INIT-REBOOT
+          if p = nil then
+            p := State.Pool^.NewLease(State.Mac64)
+          else
+            inc(State.Scope^.Metrics.Current[dsmLeaseRenewed]);
+          p^.IP4 := State.Ip4;
+        end
+        else
+        begin
+          // no lease, and none or invalid Option 50 = send NAK response
+          result := DoError(State, dsmNak);
+          exit;
+        end;
+        // update the lease information
+        if p^.State = lsStatic then
+        begin
+          p^.Expired := State.Tix32;
+          inc(State.Scope^.Metrics.Current[dsmStaticHits]);
+        end
+        else
+        begin
+          inc(fModifSequence); // trigger SaveToFile() in next OnIdle()
+          if (State.RecvHostName^[0] <> #0) and
+             (State.Scope^.DnsScript <> '') and
+             (State.Recv.options[State.RecvLens[doFqdn]] <> 0) then
+            p^.State := lsAckDdns
+          else
+            p^.State := lsAck;
+          p^.Expired := State.Tix32 + State.Scope^.LeaseTimeLE;
+          inc(State.Scope^.Metrics.Current[dsmDynamicHits]);
+        end;
+        // respond with an ACK on the known IP
+        inc(State.Scope^.Metrics.Current[dsmAck]);
+        State.Ip4 := p^.IP4;
+        State.SendType := dmtAck;
+      end;
+    dmtDecline:
+      begin
+        inc(State.Scope^.Metrics.Current[dsmDecline]);
+        // client ARPed the OFFERed IP and detected conflict, so DECLINE it
+        if (p = nil) or
+           (p^.State <> lsReserved) then
+        begin
+          // ensure the server recently OFFERed one IP to that client
+          // (match RFC intent and prevent blind poisoning of arbitrary IPs)
+          result := DoError(State, dsmDroppedPackets);
+          exit;
+        end;
+        if (State.Scope^.MaxDeclinePerSec <> 0) and // = 5 by default
+           (fIdleTix <> 0) then  // OnIdle() would reset RateLimit := 0
+          if p^.RateLimit < State.Scope^.MaxDeclinePerSec then
+            inc(p^.RateLimit)
+          else
+          begin
+            // malicious client poisons the pool by sending repeated DECLINE
+            result := DoError(State, dsmRateLimitHit);
+            exit;
+          end;
+        // retrieve and check requested IP
+        State.Ip4 := DhcpIP4(@State.Recv, State.RecvLens[doRequestedAddress]);
+        if State.Ip4 <> 0 then // authoritative IP is option 50
+          inc(State.Scope^.Metrics.Current[dsmOption50Hits])
+        else
+          State.Ip4 := State.Recv.ciaddr; // fallback to ciaddr
+        if State.Ip4 = 0 then
+          State.Ip4 := p^.IP4 // last reserved IP would be invalidated below
+        else if not State.Scope^.SubNet.Match(State.Ip4) then
+        begin
+          // option 50 or ciaddr is not for this subnet -> do nothing
+          result := DoError(State, dsmDroppedInvalidIP);
+          exit;
+        end;
+        // always invalidate any previous offered IP
+        p^.State := lsUnavailable;
+        p^.IP4 := 0;
+        if State.Ip4 <> 0 then
+        begin
+          // store internally this IP as unavailable for NextIP4
+          IP4Short(@State.Ip4, State.Ip);
+          DoLog(sllTrace, 'as', State);  // success: no DoError()
+          p := State.Pool^.NewLease(0); // mac=0: sentinel to store this IP
+          p^.State := lsUnavailable;
+          p^.IP4 := State.Ip4;
+          p^.Expired := State.Tix32 + State.Scope^.DeclineTime;
+        end;
+        inc(fModifSequence); // trigger SaveToFile() in next OnIdle()
+        result := 0;         // no response, but not an error
+        exit; // server MUST NOT respond to a DECLINE message
+      end;
+    dmtRelease:
+      begin
+        inc(State.Scope^.Metrics.Current[dsmRelease]);
+        // client informs the DHCP server that it no longer needs the lease
+        if (p = nil) or
+           (p^.IP4 <> State.Recv.ciaddr) or
+           not (p^.State in [lsAck, lsAckDdns, lsOutdated]) then
+          // detect and ignore out-of-synch or malicious client
+          result := DoError(State, dsmDroppedInvalidIP)
+        else
+          result := DoError(State, dsmLeaseReleased, p);
+        exit; // server MUST NOT respond to a RELEASE message
+      end;
+    dmtInform:
+      begin
+        inc(State.Scope^.Metrics.Current[dsmInform]);
+        // client requests configuration options for its given IP
+        State.Ip4 := State.Recv.ciaddr;
+        if not State.Scope^.Subnet.Match(State.Ip4) then
+        begin
+          IP4Short(@State.Ip4, State.Ip); // no ciaddr or wrong subnet
+          result := DoError(State, dsmDroppedInvalidIP);
+          exit;
+        end;
+        if (p <> nil) and
+           (p^.State = lsStatic) then
+        begin
+          p^.Expired := State.Tix32;
+          inc(State.Scope^.Metrics.Current[dsmStaticHits]);
+        end
+        else
+        begin
+          if p <> nil then
+            inc(State.Scope^.Metrics.Current[dsmDynamicHits]);
+          if (dsoInformRateLimit in State.Scope^.Options) and
+             (fIdleTix <> 0) and // OnIdle() would reset RateLimit := 0
+             not State.Pool^.IsStaticIP(State.Ip4) then
+          begin
+            // temporarily marks client IP as unavailable to avoid conflicts
+            // (not set by default: stronger than the RFC requires, and no
+            // other DHCP server like KEA, dnsmasq or Windows implements it)
+            if p = nil then
+              p := State.Pool^.NewLease(State.Mac64)
+            else if p^.RateLimit >= 2 then // up to 3 INFORM per MAC per sec
+            begin
+              result := DoError(State, dsmInformRateLimitHit);
+              exit;
+            end
+            else
+            begin
+              inc(p^.RateLimit);
+              // mark this IP as temporary unavailable
+              if p^.IP4 <> State.Ip4 then
+                // create a new MAC-free lease for this other IP
+                p := State.Pool^.NewLease(0); // mac=0: sentinel for this IP
+            end;
+            // update the lease information
+            inc(fModifSequence); // trigger SaveToFile() in next OnIdle()
+            p^.State := lsUnavailable;
+            p^.Expired := State.Tix32 + State.Scope^.DeclineTime;
+            p^.IP4 := State.Ip4;
+          end;
+        end;
+        // respond with an ACK and the standard options
+        inc(State.Scope^.Metrics.Current[dsmAck]);
+        State.SendType := dmtAck;
+      end;
+  else
+    begin
+      // ParseFrame() was correct but this message type is not supported yet
+      result := DoError(State, dsmUnsupportedRequest);
+      exit;
+    end;
+  end;
+  // compute the dmtOffer/dmtAck response frame over the very same xid
+  IP4Short(@State.Ip4, State.Ip);
+  State.SendEnd := DhcpNew(State.Send, State.SendType, State.Recv.xid,
+    PNetMac(@State.Recv.chaddr)^, State.Scope^.ServerIdentifier);
+  State.Send.yiaddr := State.Ip4;
+  result := Flush(State);   // callback + options
+  if result <> 0 then
+    DoLog(sllTrace, 'into', State); // if not canceled by callback
+end;
+
+function TDhcpProcess.ComputeResponse(var State: TDhcpState): PtrInt;
 begin
   result := -1; // error
   // do nothing on missing Setup() or after Shutdown
@@ -4404,254 +6350,26 @@ begin
     DoLog(sllTrace, 'frame', State);
     inc(fMetricsInvalidRequest); // no Scope yet
     exit;
-    // unsupported RecvType will continue and inc(Scope^.Metrics) below
+    // wrong RecvType calls DoError(dsmUnsupportedRequest) in LockedResponse
   end;
   fScopeSafe.ReadLock; // protect Scope[] but is reentrant and non-blocking
   try
-    // detect the proper scope to use
+    // detect the proper scope to use from option 118/82 or giaddr
     if not FindScope(State) then
     begin
       result := DoError(State, dsmDroppedNoSubnet);
-      exit; // MUST NOT respond if no subnet matches giaddr
+      exit; // MUST NOT respond if no subnet matches
     end;
-    // work on this scope/subnet from now on
-    State.Tix32 := GetTickSec;
-    State.Scope^.Safe.Lock; // blocking for this subnet
+    // syscalls before locking this scope
+    if State.Tix32 = 0 then
+      State.Tix32 := GetTickSec; // caller should have set this field
+    if (dsoVerboseLog in Options) and
+       Assigned(fLog) then
+      QueryPerformanceMicroSeconds(State.StartMicroSec);
+    // evaluate the request in this blocked scope/subnet context
+    State.Scope^.Safe.Lock;
     try
-      // identify any matching input from this scope "rules" definition
-      if State.Scope^.Rules <> nil then
-        SetRule(State);
-      // find any existing lease - or StaticMac[] StaticUuid[] fake lease
-      p := FindLease(State);
-      // process the received DHCP message
-      case State.RecvType of
-        dmtDiscover:
-          begin
-            inc(State.Scope^.Metrics.Current[dsmDiscover]);
-            if (p = nil) or    // first time this MAC is seen
-               (p^.IP4 = 0) or // may happen after DECLINE
-               (p^.State = lsReserved) then // reserved = client refused this IP
-            begin
-              // first time seen (most common case), or renewal
-              if not RetrieveFrameIP(State, p) then // IP from option 50
-              begin
-                State.Ip4 := State.Scope^.NextIp4; // guess a free IP from pool
-                if State.Ip4 = 0 then
-                begin
-                  // IPv4 exhausted: don't return NAK, but silently ignore
-                  // - client will retry after a small temporisation
-                  result := DoError(State, dsmDroppedNoAvailableIP);
-                  exit;
-                end;
-              end;
-              if p = nil then
-              begin
-                p := State.Scope^.NewLease(State.Mac64);
-                State.Scope^.LastDiscover := State.Scope^.Index(p);
-              end;
-              p^.IP4 := State.Ip4;
-            end
-            else
-              // keep existing/previous/static IP4
-              State.Ip4 := p^.IP4;
-            // update the lease information
-            if p^.State = lsStatic then
-            begin
-              p^.Expired := State.Tix32;
-              inc(State.Scope^.Metrics.Current[dsmStaticHits]);
-            end
-            else
-            begin
-              inc(fModifSequence); // trigger SaveToFile() in next OnIdle()
-              p^.State := lsReserved;
-              p^.Expired := State.Tix32 + State.Scope^.OfferHolding;
-              inc(State.Scope^.Metrics.Current[dsmDynamicHits]);
-            end;
-            // respond with an OFFER
-            inc(State.Scope^.Metrics.Current[dsmOffer]);
-            State.SendType := dmtOffer;
-          end;
-        dmtRequest:
-          begin
-            inc(State.Scope^.Metrics.Current[dsmRequest]);
-            if (p <> nil) and
-               (p^.IP4 <> 0) and
-               ((p^.State in [lsReserved, lsAck, lsStatic]) or
-                ((p^.State = lsOutdated) and
-                 (State.Scope^.GraceFactor > 1) and
-                 (State.Scope^.LeaseTimeLE < SecsPerHour) and // grace period
-                 (State.Tix32 - p^.Expired <
-                    State.Scope^.LeaseTimeLE * State.Scope^.GraceFactor))) then
-              // RFC 2131: lease is Reserved after OFFER = SELECTING
-              //           lease is Ack/Static/Outdated = RENEWING/REBINDING
-              inc(State.Scope^.Metrics.Current[dsmLeaseRenewed])
-            else if RetrieveFrameIP(State, p) then
-              begin
-                // no lease, but Option 50 = INIT-REBOOT
-                if p = nil then
-                  p := State.Scope^.NewLease(State.Mac64)
-                else
-                  inc(State.Scope^.Metrics.Current[dsmLeaseRenewed]);
-                p^.IP4 := State.Ip4;
-              end
-              else
-              begin
-                // no lease, and none or invalid Option 50 = send NAK response
-                result := DoError(State, dsmNak);
-                exit;
-              end;
-            // update the lease information
-            if p^.State = lsStatic then
-            begin
-              p^.Expired := State.Tix32;
-              inc(State.Scope^.Metrics.Current[dsmStaticHits]);
-            end
-            else
-            begin
-              inc(fModifSequence); // trigger SaveToFile() in next OnIdle()
-              p^.State := lsAck;
-              p^.Expired := State.Tix32 + State.Scope^.LeaseTimeLE;
-              inc(State.Scope^.Metrics.Current[dsmDynamicHits]);
-            end;
-            // respond with an ACK on the known IP
-            inc(State.Scope^.Metrics.Current[dsmAck]);
-            State.Ip4 := p^.IP4;
-            State.SendType := dmtAck;
-          end;
-        dmtDecline:
-          begin
-            inc(State.Scope^.Metrics.Current[dsmDecline]);
-            // client ARPed the OFFERed IP and detected conflict, so DECLINE it
-            if (p = nil) or
-               (p^.State <> lsReserved) then
-            begin
-              // ensure the server recently OFFERed one IP to that client
-              // (match RFC intent and prevent blind poisoning of arbitrary IPs)
-              result := DoError(State, dsmDroppedPackets);
-              exit;
-            end;
-            if (State.Scope^.MaxDeclinePerSec <> 0) and // = 5 by default
-               (fIdleTix <> 0) then  // OnIdle() would reset RateLimit := 0
-              if p^.RateLimit < State.Scope^.MaxDeclinePerSec then
-                inc(p^.RateLimit)
-              else
-              begin
-                // malicious client poisons the pool by sending repeated DECLINE
-                result := DoError(State, dsmRateLimitHit);
-                exit;
-              end;
-            // invalidate OFFERed IP
-            State.Ip4 := DhcpIP4(@State.Recv, State.RecvLens[doDhcpRequestedAddress]);
-            if (State.Ip4 <> 0) and // authoritative IP
-               not State.Scope^.SubNet.Match(State.Ip4) then // need clean IP
-            begin
-              inc(State.Scope^.Metrics.Current[dsmDroppedInvalidIP]);
-              State.Ip4 := 0;
-            end;
-            if State.Ip4 = 0 then
-              State.Ip4 := p^.IP4 // option 50 was not set (or not in our subnet)
-            else
-              inc(State.Scope^.Metrics.Current[dsmOption50Hits]);
-            p^.State := lsUnavailable;
-            p^.IP4 := 0; // invalidate the previous offered IP
-            if State.Ip4 <> 0 then
-            begin
-              // store internally this IP as unavailable for NextIP4
-              IP4Short(@State.Ip4, State.Ip);
-              DoLog(sllTrace, 'as', State);  // success: no DoError()
-              p := State.Scope^.NewLease(0); // mac=0: sentinel to store this IP
-              p^.State := lsUnavailable;
-              p^.IP4 := State.Ip4;
-              p^.Expired := State.Tix32 + State.Scope^.DeclineTime;
-            end;
-            inc(fModifSequence); // trigger SaveToFile() in next OnIdle()
-            result := 0;         // no response, but not an error
-            exit; // server MUST NOT respond to a DECLINE message
-          end;
-        dmtRelease:
-          begin
-            inc(State.Scope^.Metrics.Current[dsmRelease]);
-            // client informs the DHCP server that it no longer needs the lease
-            if (p = nil) or
-               (p^.IP4 <> State.Recv.ciaddr) or
-               not (p^.State in [lsAck, lsOutdated]) then
-              // detect and ignore out-of-synch or malicious client
-              result := DoError(State, dsmDroppedInvalidIP)
-            else
-              result := DoError(State, dsmLeaseReleased, p);
-            exit; // server MUST NOT respond to a RELEASE message
-          end;
-        dmtInform:
-          begin
-            inc(State.Scope^.Metrics.Current[dsmInform]);
-            // client requests configuration options for its static IP
-            State.Ip4 := State.Recv.ciaddr;
-            if not State.Scope^.Subnet.Match(State.Ip4) or
-               ((p <> nil) and
-                not (p^.State in [lsUnavailable, lsOutdated, lsStatic])) then
-            begin
-              IP4Short(@State.Ip4, State.Ip);
-              result := DoError(State, dsmDroppedInvalidIP);
-              exit;
-            end;
-            if (p <> nil) and
-               (p^.State = lsStatic) then
-            begin
-              p^.Expired := State.Tix32;
-              inc(State.Scope^.Metrics.Current[dsmStaticHits]);
-            end
-            else
-            begin
-              if p <> nil then
-                inc(State.Scope^.Metrics.Current[dsmDynamicHits]);
-              if (dsoInformRateLimit in State.Scope^.Options) and
-                 (fIdleTix <> 0) and // OnIdle() would reset RateLimit := 0
-                 not State.Scope^.IsStaticIP(State.Ip4) then
-              begin
-                // temporarily marks client IP as unavailable to avoid conflicts
-                // (not set by default: stronger than the RFC requires, and no
-                // other DHCP server like KEA, dnsmasq or Windows implements it)
-                if p = nil then
-                  p := State.Scope^.NewLease(State.Mac64)
-                else if p^.RateLimit >= 2 then // up to 3 INFORM per MAC per sec
-                begin
-                  result := DoError(State, dsmInformRateLimitHit);
-                  exit;
-                end
-                else
-                begin
-                  inc(p^.RateLimit);
-                  // mark this IP as temporary unavailable
-                  if p^.IP4 <> State.Ip4 then
-                    // create a new MAC-free lease for this other IP
-                    p := State.Scope^.NewLease(0); // mac=0: sentinel for this IP
-                end;
-                // update the lease information
-                inc(fModifSequence); // trigger SaveToFile() in next OnIdle()
-                p^.State := lsUnavailable;
-                p^.Expired := State.Tix32 + State.Scope^.DeclineTime;
-                p^.IP4 := State.Ip4;
-              end;
-              // respond with an ACK and the standard options
-              inc(State.Scope^.Metrics.Current[dsmAck]);
-              State.SendType := dmtAck;
-            end;
-          end
-      else
-        begin
-          // ParseFrame() was correct but this message type is not supported yet
-          result := DoError(State, dsmUnsupportedRequest);
-          exit;
-        end;
-      end;
-      // compute the dmtOffer/dmtAck response frame over the very same xid
-      IP4Short(@State.Ip4, State.Ip);
-      State.SendEnd := DhcpNew(State.Send, State.SendType, State.Recv.xid,
-        PNetMac(@State.Recv.chaddr)^, State.Scope^.ServerIdentifier);
-      State.Send.ciaddr := State.Ip4;
-      result := Flush(State);   // callback + options
-      if result <> 0 then
-        DoLog(sllTrace, 'into', State); // if not canceled by callback
+      result := LockedResponse(State);
     finally
       State.Scope^.Safe.UnLock;
     end;
@@ -4659,7 +6377,6 @@ begin
     fScopeSafe.ReadUnLock;
   end;
 end;
-
 
 
 initialization

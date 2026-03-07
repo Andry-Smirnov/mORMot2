@@ -2789,20 +2789,20 @@ begin
   if Text = '' then
     exit;
   case PCardinal(Text)^ of // case-sensitive test in occurrence order
-    ord('G') + ord('E') shl 8 + ord('T') shl 16:
+    GET_24:
       Method := urmGet;
     POST_32:
       Method := urmPost;
-    ord('P') + ord('U') shl 8 + ord('T') shl 16:
+    PUT_24:
       Method := urmPut;
-    ord('P') + ord('A') shl 8 + ord('T') shl 16 + ord('C') shl 24:
-      Method := urmPatch;
     HEAD_32:
       Method := urmHead;
-    ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24:
+    DELE_32:
       Method := urmDelete;
-    ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24:
+    OPTI_32:
       Method := urmOptions;
+    ord('P') + ord('A') shl 8 + ord('T') shl 16 + ord('C') shl 24:
+      Method := urmPatch;
   else
     exit;
   end;
@@ -3313,12 +3313,12 @@ begin
 end;
 
 const
-  _CMD_200: array[boolean, boolean] of string[31] = (
+  _CMD_200: array[boolean, boolean] of TShort31 = (
    ('HTTP/1.1 200 OK'#13#10,
     'HTTP/1.0 200 OK'#13#10),
    ('HTTP/1.1 206 Partial Content'#13#10,
     'HTTP/1.0 206 Partial Content'#13#10));
-  _CMD_XXX: array[boolean] of string[15] = (
+  _CMD_XXX: array[boolean] of TShort15 = (
     'HTTP/1.1 ',
     'HTTP/1.0 ');
 
@@ -6354,7 +6354,7 @@ begin
 end;
 
 const
-  _LATE: array[boolean] of string[7] = ('', 'late ');
+  _LATE: array[boolean] of TShort7 = ('', 'late ');
 
 procedure THttpPeerCacheThread.OnFrameReceived(len: integer;
   var remote: TNetAddr);

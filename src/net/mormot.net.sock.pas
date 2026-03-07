@@ -140,6 +140,7 @@ type
 
   /// store the 4 bytes of a typical IP address as 32-bit unsigned integer
   TNetIP4 = cardinal;
+  PNetIP4 = ^TNetIP4;
   /// store several 4 bytes of a typical IP address as 32-bit unsigned integers
   TNetIP4s = array of TNetIP4;
   /// store the 16-bit IP port to connect/bind a socket
@@ -642,6 +643,9 @@ function IP4ToText(ip4addr: PByteArray): RawUtf8;
 /// convert an array of IPv4 raw value into a RawUtf8 CSV text
 function IP4sToText(const ip4: array of TNetIP4): RawUtf8;
 
+/// compute the reverse '4.3.2.1.in-addr.arpa' from '1.2.3.4' raw IP
+function ReverseIP4(const ip4: RawUtf8; out reverse: RawUtf8): boolean;
+
 /// convert an IPv6 raw value into a ShortString text
 // - will shorten the address using the regular 0 removal scheme, e.g.
 // 2001:00b8:0a0b:12f0:0000:0000:0000:0001 returns '2001:b8:a0b:12f0::1'
@@ -678,6 +682,7 @@ function IsEqual(const A, B: TNetMac): boolean; overload;
 
 /// returns TRUE if all 6 bytes of this MAC address buffer equal zero
 function IsZero(const Mac: TNetMac): boolean; overload;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// search a MAC address from an array of TNetMac items using O(n) scan
 function MacIndex(first, mac: PNetMac48; n: PtrInt): PtrInt;
@@ -1839,7 +1844,7 @@ const
   DEFAULT_PORT_INT: array[boolean] of TNetPort = (
     80, 443);
   /// can be used to generate e.g. http:// ws:// or https:// wss:// constants
-  TLS_TEXT: array[boolean] of string[1] = (
+  TLS_TEXT: array[boolean] of TShort1 = (
     '', 's');
   /// quick access to http:// or https:// constants
   HTTPS_TEXT: array[boolean] of RawUtf8 = (
@@ -1859,19 +1864,27 @@ function ToIP4(const text: RawUtf8): TNetIP4;
 function ToIP4s(const text: RawUtf8): TNetIP4s; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// decode one or several IP addresses from CSV text
+/// decode one or several IP addresses from CSV text into an array of TNetIP4
 function ToIP4s(text: PUtf8Char): TNetIP4s; overload;
 
-/// compute a raw binary content from an array of ip4 - as used e.g. for DHCP
+/// decode one or several IP addresses from CSV text into a binary buffer
+// - returns the number of 32-bit IPv4 stored in bin, or -1 on parsing error
+function ToIP4Binary(text: PUtf8Char; var bin: RawByteString): PtrInt;
+
+/// compute a raw binary content from an array of ip4
 function IP4sToBinary(const ip4: TNetIP4s): RawByteString;
 
 /// append one TNetMac instance to a dynamic array of such values
 procedure AddMac(var macs: TNetMacs; const mac: TNetMac);
 
-/// decode one or several MAC addresses from CSV text
+/// decode one or several MAC addresses from CSV text into an array of TNetMac
 function ToMacs(text: PUtf8Char): TNetMacs; overload;
 
-/// compute a raw binary content from an array of TNetMac - used e.g. for DHCP
+/// decode one or several MAC addresses from CSV text into a binary buffer
+// - returns the number of 6-byte TNetMac stored in bin, or -1 on parsing error
+function ToMacBinary(text: PUtf8Char; var bin: RawByteString): PtrInt;
+
+/// compute a raw binary content from an array of TNetMac
 function MacsToBinary(const macs: TNetMacs): RawByteString;
 
 /// parse a text input buffer until the end space or EOL - used for config files
@@ -3750,7 +3763,7 @@ begin
   ip4 := ip4 and netmask4;
   IP4Short(@ip4, result);
   AppendShortChar('/', @result);
-  AppendShortCardinal(w, result);
+  AppendShortByte(w, @result); // in range '0'..'32'
 end;
 
 function IP4Subnet(const ip4, netmask4: RawUtf8): RawUtf8;
@@ -3790,23 +3803,16 @@ end;
 
 function IP4TextAppend(ip4addr: PByteArray; dest: PAnsiChar): PAnsiChar;
 var
-  tmp: TTemp24;
-  n: PAnsiChar;
-  l, c: PtrInt;
-begin
-  c := 0;
-  result := dest;
-  repeat
-    n := StrUInt32(@tmp[23], ip4addr[c]);
-    l := @tmp[23] - n;
-    MoveFast(n^, result^, l);
-    inc(result, l);
-    if c = 3 then
-      break;
-    inc(c);
-    result^ := '.';
-    inc(result);
-  until false;
+  tab: PWordArray;
+begin // weird but efficient unrolled code thanks to proper inlining
+  tab := @TwoDigitLookupW;
+  result := UInt8ToPChar(dest, ip4addr[0], tab);
+  result^ := '.';
+  result := UInt8ToPChar(result + 1, ip4addr[1], tab);
+  result^ := '.';
+  result := UInt8ToPChar(result + 1, ip4addr[2], tab);
+  result^ := '.';
+  result := UInt8ToPChar(result + 1, ip4addr[3], tab);
   result^ := #0; // make #0 terminated (won't hurt)
 end;
 
@@ -3817,12 +3823,12 @@ end;
 
 function IP4ToShort(ip4addr: PByteArray): TShort16;
 begin
-  IP4Short(ip4addr, result);
+  result[0] := AnsiChar(IP4TextAppend(ip4addr, @result[1]) - @result[1]);
 end;
 
 procedure IP4Text(ip4addr: PByteArray; var result: RawUtf8);
 var
-  s: TShort16;
+  p: PAnsiChar;
 begin
   if PCardinal(ip4addr)^ = 0 then
     // '0.0.0.0' bound to any host -> ''
@@ -3832,8 +3838,8 @@ begin
     result := IP4local
   else
   begin
-    IP4Short(ip4addr, s);
-    FastSetString(result, @s[1], ord(s[0]));
+    p := IP4TextAppend(ip4addr, FastSetString(result, 16));
+    PStrLen(PAnsiChar(pointer(result)) - _STRLEN)^ := p - pointer(result);
   end;
 end;
 
@@ -3855,6 +3861,17 @@ begin
       AppendShortChar(',', @s);
     AppendBufferToUtf8(@s[1], ord(s[0]), result);
   end;
+end;
+
+function ReverseIP4(const ip4: RawUtf8; out reverse: RawUtf8): boolean;
+var
+  ip32: cardinal;
+begin
+  result := NetIsIP4(pointer(IP4), @ip32);
+  if not result then
+    exit;
+  ip32 := bswap32(ip32); // to be asked in inverse byte order
+  Join([IP4ToText(@ip32), '.in-addr.arpa'], reverse);
 end;
 
 procedure IP6Short(ip6addr: PByteArray; var s: TShort47);
@@ -5373,7 +5390,7 @@ begin
   while true do
     case text^ of
       #0 .. ' ',
-      ',', ';', // allow 'ip1,ip2' CSV
+      ',', ';', // allow 'ip1,ip2' or 'ip1;ip2' CSV
       '/':      // allow CIDR '1.2.3.4/20' decoding
         if (b < 0) or
            (n <> 3) then
@@ -5430,25 +5447,51 @@ end;
 
 function ToIP4s(text: PUtf8Char): TNetIP4s;
 var
-  p: PUtf8Char;
   v: TNetIP4;
 begin
   result := nil;
-  p := pointer(text);
-  if p <> nil then
+  if text <> nil then
     repeat
-      while p^ = ' ' do
-        inc(p);
-      if not NetIsIP4(p, @v) then
+      while text^ = ' ' do
+        inc(text);
+      if not NetIsIP4(text, @v) then
         exit;
       AddInteger(TIntegerDynArray(result), v);
-      while p^ <> ',' do
-        if p^ = #0 then
-          exit
+      inc(text, 7); // minimal '1.2.3.4' text length
+      while text^ <> ',' do
+        if text^ = #0 then
+          exit   // successfully parsed
         else
-          inc(p);
-      inc(p); // jump ','
+          inc(text);
+      inc(text); // jump ','
     until false;
+end;
+
+function ToIP4Binary(text: PUtf8Char; var bin: RawByteString): PtrInt;
+var
+  v: TNetIP4;
+begin
+  result := 0;
+  FastAssignNew(bin);
+  if text = nil then
+    exit;
+  repeat
+    while text^ = ' ' do
+      inc(text);
+    if not NetIsIP4(text, @v) then
+      break;
+    SetLength(bin, (result + 1) shl 2);
+    PCardinalArray(bin)^[result] := v;
+    inc(result);
+    inc(text, 7); // minimal '1.2.3.4' text length
+    while text^ <> ',' do
+      if text^ = #0 then
+        exit    // successfully parsed
+      else
+        inc(text);
+    inc(text);  // jump ','
+  until false;
+  result := -1; // NetIsIP4() parsing error
 end;
 
 function IP4sToBinary(const ip4: TNetIP4s): RawByteString;
@@ -5467,23 +5510,49 @@ end;
 
 function ToMacs(text: PUtf8Char): TNetMacs;
 var
-  p: PUtf8Char;
   v: TNetMac;
 begin
   result := nil;
-  p := pointer(text);
-  if p <> nil then
+  if text <> nil then
     repeat
-      if not TextToMac(p, @v) then
+      if not TextToMac(text, @v) then
         exit;
       AddMac(result, v);
-      while p^ <> ',' do
-        if p^ = #0 then
-          exit
+      inc(text, 12); // minimum size is 12 pure hexa chars with no ':'
+      while text^ <> ',' do
+        if text^ = #0 then
+          exit       // successfully parsed
         else
-          inc(p);
-      inc(p); // jump ','
+          inc(text);
+      inc(text);     // jump ','
     until false;
+end;
+
+function ToMacBinary(text: PUtf8Char; var bin: RawByteString): PtrInt;
+var
+  v: TNetMac;
+begin
+  result := 0;
+  FastAssignNew(bin);
+  if text = nil then
+    exit;
+  repeat
+    while text^ = ' ' do
+      inc(text);
+    if not TextToMac(text, @v) then
+      break;
+    SetLength(bin, (result + 1) * SizeOf(v));
+    PNetMacArray(bin)^[result] := v;
+    inc(result);
+    inc(text, 12); // minimum size is 12 pure hexa chars with no ':'
+    while text^ <> ',' do
+      if text^ = #0 then
+        exit       // successfully parsed
+      else
+        inc(text);
+    inc(text);     // jump ','
+  until false;
+  result := -1;    // TextToMac() parsing error
 end;
 
 function MacsToBinary(const macs: TNetMacs): RawByteString;
@@ -5586,7 +5655,7 @@ begin
   if prefix = 0 then
     exit;
   AppendShortChar('/', @result);
-  AppendShortCardinal(prefix, result);
+  AppendShortByte(prefix, @result); // in range '0'..'32'
 end;
 
 
@@ -5740,12 +5809,14 @@ var
 begin
   result := 0;
   p := pointer(text);
-  while p <> nil do
-  begin
+  if p = nil then
+    exit;
+  repeat
     while p^ in [#1 .. ' ' ] do
       inc(p);
     if NetIsIP4(p, @ip) then // ignore any line starting e.g. with # or ;
     begin
+      inc(p, 7); // minimal '1.2.3.4' text length
       while p^ in ['0' .. '9', '.', ' '] do
         inc(p);
       if p^ <> '/' then
@@ -5756,8 +5827,8 @@ begin
          Add(ip, mask) then
         inc(result); // first time seen
     end;
-    p := GotoNextLine(p);
-  end;
+    p := GotoNextLineSmall(p);
+  until p^ = #0;
 end;
 
 function TIp4SubNets.AfterAdd: integer;
@@ -5865,7 +5936,7 @@ begin
       usUdp:  // 'udp://server:port'
         Layer := nlUdp;
       usFile: // https://en.wikipedia.org/wiki/File_URI_scheme#Number_of_slash_characters
-        if PWord(s + 3)^ = ord('/') + ord('/') shl 8 then
+        if cardinal(PWord(s + 3)^) = SLASH_16 then
           inc(s, 2); // support 'file:////server/folder/data.xml' form
     end;
     p := s + 3;
@@ -6122,7 +6193,7 @@ begin
 end;
 
 const
-  BINDTXT: array[boolean] of string[7] = (
+  BINDTXT: array[boolean] of TShort7 = (
     'open', 'bind');
   BINDMSG: array[boolean] of string = (
     'Is a server available on this address:port?',
@@ -7495,7 +7566,7 @@ begin
     d1 := maxFloat + d1 + 1;
   d1 := d1 / maxFloat;
   d1 := Trunc(d1 * 10000) / 10000;
-  result := (d + d1) / SecsPerDay;
+  result := (d + d1) * SecsPerDate;
   result := result + 2;
 end;
 

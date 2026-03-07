@@ -3253,6 +3253,7 @@ const
   // - 4096-bit has no security advantage, just slower process
   // - 7680-bit is highly impractical (e.g. generation can be more than 30 secs)
   // and offers only 192-bit of security, so other algorithms may be preferred
+  // - see also OpenSslDefaultRsaBits() and RSA_INTERNAL_DEFAULT_GENERATION_BITS
   RSA_DEFAULT_GENERATION_BITS = 2048;
 
   /// the JWT algorithm names according to our known asymmetric algorithms
@@ -6150,7 +6151,7 @@ function DigestServerInit(Algo: TDigestAlgo;
   const QuotedRealm, Prefix, Suffix: RawUtf8; Opaque, Tix64: Int64): RawUtf8;
 var
   h: THash128Rec;
-  noncehex, opaquehex: string[32];
+  noncehex, opaquehex: TShort32;
 begin
   result := '';
   if (Algo = daUndefined) or

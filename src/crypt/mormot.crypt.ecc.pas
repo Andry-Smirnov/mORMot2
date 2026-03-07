@@ -4480,7 +4480,7 @@ begin
     crl := 0;
     for i := 0 to high(values) do
       if values[i] <> '' then
-        if PWord(values[i])^ = ord('/') + ord('/') shl 8 then
+        if cardinal(PWord(values[i])^) = SLASH_16 then
         begin
           // this is a base64-encoded TEccCertificateRevocation entry
           if crl = length(fCrl) then
@@ -5005,7 +5005,7 @@ begin
 end;
 
 const
-  ED: array[boolean] of string[7] = (
+  ED: array[boolean] of TShort7 = (
     'Decrypt', 'Encrypt');
 
 procedure TEcdheProtocol.SetIVAndMacNonce(aEncrypt: boolean);

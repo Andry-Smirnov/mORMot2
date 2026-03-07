@@ -359,6 +359,7 @@ type
   // - twoNonExpandedArrays will force the 'non expanded' optimized JSON layout
   // for array of records or classes, ignoring other formatting options:
   // $ {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+  // - twoIndentSpaces will indent with two spaces instead of two tabs
   TTextWriterOption = (
     twoEnumSetsAsTextInRecord,
     twoEnumSetsAsBooleanInRecord,
@@ -369,7 +370,8 @@ type
     twoEndOfLineCRLF,
     twoIgnoreDefaultInRecord,
     twoDateTimeWithZ,
-    twoNonExpandedArrays);
+    twoNonExpandedArrays,
+    twoIndentSpaces);
 
   /// available internal flags defining TTextWriter / TJsonWriter process
   // - twfStreamIsOwned is set if the associated TStream is owned by the
@@ -493,19 +495,23 @@ type
     hfOutsideAttributes,
     hfWithinAttributes);
 
-  /// the available JSON/JSON-like formats, for TTextWriter.AddJsonReformat()
-  // and its JsonBufferReformat() and JsonReformat() wrappers
-  // - jsonCompact is the default machine-friendly single-line layout
-  // - jsonHumanReadable will add line feeds and indentation, for a more
-  // human-friendly result
+  /// the JSON/JSON-like known formats supported by JsonReformat()
+  // - all those formats are inter-operable within the JSON data model
+  // - jsonCompact is the default standard machine-friendly single-line JSON
+  // - jsonHumanReadable will add line feeds and #9 (tab) indentation, for a
+  // more human-friendly result of a standard JSON content
   // - jsonUnquotedPropName will emit the jsonHumanReadable layout, but
   // with all property names being quoted only if necessary: this format
   // could be used e.g. for configuration files - this format, similar to the
-  // one used in the MongoDB extended syntax, is not JSON compatible: do not
+  // one used in the MongoDB extended syntax, is NOT JSON compatible: do not
   // use it e.g. with AJAX clients, but is would be handled as expected by all
   // our units as valid JSON input, without previous correction
   // - jsonUnquotedPropNameCompact will emit single-line layout with unquoted
   // property names, which is the smallest data output within mORMot instances
+  // - json5 will emit unquoted names, but with a trailing , before } or ]
+  // - jsonH for indented unquoted names and values, using LF as delimiter -
+  // i.e. the .hjson "Human JSON" format, very suitable for config files
+  // - jsonMorml is as unquoted, unindented and small as possible - aka .morml
   // - by default we rely on UTF-8 encoding (which is mandatory in the RFC 8259)
   // but you can use jsonEscapeUnicode to produce pure 7-bit ASCII output,
   // with \u#### escape of non-ASCII chars, e.g. as default python json.dumps
@@ -517,6 +523,9 @@ type
     jsonHumanReadable,
     jsonUnquotedPropName,
     jsonUnquotedPropNameCompact,
+    json5,
+    jsonH,
+    jsonMorml,
     jsonEscapeUnicode,
     jsonNoEscapeUnicode);
 
@@ -531,12 +540,12 @@ type
   TTextWriter = class
   protected
     fStream: TStream;
-    fWrittenBytes: Int64;
-    fInitialStreamPosition: Int64;
     fHumanReadableLevel: integer;
-    fTempBufSize: integer; // internal temporary buffer
+    fTempBufSize: integer;
     fTempBuf: PUtf8Char;
     fOnFlushToStream: TOnTextWriterFlush;
+    fWrittenBytes: Int64;
+    fInitialStreamPosition: Int64;
     fCustomOptions: TTextWriterOptions;
     fFlags: TTextWriterFlags;
     function GetTextLength: Int64;
@@ -545,6 +554,7 @@ type
     procedure WriteToStream(data: pointer; len: PtrUInt); virtual;
     procedure InternalSetBuffer(aBuf: PUtf8Char; const aBufSize: PtrUInt);
       {$ifdef FPC} inline; {$endif}
+    function DoJsonReformat(Json: PUtf8Char; Fmt: TTextWriterJsonFormat): boolean; virtual;
     class procedure RaiseUnimplemented(const Method: ShortString);
     function GetFlag(one: TTextWriterFlag): boolean;
     procedure SetFlag(one: TTextWriterFlag; value: boolean);
@@ -731,7 +741,7 @@ type
     // only LF (#10) depending on its internal options
     procedure AddCR;
       {$ifdef HASINLINE}inline;{$endif}
-    /// append CR+LF (#13#10) chars and #9 indentation
+    /// append CR+LF (#13#10) chars and #9/#32 indentation
     // - indentation depth is defined by the HumanReadableLevel value
     procedure AddCRAndIndent; virtual;
     /// write the same character multiple times (up to the internal buffer size)
@@ -912,8 +922,10 @@ type
     // and only ASCII 7-bit characters)
     // - if twoForceJsonExtended is defined in CustomOptions, it would append
     // 'PropName:' without the double quotes
-    // - is a wrapper around AddProp()
-    procedure AddPropName(const PropName: ShortString);
+    // - is a wrapper around AddProp() - see AddFieldName() for RawUtf8 name
+    procedure AddPropName(const PropName: ShortString); overload;
+    /// append an usigned integer as property name, as '"123":'
+    procedure AddPropName(PropName: PtrUInt); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// append a JSON field name, followed by a number value and a comma (',')
     procedure AddPropInt64(const PropName: ShortString; Value: Int64;
@@ -922,7 +934,7 @@ type
     // - FieldName content should not need any JSON escape (e.g. no " within)
     // - if twoForceJsonExtended is defined in CustomOptions, it would append
     // 'PropName:' without the double quotes
-    // - is a wrapper around AddProp()
+    // - is a wrapper around AddProp() for RawUtf8
     procedure AddFieldName(const FieldName: RawUtf8);
       {$ifdef HASINLINE}inline;{$endif}
     /// append a RawUtf8 property name, as '"FieldName"
@@ -970,6 +982,9 @@ type
     // - use GetNextItemHexa() to decode such a text value
     procedure AddBinToHexDisplayMinChars(Bin: pointer; BinBytes: PtrInt;
       QuotedChar: AnsiChar = #0);
+    /// append a short Value as '12:50:b6:1e:c6:aa' hexadecimal text
+    procedure AddBinToHumanHex(Bin: pointer; BinBytes: PtrInt;
+      QuotedChar: AnsiChar = #0; Reverse: boolean = false);
     /// add the pointer into significant hexa chars, ready to be displayed
     // - append its minimal chars i.e. excluding highest bytes containing 0
     procedure AddPointer(P: PtrUInt; QuotedChar: AnsiChar = #0);
@@ -987,10 +1002,9 @@ type
     procedure Add(const Format: RawUtf8; const Values: array of const;
       Escape: TTextWriterKind = twNone;
       WriteObjectOptions: TTextWriterWriteObjectOptions = [woFullExpand]); overload; virtual;
-    /// this class implementation will raise an exception
+    /// append a JSON value, array or document, in a specified format
     // - this method will raise an ESynException: use inherited TJsonWriter instead
-    function AddJsonReformat(Json: PUtf8Char; Format: TTextWriterJsonFormat;
-      EndOfObject: PUtf8Char): PUtf8Char; virtual;
+    function AddJsonReformat(Json: PUtf8Char; Format: TTextWriterJsonFormat): boolean;
     /// this class implementation will raise an exception
     // - this method will raise an ESynException: use inherited TJsonWriter instead
     procedure AddVariant(const Value: variant; Escape: TTextWriterKind = twJsonEscape;
@@ -1122,6 +1136,19 @@ type
 
   /// class of our simple TEXT format writer to a Stream
   TBaseWriterClass = class of TTextWriter;
+
+const
+  /// the file extensions suitable for each JsonReformat() function
+  JSON_FMT_EXT: array[TTextWriterJsonFormat] of TFileName = (
+    '.json',  // jsonCompact
+    '.json',  // jsonHumanReadable
+    '.json5', // jsonUnquotedPropName
+    '.json5', // jsonUnquotedPropNameCompact
+    '.json5', // json5
+    '.hjson', // jsonH
+    '.morml', // jsonMorml
+    '.json',  // jsonEscapeUnicode
+    '.json'); // jsonNoEscapeUnicode
 
 var
   /// contains the default JSON serialization class for the framework
@@ -1727,7 +1754,7 @@ function UInt4DigitsToUtf8(Value: cardinal): RawUtf8;
 
 /// creates a 4 digits short string from a 0..9999 value
 // - could be used e.g. as parameter to FormatUtf8() with no memory allocation
-function UInt4DigitsToShort(Value: cardinal): TShort4;
+function UInt4DigitsToShort(Value: cardinal): TShort7;
 
 /// creates a 3 digits short string from a 0..999 value
 // - could be used e.g. as parameter to FormatUtf8() with no memory allocation
@@ -2149,10 +2176,9 @@ procedure AppendShortBy100(value: cardinal; const valueunit: ShortString;
   var result: ShortString);
 
 /// convert an integer value into its textual representation with thousands marked
-// - ThousandSep is the character used to separate thousands in numbers with
-// more than three digits to the left of the decimal separator
-function IntToThousandString(Value: integer;
-  const ThousandSep: ShortString = ','): ShortString;
+// - Sep is the character used to separate thousands in numbers with more than
+// three digits to the left of the decimal separator e.g. '100' '1,000' '10,000'
+function IntToThousandString(Value: PtrInt; const Sep: ShortString = ','): TShort31;
 
 
 { ************ ESynException class }
@@ -4374,11 +4400,15 @@ begin
       exclude(fFlags, one);
 end;
 
-function TTextWriter.{%H-}AddJsonReformat(Json: PUtf8Char;
-  Format: TTextWriterJsonFormat; EndOfObject: PUtf8Char): PUtf8Char;
+function TTextWriter.DoJsonReformat(Json: PUtf8Char; Fmt: TTextWriterJsonFormat): boolean;
 begin
   RaiseUnimplemented('AddJsonReformat');
-  result := nil; // make compiler happy
+  result := false; // make compiler happy
+end;
+
+function TTextWriter.AddJsonReformat(Json: PUtf8Char; Format: TTextWriterJsonFormat): boolean;
+begin
+  result := DoJsonReformat(Json, Format);
 end;
 
 procedure TTextWriter.Add(P: PUtf8Char; Escape: TTextWriterKind);
@@ -4645,7 +4675,7 @@ begin
     // reformat using the very same temp buffer but not the same RawUtf8
     temp := DefaultJsonWriter.CreateOwnedStream(fTempBuf, fTempBufSize);
     try
-      temp.AddJsonReformat(pointer(result), reformat, nil);
+      temp.AddJsonReformat(pointer(result), reformat);
       temp.SetText(result);
     finally
       temp.Free;
@@ -5024,7 +5054,7 @@ procedure TTextWriter.AddCR;
 begin
   if B >= BEnd then
     FlushToStream;
-  PCardinal(B + 1)^ := 13 + 10 shl 8; // CR + LF
+  PCardinal(B + 1)^ := EOLW; // CR + LF
   inc(B, 2);
 end;
 
@@ -5032,12 +5062,19 @@ procedure TTextWriter.AddCRAndIndent;
 var
   ntabs: PtrUInt;
   p: PUtf8Char;
+  c32: cardinal;
 begin
+  ntabs := fHumanReadableLevel;
+  c32 := $09090909;
+  if twoIndentSpaces in fCustomOptions then
+  begin
+    c32 := $20202020;
+    ntabs := ntabs * 2; // indent by two spaces instead of a single #9 tab
+  end;
   p := B;
   if (p >= fTempBuf) and
-     (p^ = #9) then
+     (ord(p^) = ToByte(c32)) then
     exit; // we just already added an indentation level - do it once
-  ntabs := fHumanReadableLevel;
   if ntabs >= PtrUInt(fTempBufSize) then
     ntabs := 0; // fHumanReadableLevel=-1 after the last level of a document
   if PtrInt(BEnd - p) <= PtrInt(ntabs) then // note: PtrInt(BEnd - B) could be < 0
@@ -5045,10 +5082,18 @@ begin
     FlushToStream;
     p := B;
   end;
-  PCardinal(p + 1)^ := $09090a0d; // CR + LF [ + #9 + #9 ]
-  if ntabs > 2 then
-    FillCharFast(p[3], ntabs, 9); // #9=tab
-  B := @p[ntabs + 2];
+  inc(p);
+  if twoEndOfLineCRLF in fCustomOptions then
+  begin
+    PCardinal(p)^ := EOLW;
+    inc(p);
+  end
+  else
+    p^ := #10;
+  PCardinal(p + 1)^ := c32; // #9#9#9#9 or #32#32#32#32
+  if ntabs > 4 then
+    FillCharFast(p[5], ntabs - 4, ToByte(c32)); // #9 or #32
+  B := @p[ntabs];
 end;
 
 procedure TTextWriter.AddChars(aChar: AnsiChar; aCount: PtrInt);
@@ -5438,6 +5483,15 @@ begin
   AddProp(@PropName[1], ord(PropName[0]));
 end;
 
+procedure TTextWriter.AddPropName(PropName: PtrUInt);
+var
+  tmp: TTemp24;
+  P: PAnsiChar;
+begin
+  P := StrUInt32(@tmp[23], PropName);
+  AddProp(PUtf8Char(P), @tmp[23] - P);
+end;
+
 procedure TTextWriter.AddPropInt64(const PropName: ShortString;
   Value: Int64; WithQuote: AnsiChar);
 begin
@@ -5572,7 +5626,7 @@ begin
     MoveFast(Text[1], B^, L);
     inc(B, L);
   end;
-  PCardinal(B)^ := 13 + 10 shl 8; // CR + LF
+  PCardinal(B)^ := EOLW; // CR + LF
   inc(B);
 end;
 
@@ -5594,15 +5648,19 @@ begin // mostly used for TSynLog RawUtf8 append
         if P^ = #0 then
           exit; // most common case
       end;
-      Add(' '); // properly inlined
-      inc(P);
-    until P^ = #0;
+      repeat
+        inc(P);
+        if P^ = #0 then
+          exit;
+      until P^ > ' ';
+      AddOnce(' ');
+    until false;
 end;
 
 procedure TTextWriter.AddOnSameLine(P: PUtf8Char; Len: PtrInt);
 var
   i, s: PtrInt;
-begin // mostly used for TSynLog shortstring append
+begin // mostly used for TSynLog shortstring append or Reformat() comments
   i := 0;
   if (P <> nil) and
      (i < Len) then
@@ -5618,9 +5676,13 @@ begin // mostly used for TSynLog shortstring append
         if i = Len then
           exit; // most common case
       end;
-      Add(' ');
-      inc(i);
-    until i = Len;
+      repeat
+        inc(i);
+        if i = Len then
+          exit;
+      until P[i] > ' ';
+      AddOnce(' ');
+    until false;
 end;
 
 procedure TTextWriter.AddOnSameLineW(P: PWord);
@@ -5902,6 +5964,25 @@ begin
   AddBinToHexDisplayLower(@P, DisplayMinChars(@P, SizeOf(P)), QuotedChar);
 end;
 
+procedure TTextWriter.AddBinToHumanHex(Bin: pointer; BinBytes: PtrInt;
+  QuotedChar: AnsiChar; Reverse: boolean);
+var
+  P: PAnsiChar;
+begin
+  P := AddPrepare(BinBytes * 3);
+  if P = nil then
+    exit; // too big
+  P^ := QuotedChar;
+  if QuotedChar <> #0 then
+    inc(P);
+  ToHumanHexP(P, Bin, BinBytes, Reverse);
+  inc(P, BinBytes * 3 - 1);
+  P^ := QuotedChar;
+  if QuotedChar = #0 then
+    dec(P);
+  B := pointer(P);
+end;
+
 procedure TTextWriter.AddBinToHex(Bin: pointer; BinBytes: PtrInt;
   LowerHex: boolean; QuotedChar: AnsiChar);
 var
@@ -6059,7 +6140,7 @@ end;
 var
   HTML_ESC: array[hfAnyWhere..hfWithinAttributes] of TAnsiCharToByte;
 const
-  HTML_ESCAPED: array[1 .. 4] of string[7] = (
+  HTML_ESCAPED: array[1 .. 4] of TShort7 = (
     '&lt;', '&gt;', '&amp;', '&quot;');
 
 procedure TTextWriter.AddHtmlEscape(Text: PUtf8Char; Fmt: TTextWriterHtmlFormat);
@@ -6285,7 +6366,7 @@ end;
 var
   XML_ESC: TAnsiCharToByte;
 const
-  XML_ESCAPED: array[1..9] of string[7] = (
+  XML_ESCAPED: array[1..9] of TShort7 = (
     '&#x09;', '&#x0a;', '&#x0d;', '&lt;', '&gt;', '&amp;', '&quot;', '&apos;', '');
 
 procedure TTextWriter.AddXmlEscape(Text: PUtf8Char);
@@ -8945,7 +9026,7 @@ begin
   YearToPChar(Value, FastSetString(result, 4));
 end;
 
-function UInt4DigitsToShort(Value: cardinal): TShort4;
+function UInt4DigitsToShort(Value: cardinal): TShort7;
 begin
   result[0] := #4;
   if Value > 9999 then
@@ -10438,21 +10519,20 @@ begin
   K(Value, result);
 end;
 
-function IntToThousandString(Value: integer;
-  const ThousandSep: ShortString): ShortString;
+function IntToThousandString(Value: PtrInt; const Sep: ShortString): TShort31;
 var
   i, L, Len: cardinal;
 begin
-  str(Value, result);
-  L := length(result);
-  Len := L + 1;
-  if Value < 0 then
-    // ignore '-' sign
-    dec(L, 2)
-  else
-    dec(L);
-  for i := 1 to L div 3 do
-    insert(ThousandSep, result, Len - i * 3);
+  ToShortU(abs(Value), @result);
+  L := ord(result[0]);
+  if L >= 4 then
+  begin
+    Len := L + 1;
+    for i := 1 to (L - 1) div 3 do
+      insert(Sep, result, Len - i * 3);
+  end;
+  if value < 0 then
+    insert('-', result, 1); // seldom called
 end;
 
 function SecToString(S: QWord): TShort16;
@@ -10485,8 +10565,8 @@ var
 begin
   if value < 100 then
   begin
-    PCardinal(PAnsiChar(@result) + ord(result[0]) + 1)^ := ord('0') + ord('.') shl 8 +
-      cardinal(TwoDigitLookupW[value]) shl 16;
+    PCardinal(PAnsiChar(@result) + ord(result[0]) + 1)^ :=
+      ord('0') + ord('.') shl 8 + cardinal(TwoDigitLookupW[value]) shl 16;
     inc(result[0], 4);
   end
   else

@@ -484,7 +484,7 @@ begin
   if PInt64(@FT)^ = 0 then
     result := 0
   else // inlined UnixTimeToDateTime()
-    result := FileTimeToUnixMSTime(FT) / MilliSecsPerDay + UnixDateDelta;
+    result := FileTimeToUnixMSTime(FT) * MilliSecsPerDate + UnixDateDelta;
 end;
 
 procedure DateTimeToFileTime(dt: TDateTime; out FT: TFileTime);
@@ -3806,7 +3806,7 @@ begin
 end;
 
 const
-  _CMD: array[0.. 5] of string[11] = (
+  _CMD: array[0.. 5] of TShort15 = (
     'UNKNOWN', 'STOP', 'PAUSE', 'CONTINUE', 'INTERROGATE', 'SHUTDOWN');
 
 procedure TService.DoCtrlHandle(Code: cardinal);

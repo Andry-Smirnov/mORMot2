@@ -138,7 +138,11 @@ var
   m: TSocketIOMessage;
   abc, event: RawUtf8;
   d: TDocVariantData;
+  ws: TSha1Digest;
 begin
+  // from https://datatracker.ietf.org/doc/html/rfc6455#section-1.3
+  ComputeChallenge('dGhlIHNhbXBsZSBub25jZQ==', ws);
+  CheckEqual(Sha1DigestToString(ws), 'b37a4f2cc0624f1690f64606cf385945b2bec4ea');
   // validate low-level Socket.IO message decoder
   Check(not m.Init(''));
   Check(not m.Init('z'));
@@ -1547,13 +1551,17 @@ begin
 end;
 
 const
-  FND_RESP = [doSubnetMask, doDhcpLeaseTime, doDhcpMessageType,
-    doDhcpServerIdentifier, doDhcpRenewalTime, doDhcpRebindingTime];
+  FND_RESP = [doSubnetMask, doLeaseTime, doMessageType,
+    doServerIdentifier, doRenewalTime, doRebindingTime];
+  UUID_97: packed record
+    kind: byte; // $00 + SMBIOS_UUID for option 97
+    uuid: TGuid;
+  end = (kind: 0; uuid: '{5D52D772-0CCA-461D-A22D-90D892F7EBA2}');
 
 procedure TNetworkProtocols.DHCP;
 var
   refdisc, refoffer, refreq, refack, bin: RawByteString;
-  mac, ip, txt, json: RawUtf8;
+  mac, ip, uuid, txt, json: RawUtf8;
   fn: TFileName;
   lens: TDhcpParsed;
   fnd: TDhcpOptions;
@@ -1563,23 +1571,27 @@ var
   ip4, sip4: TNetIP4;
   xid: cardinal;
   d: TDhcpState;
-  i, n, l: PtrInt;
+  i, n, l, ndx: PtrInt;
   server: TDhcpProcess;
+  pool: PDhcpPool;
   settings: TDhcpServerSettings;
   macs: TNetMacs;
   ips: TNetIP4s;
   timer: TPrecisionTimer;
   f: PAnsiChar;
-  hostname, opt82: TShort15;
+  hostname, option: TShort15;
   rnd: TLecuyer;
   nfo: TMacIP;
   m1, m2: TDhcpMetrics;
   rv: TRuleValue;
 
   procedure DoRequest(ndx: PtrInt);
+  var
+    f: PAnsiChar;
   begin
-    d.RecvLen := DhcpClient(d.Recv, dmtRequest, macs[ndx], [])
-      - PAnsiChar(@d.Recv) + 1;
+    f := d.ClientNew(dmtRequest, macs[ndx]);
+    DhcpAddOption32(f, doServerIdentifier, sip4);
+    d.ClientFlush(f);
     Check(IsEqual(macs[ndx], PNetMac(@d.Recv.chaddr)^));
     CheckNotEqual(xid, d.Recv.xid);
     xid := d.Recv.xid;
@@ -1587,8 +1599,8 @@ var
     Check(d.SendType = dmtAck, 'ack');
     CheckEqual(d.Send.xid, xid);
     Check(IsEqual(macs[ndx], PNetMac(@d.Send.chaddr)^));
-    Check(server.GetScope(d.Send.ciaddr) <> nil);
-    CheckEqual(ips[ndx], d.Send.ciaddr);
+    Check(server.GetScope(d.Send.yiaddr) <> nil);
+    CheckEqual(ips[ndx], d.Send.yiaddr);
   end;
 
   procedure CheckSaveToTextMatch(const saved: RawUtf8);
@@ -1614,8 +1626,24 @@ var
   end;
 
   procedure CheckTlv(const json, bin: RawUtf8);
+  var
+    tlv: RawByteString;
   begin
-    CheckEqual(EscapeHex(TlvFromJson(json), ESC_ASCII, '$'), bin);
+    tlv := TlvFromJson(json);
+    CheckEqual(EscapeHex(tlv, ESC_ASCII, '$'), bin);
+    CheckUtf8(IsValidTlv(pointer(tlv), length(tlv)), json);
+  end;
+
+  procedure CheckRfc3925(const hex, json: RawUtf8);
+  var
+    bin, tlv: RawByteString;
+  begin
+    bin := HexToBin(hex);
+    Check(IsValidRfc3925(pointer(bin), length(bin)));
+    Prepend(bin, [AnsiChar($7c), AnsiChar(length(bin))]); // make as option
+    CheckEqual(TlvOptionToJson(pointer(bin), true), json);
+    tlv := TlvFromJson(Join(['{124:', json, '}']));
+    CheckUtf8(IsValidTlv(pointer(tlv), length(tlv)), json);
   end;
 
   procedure CheckCidrRoute(const cidr, hex: RawUtf8);
@@ -1626,11 +1654,39 @@ var
     CheckEqualHex(bin, hex, 'cidr');
   end;
 
+  procedure CheckDns(dns: ShortString);
+  var
+    bin, txt: ShortString;
+    v: PByteArray;
+    l: PtrInt;
+    p: PUtf8Char;
+  begin
+    dns[ord(dns[0]) + 1] := #0; // make local copy ASCIIZ
+    bin[0] := #0;
+    p := DnsLabelAppendBin(@dns[1], bin);
+    if CheckFailed(p <> nil) then
+      exit;
+    Check(p^ = #0);
+    Check(bin[0] > dns[0], 'bin>dns');
+    txt[0] := #0;
+    v := @bin[1];
+    l := ord(bin[0]);
+    Check(DnsLabelAppendText(v, l, txt));
+    CheckEqual(l, 0);
+    CheckEqualShort(txt, dns);
+    Check(not DnsLabelAppendText(v, l, txt));
+    txt[0] := #0;
+    CheckEqualShort(txt, '');
+    Check(DnsLabelToText(@bin[1], ord(bin[0]), txt));
+    CheckEqualShort(txt, dns);
+  end;
+
 begin
   // validate some DHCP protocol definitions
   CheckEqual(ord(dmtTls), 18, 'dmt');
   CheckEqual(SizeOf(TDhcpPacket), 1468, 'TDhcpPacket');
-  CheckEqual(PtrUInt(@PDhcpPacket(nil)^.options), DHCP_PACKET_HEADER, 'options');
+  CheckEqual(PtrUInt(@PDhcpPacket(nil)^.options), DHCP_PACKET_HEADER, 'optionA');
+  CheckEqual(SizeOf(d.Recv) - SizeOf(d.Recv.options), DHCP_PACKET_HEADER, 'optionB');
   CheckEqual(PtrUInt(@PRuleValue(nil)^.value), SizeOf(Int64), 'TRuleValue');
   CheckEqual(SizeOf(TRuleValue), 8 + SizeOf(pointer));
   CheckEqual(SizeOf(TDhcpLease), 16, 'TDhcpLease');
@@ -1675,6 +1731,16 @@ begin
     opt2 := pred(opt);
     Check(FromText(txt, opt2));
     Check(opt = opt2);
+    if opt in [low(DHCP_OPTION_ALTERNATE)..high(DHCP_OPTION_ALTERNATE)] then
+    begin
+      opt2 := pred(opt);
+      Check(FromText(DHCP_OPTION_ALTERNATE[opt], opt2));
+      Check(opt = opt2);
+      txt := UpperCase(DHCP_OPTION_ALTERNATE[opt]);
+      opt2 := pred(opt);
+      Check(FromText(txt, opt2));
+      Check(opt = opt2);
+    end;
   end;
   Check(not FromText('none', opt2));
   for dor := low(dor) to high(dor) do
@@ -1708,6 +1774,8 @@ begin
   CheckCidrRoute('192.168.1.0/24,10.0.0.5',     '18C0A8010A000005');
   Check(not CidrRoutes('192.168.1.300/24,10.0.0.5', bin));
   Check(not CidrRoutes('192.168.1.0/24,10.0.0.', bin));
+  Check(not CidrRoutes('10.0.0.0/8,', bin), 'empty router');
+  Check(not CidrRoutes('192.168.1.0/24,0.0.0.0', bin));
   CheckCidrRoute('10.0.0.0/8,192.168.1.1',      '080AC0A80101');
   CheckCidrRoute('192.168.1.0/24,10.0.0.5;10.0.0.0/8,192.168.1.1',
                  '18C0A8010A000005080AC0A80101');
@@ -1715,6 +1783,8 @@ begin
   CheckCidrRoute('10.0.0.1/32,192.168.0.1',     '200A000001C0A80001');
   CheckCidrRoute('10.0.0.1/33,192.168.0.1',     '200A000001C0A80001');
   CheckCidrRoute('0.0.0.0/0,10.0.0.1',          '000A000001');
+  CheckCidrRoute('0.0.0.0/0,8.8.8.8',           '0008080808');
+  CheckCidrRoute('8.8.8.8/32,1.1.1.1',          '200808080801010101');
   CheckCidrRoute('172.16.0.0/16,192.168.1.1',   '10AC10C0A80101');
   CheckCidrRoute('192.168.1.0/24,10.0.0.5,10.0.0.1,192.168.1.1,',
                  '18C0A8010A000005200A000001C0A80101');
@@ -1743,6 +1813,40 @@ begin
            '$06$08$18$C0$A8$01$0A$00$00$05');
   CheckTlv('{6:["cidr:192.168.1.0/24", "10.0.0.5"]}',
            '$06$08$18$C0$A8$01$0A$00$00$05');
+  // validate RFC 3925 options decoding
+  CheckRfc3925(
+    '000000090849502070686F6E6500000DE910726F757465722D6D6F64656C2D616263',
+    '{9:"IP phone",3561:"router-model-abc"}');
+  CheckRfc3925(
+    '0000621F0601040A001405',
+    '{25119:{1:"0a:00:14:05"}}');
+  CheckRfc3925(
+    '000000090E050666772E62696E0604C0A8010A',
+    '{9:{5:"fw.bin",6:"c0:a8:01:0a"}}');
+  CheckRfc3925(
+    '000004034869643A697070686F6E652E6D6974656C2E636F6D3B73775F746674703D' +
+    '3139322E3136382E31302E353B63616C6C5F7372763D3139322E3136382E31302E35' +
+    '3B766C616E3D31303B',
+    '{1027:"id:ipphone.mitel.com;sw_tftp=192.168.10.5;call_srv=192.168.10.5;vlan=10;"}');
+  CheckRfc3925(
+    '00007ED9134578616D706C65436F72702D44657669636558',
+    '{32473:"ExampleCorp-DeviceX"}');
+  CheckRfc3925(
+    '000000090849502070686F6E6500000DE910726F757465722D6D6F64656C2D616263',
+    '{9:"IP phone",3561:"router-model-abc"}');
+  CheckRfc3925(
+    '0000000900',         // enterprise 9, data-len=0
+    '{9:""}');
+  CheckRfc3925(
+    '00000009020400',     // enterprise 9, data-len=3, sub=4 len=0
+    '{9:{4:""}}');
+  CheckRfc3925(
+    '000000090401000000', // enterprise 9, data-len=4, sub=1 len=0, sub=0 len=0
+    '{9:{1:"",0:""}}' );
+  // validate DNS label encoding/decoding from text
+  CheckDns('toto');
+  CheckDns('toto.com');
+  CheckDns('example.toto.com');
   // validate client DISCOVER disc from WireShark
   refdisc := Base64ToBin(
     'AQEGAAAAPR0AAAAAAAAAAAAAAAAAAAAAAAAAAAALggH8QgAAAAAAAAAAAAAAAAAAAAAAAAAA' +
@@ -1756,17 +1860,21 @@ begin
   CheckEqual(MacToText(@PDhcpPacket(refdisc)^.chaddr), mac);
   fnd := [doPad, doEnd];
   Check(DhcpParse(pointer(refdisc), length(refdisc), lens, @fnd) = dmtDiscover);
-  Check(fnd = [doDhcpMessageType, doDhcpClientIdentifier, doDhcpRequestedAddress,
-    doDhcpParameterRequestList]);
+  Check(fnd = [doMessageType, doClientIdentifier, doRequestedAddress,
+    doParameterRequestList]);
   CheckEqual(lens[doPad], 0);
-  CheckEqual(lens[doDhcpMessageType], 1);
-  CheckNotEqual(lens[doDhcpClientIdentifier], 0);
-  CheckEqual(MacToText(DhcpMac(pointer(refdisc), lens[doDhcpClientIdentifier])), mac);
-  CheckNotEqual(lens[doDhcpRequestedAddress], 0);
-  CheckEqual(DhcpIP4(pointer(refdisc), lens[doDhcpRequestedAddress]), 0);
+  CheckEqual(lens[doMessageType], 1);
+  CheckNotEqual(lens[doClientIdentifier], 0);
+  CheckEqual(MacToText(DhcpMac(pointer(refdisc), lens[doClientIdentifier])), mac);
+  CheckNotEqual(lens[doRequestedAddress], 0);
+  CheckEqual(DhcpIP4(pointer(refdisc), lens[doRequestedAddress]), 0);
   Check(DhcpRequestList(pointer(refdisc), lens) =
     [doSubnetMask, doRouters, doDomainNameServers, doNtpServers]);
   CheckHash(refdisc, $79ADDD50, 'no modif');
+  CheckEqual(DhcpParseToJson(PDhcpPacket(refdisc), length(refdisc)),
+    '{"op":"request","chaddr":"00:0b:82:01:fc:42","message-type":"DISCOVER",' +
+     '"client-identifier":"00:0b:82:01:fc:42","requested-address":' +
+     '"0.0.0.0","parameter-request-list":[1,3,6,42]}');
   // validate server OFFER frame from WireShark
   refoffer := Base64ToBin(
     'AgEGAAAAPR0AAAAAAAAAAMCoAArAqAABAAAAAAALggH8QgAAAAAAAAAAAAAAAAAAAAAAAA' +
@@ -1781,11 +1889,17 @@ begin
   Check(DhcpParse(pointer(refoffer), length(refoffer), lens, @fnd) = dmtOffer);
   Check(fnd = FND_RESP);
   CheckEqual(DhcpIP4(pointer(refoffer), lens[doSubnetMask]), IP4Netmask(24));
-  CheckEqual(DhcpInt(pointer(refoffer), lens[doDhcpRenewalTime]), 1800);
-  CheckEqual(DhcpInt(pointer(refoffer), lens[doDhcpRebindingTime]), 3150);
-  CheckEqual(DhcpInt(pointer(refoffer), lens[doDhcpLeaseTime]), 3600);
-  ip4 := DhcpIP4(pointer(refoffer), lens[doDhcpServerIdentifier]);
+  CheckEqual(DhcpInt(pointer(refoffer), lens[doRenewalTime]), 1800);
+  CheckEqual(DhcpInt(pointer(refoffer), lens[doRebindingTime]), 3150);
+  CheckEqual(DhcpInt(pointer(refoffer), lens[doLeaseTime]), 3600);
+  ip4 := DhcpIP4(pointer(refoffer), lens[doServerIdentifier]);
   CheckEqual(IP4ToText(@ip4), '192.168.0.1');
+  CheckEqual(DhcpParseToJson(PDhcpPacket(refoffer), length(refoffer)),
+    '{"op":"reply","yiaddr":"192.168.0.10","siaddr":"192.168.0.1",' +
+     '"chaddr":"00:0b:82:01:fc:42",' +
+     '"message-type":"OFFER","subnet-mask":"255.255.255.0",' +
+     '"renewal-time":1800,"rebinding-time":3150,' +
+     '"lease-time":3600,"server-identifier":"192.168.0.1"}');
   // validate client REQUEST frame from WireShark
   refreq := Base64ToBin(
     'AQEGAAAAPR4AAAAAAAAAAAAAAAAAAAAAAAAAAAALggH8QgAAAAAAAAAAAAAAAAAAAAAAAAA' +
@@ -1799,17 +1913,22 @@ begin
   CheckEqual(MacToText(@PDhcpPacket(refreq)^.chaddr), mac);
   fnd := [];
   Check(DhcpParse(pointer(refreq), length(refreq), lens, @fnd) = dmtRequest);
-  Check(fnd = [doDhcpRequestedAddress, doDhcpMessageType, doDhcpServerIdentifier,
-    doDhcpParameterRequestList, doDhcpClientIdentifier]);
-  CheckEqual(lens[doDhcpMessageType], 1);
-  CheckNotEqual(lens[doDhcpClientIdentifier], 0);
-  CheckEqual(MacToText(DhcpMac(pointer(refreq), lens[doDhcpClientIdentifier])), mac);
-  ip4 := DhcpIP4(pointer(refreq), lens[doDhcpServerIdentifier]);
+  Check(fnd = [doRequestedAddress, doMessageType, doServerIdentifier,
+    doParameterRequestList, doClientIdentifier]);
+  CheckEqual(lens[doMessageType], 1);
+  CheckNotEqual(lens[doClientIdentifier], 0);
+  CheckEqual(MacToText(DhcpMac(pointer(refreq), lens[doClientIdentifier])), mac);
+  ip4 := DhcpIP4(pointer(refreq), lens[doServerIdentifier]);
   CheckEqual(IP4ToText(@ip4), '192.168.0.1');
-  ip4 := DhcpIP4(pointer(refreq), lens[doDhcpRequestedAddress]);
+  ip4 := DhcpIP4(pointer(refreq), lens[doRequestedAddress]);
   CheckEqual(IP4ToText(@ip4), '192.168.0.10');
   Check(DhcpRequestList(pointer(refreq), lens) =
     [doSubnetMask, doRouters, doDomainNameServers, doNtpServers]);
+  CheckEqual(DhcpParseToJson(PDhcpPacket(refreq), length(refreq)),
+    '{"op":"request","chaddr":"00:0b:82:01:fc:42","message-type":' +
+    '"REQUEST","client-identifier":"00:0b:82:01:fc:42",' +
+    '"requested-address":"192.168.0.10","server-identifier":' +
+    '"192.168.0.1","parameter-request-list":[1,3,6,42]}');
   // validate server ACK frame from WireShark
   refack := Base64ToBin(
     'AgEGAAAAPR4AAAAAAAAAAMCoAAoAAAAAAAAAAAALggH8QgAAAAAAAAAAAAAAAAAAAAAAAAAA' +
@@ -1824,11 +1943,15 @@ begin
   Check(DhcpParse(pointer(refack), length(refack), lens, @fnd) = dmtAck);
   Check(fnd = FND_RESP);
   CheckEqual(DhcpIP4(pointer(refack), lens[doSubnetMask]), IP4Netmask(24));
-  CheckEqual(DhcpInt(pointer(refack), lens[doDhcpRenewalTime]),   1800);
-  CheckEqual(DhcpInt(pointer(refack), lens[doDhcpRebindingTime]), 3150);
-  CheckEqual(DhcpInt(pointer(refack), lens[doDhcpLeaseTime]),     3600);
-  ip4 := DhcpIP4(pointer(refack), lens[doDhcpServerIdentifier]);
+  CheckEqual(DhcpInt(pointer(refack), lens[doRenewalTime]),   1800);
+  CheckEqual(DhcpInt(pointer(refack), lens[doRebindingTime]), 3150);
+  CheckEqual(DhcpInt(pointer(refack), lens[doLeaseTime]),     3600);
+  ip4 := DhcpIP4(pointer(refack), lens[doServerIdentifier]);
   CheckEqual(IP4ToText(@ip4), '192.168.0.1');
+  CheckEqual(DhcpParseToJson(PDhcpPacket(refack), length(refack), true),
+    '{op:"reply",yiaddr:"192.168.0.10",chaddr:"00:0b:82:01:fc:42",message-type:"ACK",' +
+    'renewal-time:1800,rebinding-time:3150,lease-time:3600,' +
+    'server-identifier:"192.168.0.1",subnet-mask:"255.255.255.0"}');
   // validate TDhcpProcess logic (without any actual UDP transmission)
   settings := TDhcpServerSettings.Create;
   server := TDhcpProcess.Create;
@@ -1886,21 +2009,30 @@ begin
     // DISCOVER -> OFFER
     d.RecvLen := length(refdisc);
     d.RecvIp4 := 0; // use the default server.Scope[]
+    d.Tix32 := GetTickSec; // ComputeResponse() requires Tix32
     MoveFast(pointer(refdisc)^, d.Recv, d.RecvLen);
-    n := server.ComputeResponse(d);
-    Check(n > 0, 'discover');
+    i := server.ComputeResponse(d);
+    CheckEqual(i, d.SendLen);
+    Check(d.SendLen > 0, 'discover');
     CheckEqual(d.Send.xid, $1d3d0000);
     CheckEqual(MacToText(@d.Send.chaddr), mac);
-    Check(DhcpParse(@d.Send, n, lens, @fnd) = dmtOffer);
-    Check(fnd = FND_RESP + [doDhcpClientIdentifier]);
-    sip4 := DhcpIP4(@d.Send, lens[doDhcpServerIdentifier]);
+    Check(DhcpParse(@d.Send, d.SendLen, lens, @fnd) = dmtOffer);
+    Check(fnd = FND_RESP + [doClientIdentifier]);
+    sip4 := DhcpIP4(@d.Send, lens[doServerIdentifier]);
     CheckEqual(IP4ToText(@sip4), '192.168.0.1');
     CheckEqual(d.Send.siaddr, sip4);
+    CheckEqual(IP4ToText(@d.Send.yiaddr), '192.168.0.10');
     CheckEqual(DhcpIP4(@d.Send, lens[doSubnetMask]), IP4Netmask(14));
-    CheckEqual(DhcpInt(@d.Send, lens[doDhcpRenewalTime]),   60);
-    CheckEqual(DhcpInt(@d.Send, lens[doDhcpRebindingTime]), 105);
-    CheckEqual(DhcpInt(@d.Send, lens[doDhcpLeaseTime]),     120);
+    CheckEqual(DhcpInt(@d.Send, lens[doRenewalTime]),   60);
+    CheckEqual(DhcpInt(@d.Send, lens[doRebindingTime]), 105);
+    CheckEqual(DhcpInt(@d.Send, lens[doLeaseTime]),     120);
     CheckEqual(server.SaveToText, CRLF, 'offer not saved');
+    CheckEqual(DhcpParseToJson(@d.Send, d.SendLen, true),
+      '{op:"reply",yiaddr:"192.168.0.10",siaddr:"192.168.0.1",chaddr:' +
+      '"00:0b:82:01:fc:42",message-type:"OFFER",server-identifier:' +
+      '"192.168.0.1",subnet-mask:"255.252.0.0",lease-time:120,' +
+      'renewal-time:60,rebinding-time:105,client-identifier:' +
+      '"00:0b:82:01:fc:42"}');
     // REQUEST -> ACK
     d.RecvLen := length(refreq);
     MoveFast(pointer(refreq)^, d.Recv, d.RecvLen);
@@ -1908,25 +2040,32 @@ begin
     for i := 1 to 3 do // validate offer + renewal
     begin
       n := server.ComputeResponse(d);
-      Check(n > 0, 'request');
+      CheckEqual(n, d.SendLen);
+      Check(d.SendLen > 0, 'request');
       CheckEqual(d.Send.xid, $1e3d0000);
       CheckEqual(MacToText(@d.Send.chaddr), mac);
-      Check(DhcpParse(@d.Send, n, lens, @fnd) = dmtAck);
-      Check(fnd = FND_RESP + [doDhcpClientIdentifier]);
-      sip4 := DhcpIP4(@d.Send, lens[doDhcpServerIdentifier]);
+      Check(DhcpParse(@d.Send, d.SendLen, lens, @fnd) = dmtAck);
+      Check(fnd = FND_RESP + [doClientIdentifier]);
+      sip4 := DhcpIP4(@d.Send, lens[doServerIdentifier]);
       CheckEqual(IP4ToText(@sip4), '192.168.0.1');
       CheckEqual(d.Send.siaddr, sip4);
       if ip4 = 0 then
-        ip4 := d.Send.ciaddr
+        ip4 := d.Send.yiaddr
       else
-        CheckEqual(d.Send.ciaddr, ip4, 'consecutive ips');
+        CheckEqual(d.Send.yiaddr, ip4, 'consecutive ips');
       CheckEqual(DhcpIP4(@d.Send, lens[doSubnetMask]), IP4Netmask(14));
-      CheckEqual(DhcpInt(@d.Send, lens[doDhcpRenewalTime]),   60);
-      CheckEqual(DhcpInt(@d.Send, lens[doDhcpRebindingTime]), 105);
-      CheckEqual(DhcpInt(@d.Send, lens[doDhcpLeaseTime]),     120);
+      CheckEqual(DhcpInt(@d.Send, lens[doRenewalTime]),   60);
+      CheckEqual(DhcpInt(@d.Send, lens[doRebindingTime]), 105);
+      CheckEqual(DhcpInt(@d.Send, lens[doLeaseTime]),     120);
+      CheckEqual(DhcpParseToJson(@d.Send, d.SendLen, true),
+        '{op:"reply",yiaddr:"192.168.0.10",siaddr:"192.168.0.1",chaddr:' +
+        '"00:0b:82:01:fc:42",message-type:"ACK",server-identifier:' +
+        '"192.168.0.1",subnet-mask:"255.252.0.0",lease-time:120,' +
+        'renewal-time:60,rebinding-time:105,client-identifier:' +
+        '"00:0b:82:01:fc:42"}');
     end;
     d.Recv := d.Send;
-    d.RecvLen := n;
+    d.RecvLen := d.SendLen;
     Check(server.ComputeResponse(d) < 0, 'ack');
     Check(d.RecvHostName^ = '', 'no hostname');
     CheckEqual(server.Count, 1);
@@ -1937,6 +2076,8 @@ begin
     CheckSaveToTextMatch(txt);
     d.Recv.cookie := 0;
     Check(server.ComputeResponse(d) < 0, 'invalid frame');
+    CheckEqual(DhcpParseToJson(@d.Recv, d.RecvLen, true), '');
+    CheckEqual(d.RecvToJson, '');
     // make N concurrent requests
     n := length(macs);
     SetLength(ips, n);
@@ -1946,28 +2087,43 @@ begin
     begin
       hostname := 'HOST';
       AppendShortCardinal(i, hostname);
-      f := DhcpClient(d.Recv, dmtDiscover, macs[i]);
+      f := d.ClientNew(dmtDiscover, macs[i]);
       DhcpAddOptionShort(f, doHostName, hostname);
-      f^ := #255;
-      d.RecvLen := f - PAnsiChar(@d.Recv) + 1;
+      d.ClientFlush(f);
       Check(IsEqual(macs[i], PNetMac(@d.Recv.chaddr)^));
       CheckNotEqual(xid, d.Recv.xid);
       xid := d.Recv.xid;
       PInt64(@d.RecvLensRai)^ := -1;
-      Check(server.ComputeResponse(d) > 0, 'request#');
+      l := server.ComputeResponse(d);
+      Check(l > 0, 'request#');
       CheckEqual(d.Send.xid, xid);
       Check(IsZero(THash128(d.RecvLensRai)), 'rai');
       Check(d.RecvHostName^ = hostname, 'hostname');
       Check(IsEqual(macs[i], PNetMac(@d.Recv.chaddr)^));
       Check(IsEqual(macs[i], PNetMac(@d.Send.chaddr)^));
-      ips[i] := d.Send.ciaddr; // OFFERed IP
+      ips[i] := d.Send.yiaddr; // OFFERed IP
       Check(server.GetScope(ips[i]) <> nil);
+      if i <> 0 then
+        continue;
+      mac := MacToText(@macs[0]);
+      CheckEqual(d.RecvToJson(true),
+        '{op:"request",chaddr:"' + mac + '",message-type:"DISCOVER",' +
+        'parameter-request-list:[1,3,6,15,28],host-name:"HOST0"}');
+      CheckEqual(DhcpParseToJson(@d.Send, d.SendLen, true),
+        '{op:"reply",yiaddr:"192.168.0.11",siaddr:"192.168.0.1",chaddr:"' +
+        mac + '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+        'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:60,' +
+        'rebinding-time:105}');
     end;
     CheckEqual(length(server.SaveToText), length(txt), 'only offer');
     CheckEqual(server.Count, n, 'one is static');
     for i := n - 1 downto 0 do // in reverse order
       DoRequest(i);
     NotifyTestSpeed('DHCP handshakes', n, 0, @timer);
+    CheckEqual(d.RecvToJson(true),
+      '{op:"request",chaddr:"' + mac + '",message-type:"REQUEST",' +
+      'parameter-request-list:[1,3,6,15,28],' +
+      'server-identifier:"192.168.0.1"}');
     CheckEqual(server.Count, n);
     txt := server.SaveToText;
     CheckSaveToTextMatch(txt);
@@ -1982,7 +2138,7 @@ begin
     for i := 2 to 100 do
       CheckNotEqual(PosEx(MacToText(@macs[i]), txt), 0, 'no static macs');
     Check(length(txt) > 2000, 'saved len2');
-    // validate ParseMacIP()
+    // validate ParseMacIP() with our random macs[] and assigned ip[]
     for i := 0 to n - 1 do
     begin
       CheckNotEqual(ips[i], 0, 'ips');
@@ -2010,12 +2166,25 @@ begin
       CheckEqual(length(nfo.uuid), 5);
       Check(CompareMem(pointer(nfo.uuid), @macs[i], 5));
     end;
-    // twice with the requests to validate efficient renewal
+    // twice with the requests to validate efficient renewal after INIT-REBOOT
     timer.Start;
     for i := 1 to n do
       DoRequest(rnd.Next(n)); // in Random order
     NotifyTestSpeed('DHCP renewals', n, 0, @timer);
     CheckEqual(length(server.SaveToText), length(txt), 'no new offer');
+    DoRequest(77);
+    Check(d.SendLen > DHCP_PACKET_HEADER);
+    mac := MacToText(@macs[77]);
+    ip := IP4ToText(@ips[77]);
+    CheckEqual(d.RecvToJson(true),
+      '{op:"request",chaddr:"' + mac + '",message-type:' +
+      '"REQUEST",parameter-request-list:[1,3,6,15,28],' +
+      'server-identifier:"192.168.0.1"}');
+    CheckEqual(DhcpParseToJson(@d.Send, d.SendLen, true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:60,' +
+      'rebinding-time:105}');
     // validate OnIdle() metrics and file persistence background process
     Check(not IsZero(server.Scope[0].Metrics.Current));
     Check(not FileExists(fn), 'file before OnIdle');
@@ -2073,61 +2242,407 @@ begin
     Check(not IsEqual(m1, m2), 'metrics after ResetMetrics');
     CheckEqual(server.Count, 0, 'after clear');
     CheckEqual(server.SaveToText, CRLF, 'after clear');
-    // validate DECLINE process - and option 82 Relay Agent
+    // validate OFFER process - and option 82 Relay Agent
+    option[0] := #6;
+    option[1] := #1;                     // T = circuit-id
+    option[2] := #4;                     // L = 4
+    PCardinal(@option[3])^ := $41424344; // V = DCBA
+    Check(PShortString(@option[2])^ = 'DCBA', 'DCBA');
     CheckEqual(server.OnIdle(1), 0, 'onidle'); // trigger MaxDeclinePerSec process
-    f := DhcpClient(d.Recv, dmtDiscover, macs[0]);
-    opt82[0] := #6;
-    opt82[1] := #1;                     // T = circuit-id
-    opt82[2] := #4;                     // L = 4
-    PCardinal(@opt82[3])^ := $41424344; // V = DCBA
-    Check(PShortString(@opt82[2])^ = 'DCBA', 'DCBA');
-    DhcpAddOptionShort(f, doRelayAgentInformation, opt82);
-    f^ := #255;
-    d.RecvLen := f - PAnsiChar(@d.Recv) + 1;
+    f := d.ClientNew(dmtDiscover, macs[0]);
+    DhcpAddOptionShort(f, doRelayAgentInformation, option);
+    d.ClientFlush(f);
     Check(IsEqual(macs[0], PNetMac(@d.Recv.chaddr)^));
     CheckNotEqual(xid, d.Recv.xid);
     xid := d.Recv.xid;
-    l := server.ComputeResponse(d);
-    Check(l > 0, 'request1');
+    Check(server.ComputeResponse(d) > 0, 'request1');
     CheckEqual(d.Send.xid, xid);
-    CheckNotEqual(d.Send.ciaddr, ips[0]);
+    CheckNotEqual(d.Send.yiaddr, ips[0]);
     Check(not IsZero(THash128(d.RecvLensRai)), 'rai_opt82');
     for dor := low(dor) to high(dor) do
       Check((d.RecvLensRai[dor] <> 0) = (dor = dorCircuitId));
     Check(DhcpData(@d.Recv, d.RecvLensRai[dorCircuitId])^ = 'DCBA');
     Check(DhcpData(@d.Recv, d.RecvLensRai[dorRemoteId])^[0] = #0);
-    Check(server.GetScope(d.Send.ciaddr) <> nil);
+    Check(server.GetScope(d.Send.yiaddr) <> nil);
     CheckEqual(lens[doRelayAgentInformation], 0, 'no relay agent');
-    Check(DhcpParse(@d.Send, l, lens, @fnd) = dmtOffer);
+    Check(DhcpParse(@d.Send, d.SendLen, lens, @fnd) = dmtOffer);
     Check(fnd = FND_RESP + [doRelayAgentInformation]);
     CheckNotEqual(lens[doRelayAgentInformation], 0, 'propagated relay agent');
-    Check(DhcpData(@d.Send, lens[doRelayAgentInformation])^ = opt82, 'o82a');
-    Check(DhcpIdem(@d.Send, lens[doRelayAgentInformation], opt82), 'o82b');
+    Check(DhcpData(@d.Send, lens[doRelayAgentInformation])^ = option, 'o82a');
+    Check(DhcpIdem(@d.Send, lens[doRelayAgentInformation], option), 'o82b');
     Check(not DhcpIdem(@d.Send, lens[doRelayAgentInformation], 'totoro'), 'o82c');
-    ips[0] := d.Send.ciaddr;
-    f := DhcpClient(d.Recv, dmtDecline, macs[0]);
-    d.RecvLen := f - PAnsiChar(@d.Recv) + 1;
+    ips[0] := d.Send.yiaddr;
+    mac := MacToText(@macs[0]);
+    ip := IP4ToText(@ips[0]);
+    json := d.RecvToJson(true);
+    CheckEqual(json,
+      '{op:"request",chaddr:"' + mac + '",message-type:' +
+      '"DISCOVER",parameter-request-list:[1,3,6,15,28],' +
+      'relay-agent-information:{circuit-id:"DCBA"}}');
+    CheckEqual(DhcpParseToJson(@d.Send, d.SendLen, true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:60,' +
+      'rebinding-time:105,relay-agent-information:{circuit-id:"DCBA"}}');
+    // validate Relay Agent rules
+    pool := @server.Scope[0].Main;
+    ndx := pool.AddRule([
+      '{any:{"circuit-id":"1234","circuit-id":"DCBA"},' +
+       'always:{202:"titi"},name:"circuit-id"}']);
+    ips[0] := d.Send.yiaddr;
+    CheckEqual(d.RecvToJson(true), json);
+    Check(server.ComputeResponse(d) > 0, 'rai rule');
+    ip := IP4ToText(@d.Send.yiaddr);
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      '202:"titi",subnet-mask:"255.252.0.0",lease-time:120,' +
+      'renewal-time:60,rebinding-time:105,' +
+      'relay-agent-information:{circuit-id:"DCBA"}}');
+    pool.DeleteRule(ndx);
+    // validate DECLINE process with no specified IP: should flush last
+    d.ClientFlush(d.ClientNew(dmtDecline, macs[0]));
     xid := d.Recv.xid;
     CheckEqual(server.ComputeResponse(d), 0, 'decline has no resp');
+    CheckEqual(d.RecvToJson(true),
+      '{op:"request",chaddr:"' + mac + '",message-type:' +
+      '"DECLINE",parameter-request-list:[1,3,6,15,28]}');
     CheckEqual(server.SaveToText, CRLF, 'declined not saved');
-    d.RecvLen := DhcpClient(d.Recv, dmtDiscover, macs[0]) - PAnsiChar(@d.Recv) + 1;
+    // validate DISCOVER process after DECLINE
+    d.ClientFlush(d.ClientNew(dmtDiscover, macs[0]));
     xid := d.Recv.xid;
     Check(server.ComputeResponse(d) > 0, 'request3');
     CheckEqual(d.Recv.xid, xid);
     CheckEqual(d.Send.xid, xid);
     Check(IsEqual(macs[0], PNetMac(@d.Send.chaddr)^));
-    Check(server.GetScope(d.Send.ciaddr) <> nil);
-    CheckNotEqual(d.Send.ciaddr, ips[0]);
+    Check(server.GetScope(d.Send.yiaddr) <> nil);
+    CheckNotEqual(d.Send.yiaddr, ips[0]);
+    CheckEqual(DhcpParseToJson(@d.Recv, d.RecvLen, true),
+      '{op:"request",chaddr:"' + mac + '",message-type:' +
+      '"DISCOVER",parameter-request-list:[1,3,6,15,28]}');
+    ip := IP4ToText(@d.Send.yiaddr);
+    CheckEqual(DhcpParseToJson(@d.Send, d.SendLen, true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:60,' +
+      'rebinding-time:105}');
     CheckEqual(server.SaveToText, CRLF, 'declined no offer');
     server.ComputeMetrics(m2);
     CheckEqual(m2[dsmDecline], 1);
-    CheckEqual(m2[dsmDiscover], 2);
-    CheckEqual(m2[dsmOffer], 2);
-    CheckEqual(m2[dsmOption82Hits], 1);
+    CheckEqual(m2[dsmDiscover], 3);
+    CheckEqual(m2[dsmOffer], 3);
+    CheckEqual(m2[dsmOption82Hits], 2);
     Check(not IsEqual(m1, m2), 'ComputeMetrics Declined');
     json := MetricsToJson(m2, [woDontStoreVoid]);
-    CheckEqual(json, '{"discover":2,"offer":2,"decline":1,"lease-allocated":2,' +
-      '"dynamic-hits":2,"option-82-hits":1}');
+    CheckEqual(json, '{"discover":3,"offer":3,"decline":1,"lease-allocated":2,' +
+      '"dynamic-hits":3,"option-82-hits":2,"rule":1}');
+    // validate DECLINE process with a given IP which is not in OFFER state
+    f := d.ClientNew(dmtDecline, macs[10]);
+    DhcpAddOption32(f, doRequestedAddress, ips[10]);
+    d.ClientFlush(f);
+    CheckEqual(server.ComputeResponse(d), 0, 'decline has no resp');
+    mac := MacToText(@macs[10]);
+    ip := IP4ToText(@ips[10]);
+    CheckEqual(d.RecvToJson(true),
+      '{op:"request",chaddr:"' + mac + '",message-type:' +
+      '"DECLINE",parameter-request-list:[1,3,6,15,28],' +
+      'requested-address:"' + ip + '"}');
+    server.ComputeMetrics(m2);
+    json := MetricsToJson(m2, [woDontStoreVoid]);
+    CheckEqual(json, '{"discover":3,"offer":3,"decline":2,"lease-allocated":2,' +
+      '"dynamic-hits":3,"option-82-hits":2,"rule":1,"dropped-packets":1}');
+    // validate DISCOVER + DECLINE with the specific IP
+    d.ClientFlush(d.ClientNew(dmtDiscover, macs[10]));
+    xid := d.Recv.xid;
+    Check(server.ComputeResponse(d) > 0, 'requestDecline');
+    CheckEqual(d.Recv.xid, xid);
+    CheckEqual(d.Send.xid, xid);
+    CheckEqual(d.RecvToJson(true),
+      '{op:"request",chaddr:"' + mac + '",message-type:' +
+      '"DISCOVER",parameter-request-list:[1,3,6,15,28]}');
+    ip4 := d.Send.yiaddr;
+    ip := IP4ToText(@ip4);
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:60,' +
+      'rebinding-time:105}');
+    CheckEqual(server.Scope[0].Metrics.Current[dsmDecline], 2);
+    CheckEqual(server.Scope[0].Metrics.Current[dsmDiscover], 4);
+    CheckEqual(server.Scope[0].Metrics.Current[dsmOffer], 4);
+    CheckEqual(server.Scope[0].Metrics.Current[dsmOption82Hits], 2);
+    f := d.ClientNew(dmtDecline, macs[10]);
+    DhcpAddOption32(f, doRequestedAddress, ip4);
+    d.ClientFlush(f);
+    CheckEqual(server.ComputeResponse(d), 0, 'decline has no resp');
+    server.ComputeMetrics(m2);
+    json := MetricsToJson(m2, [woDontStoreVoid]);
+    CheckEqual(json, '{"discover":4,"offer":4,"decline":3,"lease-allocated":4,' +
+      '"dynamic-hits":4,"option-50-hits":1,"option-82-hits":2,' +
+      '"rule":1,"dropped-packets":1}');
+    // validate INFORM with no ciaddr
+    d.ClientFlush(d.ClientNew(dmtInform, macs[10], []));
+    CheckEqual(d.RecvToJson(true),
+      '{op:"request",chaddr:"' + mac + '",message-type:"INFORM"}');
+    CheckEqual(server.ComputeResponse(d), 0, 'wrong inform has no resp');
+    CheckEqual(server.Scope[0].Metrics.Current[dsmInform], 1);
+    CheckEqual(server.Scope[0].Metrics.Current[dsmDroppedInvalidIP], 1);
+    // validate INFORM with proper ciaddr
+    d.ClientFlush(d.ClientNew(dmtInform, macs[11]));
+    d.Recv.ciaddr := ip4;
+    d.RecvBoot := dcbBios;
+    CheckNotEqual(server.ComputeResponse(d), 0, 'inform');
+    Check(d.RecvBoot = dcbDefault, 'noboot');
+    mac := MacToText(@macs[11]);
+    CheckEqual(d.RecvToJson(true),
+      '{op:"request",ciaddr:"' + ip + '",chaddr:"' + mac +
+       '",message-type:"INFORM",parameter-request-list:' +
+       '[1,3,6,15,28]}');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'subnet-mask:"255.252.0.0"}');
+    // validate PXE selection with missing response boot file in settings
+    f := d.ClientNew(dmtDiscover, macs[8]);
+    DhcpAddOptionShort(f, doVendorClassIdentifier, 'PXEClient:Arch:00006');
+    d.ClientFlush(f);
+    d.RecvBoot := dcbBios;
+    CheckNotEqual(server.ComputeResponse(d), 0, 'pxe 0006');
+    Check(d.RecvBoot = dcbDefault, 'missing boot file');
+    // validate PXE selection with proper settings
+    Check(Assigned(d.Scope), 'scope');
+    d.Scope^.Boot.Remote[dcbX86] := 'ipxe.efi';
+    d.Scope^.Boot.Remote[dcbX64] := 'x86-64-efi/ipxe.efi';
+    d.Scope^.Boot.Remote[dcbIpxeX64] :=
+      'http://mydomain.lan/api/v3/baseipxe?uefi=false&keymap=fr';
+    d.Scope^.Boot.Remote[dcbA64Http] := 'http://mydomain.lan/aarch64/ipxe.efi';
+    CheckNotEqual(server.ComputeResponse(d), 0, 'pxe 0006');
+    Check(d.RecvBoot = dcbX86, 'with boot file');
+    mac := MacToText(@macs[8]);
+    ip := IP4ToText(@d.Send.yiaddr);
+    Check(not pool.IsStaticIP(d.Send.yiaddr), 'dynamic');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      'boot-file-name:"ipxe.efi",vendor-class-identifier:' +
+      '"PXEClient:Arch:00006",subnet-mask:"255.252.0.0",lease-time:120,' +
+      'renewal-time:60,rebinding-time:105}');
+    // validate PXE selection with next-server information in settings
+    d.RecvBoot := dcbBios;
+    d.Scope^.Boot.NextServer := '192.168.0.254';
+    CheckNotEqual(server.ComputeResponse(d), 0, 'nextserver');
+    ip := IP4ToText(@d.Send.yiaddr);
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      'tftp-server-name:"192.168.0.254",' +
+      'boot-file-name:"ipxe.efi",vendor-class-identifier:' +
+      '"PXEClient:Arch:00006",subnet-mask:"255.252.0.0",lease-time:120,' +
+      'renewal-time:60,rebinding-time:105}');
+    // validate PXE selection with another architecture
+    f := d.ClientNew(dmtRequest, macs[8]);
+    DhcpAddOptionShort(f, doVendorClassIdentifier, 'PXEClient:Arch:00007');
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'Arch007');
+    Check(d.RecvBoot = dcbX64, 'boot file and nextserver');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'tftp-server-name:"192.168.0.254",' +
+      'boot-file-name:"x86-64-efi/ipxe.efi",vendor-class-identifier:' +
+      '"PXEClient:Arch:00007",subnet-mask:"255.252.0.0",lease-time:120,' +
+      'renewal-time:60,rebinding-time:105}');
+    // validate PXE selection in iPXE mode
+    DhcpAddOptionShort(f, doUserClass, 'iPXE');
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'iPXE007');
+    Check(d.RecvBoot = dcbIpxeX64, 'ipxe7');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'tftp-server-name:"192.168.0.254",boot-file-name:"http://mydomain.lan' +
+      '/api/v3/baseipxe?uefi=false&keymap=fr",vendor-class-identifier:' +
+      '"PXEClient:Arch:00007",subnet-mask:"255.252.0.0",lease-time:120,' +
+      'renewal-time:60,rebinding-time:105}');
+    // validate PXE selection with option 93 and HTTPClient mode
+    option[0] := #2;
+    option[1] := #0;
+    option[2] := #12; // option 93 as uint16 (00:0c) for aarch64 architecture
+    f := d.ClientNew(dmtRequest, macs[8]);
+    DhcpAddOptionShort(f, doClientArchitecture, option);
+    DhcpAddOptionShort(f, doVendorClassIdentifier, 'HTTPClient');
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'aarch64');
+    Check(d.RecvBoot = dcbA64Http, 'HTTPClient');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'tftp-server-name:"192.168.0.254",boot-file-name:"http://mydomain.lan/' +
+      'aarch64/ipxe.efi",vendor-class-identifier:' +
+      '"HTTPClient",subnet-mask:"255.252.0.0",lease-time:120,' +
+      'renewal-time:60,rebinding-time:105}');
+    // add some custom "rule"
+    CheckEqual(length(pool.Rules), 0, 'no rule yet');
+    pool.AddRule([
+      '{all:{user-class: "iPXE", client-architecture: 5},' +
+       'always:{tftp-server-name:"192.168.0.254"}, '+
+       'requested:{boot-file-name:"ipxe.5"},name:"ipxe5"}']);
+    CheckEqual(length(pool.Rules), 1, 'one rule');
+    // incomplete "all":
+    f := d.ClientNew(dmtRequest, macs[8]);
+    option[2] := #5;  // option 93 as uint16 (00:05)
+    DhcpAddOptionShort(f, doClientArchitecture, option);
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'not all');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:' +
+      '60,rebinding-time:105}');
+    // complete "all": into "always" but not "requested"
+    DhcpAddOptionShort(f, doUserClass, 'iPXE');
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'all');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'tftp-server-name:"192.168.0.254",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:' +
+      '60,rebinding-time:105}');
+    // complete "all": into "always" and "requested"
+    f := d.ClientNew(dmtRequest, macs[8], DHCP_REQUEST + [doBootFileName]);
+    DhcpAddOptionShort(f, doUserClass, 'iPXE');
+    DhcpAddOptionShort(f, doClientArchitecture, option);
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'requested');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'tftp-server-name:"192.168.0.254",boot-file-name:"ipxe.5",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:' +
+      '60,rebinding-time:105}');
+    // "rule" with "mac" and "ip" should go to static list
+    Check(not pool.IsStaticIP(ips[8]), 'none8');
+    mac := MacToText(@macs[8]);
+    ip := IP4ToText(@ips[8]);
+    pool.AddRule([
+      '{mac:"', mac, '",ip:"' + ip + '"}']);
+    CheckEqual(length(pool.Rules), 1, 'static not rule');
+    Check(pool.IsStaticIP(ips[8]), 'static8');
+    // "rule" with "mac" and "ip" and custom options
+    mac := MacToText(@macs[7]);
+    ip := IP4ToText(@ips[7]);
+    uuid :=  ToUtf8(UUID_97.uuid);
+    pool.AddRule([
+      '{all:{mac:["', MacToText(@macs[6]), '","', mac,  // validate pvkMacs
+      '"],client-uuid:"', uuid, '"},' +
+      'always:{ntp-server:["1.1.1.1", "4.4.4.4"]},' +
+      'requested:{domain:"mydomain"},name:"macs"}']);
+    pool.AddRule([
+      '{mac:"', mac, '",ip:"' + ip + '",' +
+       'requested:{domain-name:"mydomain"}}']);
+    CheckEqual(length(pool.Rules), 3, 'rule2');
+    // deterministic first matching "rule" wins - static
+    f := d.ClientNew(dmtRequest, macs[7]);
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'static7');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'domain-name:"mydomain",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:' +
+      '60,rebinding-time:105}');
+    // deterministic first matching "rule" wins - macs+uuid but no IP
+    DhcpAddOptionBuf(f, doUuidClientIdentifier, @UUID_97, SizeOf(UUID_97));
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'uuid7');
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"ACK",server-identifier:"192.168.0.1",' +
+      'ntp-servers:["1.1.1.1","4.4.4.4"],domain-name:"mydomain",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:' +
+      '60,rebinding-time:105}');
+    // validate option 81 from a Windows DHCP client with no associated DDNS
+    mac := MacToText(@macs[8]);
+    f := d.ClientNew(dmtDiscover, macs[8]);
+    DhcpAddOptionU(f, doFqdn, UnescapeHex(
+      '\05\00\00\0eDESKTOP-ABC123\04corp\07example\03com\00'));
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'fqdn win');
+    json := d.RecvToJson(true);
+    CheckEqual(json,
+      '{op:"request",chaddr:"' + mac +
+       '",message-type:"DISCOVER",parameter-request-list:' +
+       '[1,3,6,15,28],fqdn:{server:"DESKTOP-ABC123.corp.example.com"}}');
+    ip := IP4ToText(@d.Send.yiaddr);
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:' +
+      '60,rebinding-time:105,fqdn:{client:"DESKTOP-ABC123.corp.example.com"}}');
+    // validate ASCII option 81 with custom "fqdn" simple rule value
+    ndx := pool.AddRule([
+      '{mac:"', mac, '",' +
+       'always:{81:"mydomain"},name:"mydomain"}']);
+    CheckEqual(ndx, high(pool.Rules));
+    CheckNotEqual(server.ComputeResponse(d), 0, 'fqdn ascii');
+    CheckEqual(d.RecvToJson(true), json);
+    ip := IP4ToText(@d.Send.yiaddr); // OFFER twice returns the next IP
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      'fqdn:{client:"mydomain"},' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:' +
+      '60,rebinding-time:105}');
+    // replace the last rule with an explicit {server:"fqdn"} for flags S=1
+    Check(pool.DeleteRule(ndx), 'del1');
+    Check(not pool.DeleteRule(ndx), 'del2');
+    CheckEqual(ndx, pool.AddRule([
+      '{mac:"', mac, '",' +
+       'always:{fqdn:{server:"mydomain.com"}},name:"fqdn"}']));
+    // validate ASCII option 81 with the new {server:"fqdn"} rule
+    CheckNotEqual(server.ComputeResponse(d), 0, 'fqdn server');
+    CheckEqual(d.RecvToJson(true), json);
+    ip := IP4ToText(@d.Send.yiaddr); // OFFER twice returns the next IP
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      'fqdn:{server:"mydomain.com"},' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:' +
+      '60,rebinding-time:105}');
+    // validate domain-search option 119 with multiple DNS domains
+    Check(pool.DeleteRule(ndx), 'del2');
+    CheckEqual(ndx, pool.AddRule([
+      '{mac:"', mac, '",' +
+       'always:{domain-search:"mydomain.com,another.domain.net"}}']));
+    CheckNotEqual(server.ComputeResponse(d), 0, 'domainsearch');
+    CheckEqual(d.RecvToJson(true), json);
+    ip := IP4ToText(@d.Send.yiaddr); // OFFER twice returns the next IP
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      'domain-search:"mydomain.com,another.domain.net",' +
+      'subnet-mask:"255.252.0.0",lease-time:120,renewal-time:' +
+      '60,rebinding-time:105,fqdn:{client:"DESKTOP-ABC123.corp.example.com"}}');
+    // validate pvkRaw non standard options "any" match and also in response
+    Check(pool.DeleteRule(ndx), 'del2');
+    CheckEqual(ndx, pool.AddRule([
+      '{any:{fqdn:"",200:"none",200:"trigger"},' +
+       'always:{201:"toto"},name:"200/201"}']));
+    f := d.ClientNew(dmtDiscover, macs[8]);
+    option := 'trigger';
+    DhcpAddOptionRaw(f, 200, @option[1], ord(option[0]));
+    d.ClientFlush(f);
+    CheckNotEqual(server.ComputeResponse(d), 0, 'pvkRaw');
+    CheckEqual(d.RecvToJson(true),
+      '{op:"request",chaddr:"' + mac + '",message-type:"DISCOVER",' +
+      'parameter-request-list:[1,3,6,15,28],200:"trigger"}');
+    ip := IP4ToText(@d.Send.yiaddr); // OFFER twice returns the next IP
+    CheckEqual(d.SendToJson(true),
+      '{op:"reply",yiaddr:"' + ip + '",siaddr:"192.168.0.1",chaddr:"' + mac +
+      '",message-type:"OFFER",server-identifier:"192.168.0.1",' +
+      '201:"toto",subnet-mask:"255.252.0.0",' +
+      'lease-time:120,renewal-time:60,rebinding-time:105}');
   finally
     server.Free;
     settings.Free;

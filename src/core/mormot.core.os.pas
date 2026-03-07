@@ -286,14 +286,14 @@ const
 
   /// JSON compatible representation of a boolean value, i.e. 'false' and 'true'
   // - can be used e.g. in logs, or anything accepting a ShortString
-  BOOL_STR: array[boolean] of string[7] = (
+  BOOL_STR: array[boolean] of TShort7 = (
     'false', 'true');
 
   /// the JavaScript-like values of non-number IEEE constants
   // - as recognized by ShortToFloatNan, and used by TTextWriter.Add()
   // when serializing such single/double/extended floating-point values
   // - GetExtended() should also detect those values
-  JSON_NAN: array[TFloatNan] of string[11] = (
+  JSON_NAN: array[TFloatNan] of TShort15 = (
     '0', '"NaN"', '"Infinity"', '"-Infinity"');
 
 var
@@ -322,6 +322,7 @@ var
 const // some time conversion constants with Milli/Micro/NanoSec resolution
   SecsPerHour  = SecsPerMin * MinsPerHour; // missing in oldest Delphi
   SecsPerDay   = SecsPerMin * MinsPerDay;
+  SecsPerDate  = 1 / SecsPerDay;
   SecsPerWeek  = 7 * SecsPerDay;
   SecsPerMonth = 2629746; // rough approximation of SecsPerDay * 365.2425 / 12
   SecsPerYear  = 12 * SecsPerMonth;
@@ -330,6 +331,7 @@ const // some time conversion constants with Milli/Micro/NanoSec resolution
   MilliSecsPerMin      = MilliSecsPerSec  * SecsPerMin;
   MilliSecsPerHour     = MilliSecsPerMin  * MinsPerHour;
   MilliSecsPerDay      = MilliSecsPerHour * HoursPerDay;
+  MilliSecsPerDate     = 1 / MilliSecsPerDay;
   MicroSecsPerMilliSec = 1000;
   MicroSecsPerSec      = MicroSecsPerMilliSec * MilliSecsPerSec;
   NanoSecsPerMicroSec  = 1000;
@@ -4996,6 +4998,14 @@ procedure SpinExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt);
 function ObjArrayAdd(var aObjArray; aItem: TObject;
   var aSafe: TLightLock; aCount: PInteger = nil): PtrInt; overload;
 
+/// wrapper to implement a thread-safe T*ObjArray dynamic array acquisition
+// - make ObjArrayClear(aDestArray), then move aObjArray to aDestArray, truncated
+// to aCount^ items if defined, and return the length of the resulting array
+// - at output, aDestArray = nil and aCount^ = 0 and all data moved to aDestArray
+// - warning: aCount^ should be a 32-bit "integer" variable, not a PtrInt
+function ObjArrayMove(var aObjArray, aDestArray; var aSafe: TLightLock;
+  aCount: PInteger = nil): PtrInt;
+
 /// wrapper to implement a thread-safe pointer dynamic array storage
 // - warning: aCount^ should be a 32-bit "integer" variable, not a PtrInt
 function PtrArrayDelete(var aPtrArray; aItem: pointer; var aSafe: TLightLock;
@@ -6032,7 +6042,7 @@ end;
 
 function TextToUuid(const text: RawUtf8; out uuid: TGuid): boolean;
 var
-  tmp: string[36];
+  tmp: TShortGuid;
 begin
   result := false;
   if length(text) <> 36 then
@@ -6237,12 +6247,12 @@ begin
     if osv.os in (OS_LINUX - [osAndroid]) then
       AppendShort(' Linux ', result) // e.g. 'Ubuntu Linux 5.4.0'
     else
-      AppendShortCharSafe(' ', result);
-    AppendShortCardinal(osv.utsrelease[2], result);
-    AppendShortCharSafe('.', result);
-    AppendShortCardinal(osv.utsrelease[1], result);
-    AppendShortCharSafe('.', result);
-    AppendShortCardinal(osv.utsrelease[0], result);
+      AppendShortChar(' ', @result);
+    AppendShortByte(osv.utsrelease[2], @result);
+    AppendShortChar('.', @result);
+    AppendShortByte(osv.utsrelease[1], @result);
+    AppendShortChar('.', @result);
+    AppendShortByte(osv.utsrelease[0], @result);
   end;
 end;
 
@@ -6285,7 +6295,7 @@ end;
 // - all errors are cross-platform, e.g. when used in centralized servers
 
 const
-  NULL_STR: string[1] = '';
+  NULL_STR: TShort1 = '';
 
 function _GetEnumNameRtti(Info: pointer; Value: integer): PShortString;
 begin
@@ -6479,7 +6489,7 @@ begin
 end;
 
 const
-  _PREFIX: array[0..5] of string[15] = (
+  _PREFIX: array[0..5] of TShort15 = (
     'WSA', 'ERROR_WINHTTP_', '', 'EXCEPTION_', 'SEC_', 'ERROR_');
 
 function AppendWinErrorText(Code: cardinal; var Dest: ShortString;
@@ -6712,7 +6722,7 @@ const
     $70,  // aciPhytium
     $c0); // aciAmpere
 
-  ARMCPU_ID_TXT: array[TArmCpuType] of string[15] = (
+  ARMCPU_ID_TXT: array[TArmCpuType] of TShort15 = (
      '',
      'ARM810', 'ARM920', 'ARM922', 'ARM926', 'ARM940', 'ARM946', 'ARM966',
      'ARM1020', 'ARM1022', 'ARM1026', 'ARM11 MPCore', 'ARM1136', 'ARM1156',
@@ -6928,7 +6938,7 @@ begin // cut-down and fixed version of FPC rtl/objpas/sysutils/syscodepages.inc
     28591 .. 28606:
       begin
         Name := 'ISO-8859-';
-        AppendShortCardinal(codepage - 28590, Name);
+        AppendShortByte(codepage - 28590, @Name); // append '0'..'16'
       end;
     50220, 50222:
       Name := 'ISO-2022-JP';
@@ -8449,7 +8459,7 @@ begin
     exit;
   AppendFreeTotalKB(info.memtotal - info.memfree, info.memtotal, result);
   AppendShortChar('(', @result);
-  AppendShortCardinal(info.percent, result);
+  AppendShortByte(info.percent, @result); // append '0'..'99' range
   AppendShortTwoChars(ord('%') + ord(')') shl 8, @result);
 end;
 
@@ -9231,7 +9241,7 @@ begin
 end;
 
 const
-  FD: array[boolean] of string[7] = ('File', 'Folder');
+  FD: array[boolean] of TShort7 = ('File', 'Folder');
 
 function TExecutableCommandLine.CheckFileName(const name: TFileName;
   isFolder: boolean): TFileName;
@@ -11548,6 +11558,34 @@ begin
   aSafe.UnLock;
 end;
 
+function ObjArrayMove(var aObjArray, aDestArray; var aSafe: TLightLock;
+  aCount: PInteger): PtrInt;
+var
+  dest: TObjectDynArray absolute aDestArray;
+begin
+  if dest <> nil then
+    ObjArrayClear(dest); // release dest outside of the lock
+  aSafe.Lock;
+  if aCount <> nil then
+  begin
+    result := aCount^;
+    if result <> 0 then
+    begin
+      pointer(dest) := pointer(aObjArray); // no refcount involved
+      PDALen(PAnsiChar(pointer(dest)) - _DALEN)^ := result - _DAOFF;
+    end;
+  end
+  else if pointer(aObjArray) = nil then
+    result := 0
+  else
+  begin
+    pointer(dest) := pointer(aObjArray);
+    result := PDALen(PAnsiChar(pointer(dest)) - _DALEN)^ + _DAOFF;
+  end;
+  pointer(aObjArray) := nil;
+  aSafe.UnLock;
+end;
+
 function PtrArrayDelete(var aPtrArray; aItem: pointer; var aSafe: TLightLock;
   aCount: PInteger): PtrInt;
 begin
@@ -11640,7 +11678,7 @@ end;
 
 const
   // hardcoded to avoid linking mormot.core.rtti for GetEnumName()
-  _SERVICESTATE: array[TServiceState] of string[12] = (
+  _SERVICESTATE: array[TServiceState] of TShort15 = (
     'NotInstalled',
     'Stopped',
     'Starting',

@@ -5099,7 +5099,7 @@ begin
   L := ord(TypeName^[0]);
   if IdemPropName(TypeName^, 'TID') or
      (ord(TypeName^[1]) and $df <> ord('T')) or // expect T...ID pattern
-     (PWord(@TypeName^[L - 1])^ and $dfdf <> ord('I') + ord('D') shl 8) or
+     (PWord(@TypeName^[L - 1])^ and $dfdf <> _ID16) or
      (Rtti.Counts[rkClass] = 0) then
     exit;
   if (L > 13) and IdemPropName('ToBeDeletedID', @TypeName^[L - 12], 13) then
@@ -7212,7 +7212,7 @@ begin
 end;
 
 const
-  ID_STR: array[{owoLowCaseID=}boolean] of string[15] = (
+  ID_STR: array[{owoLowCaseID=}boolean] of TShort15 = (
     '"ID_str":"', '"idStr":"');
 
 procedure TOrm.GetJsonValues(W: TOrmWriter);
@@ -7947,7 +7947,7 @@ var
     field: TOrmPropInfo;
     i: PtrInt;
     M: TOrmMany;
-    aManyField: string[63];
+    aManyField: TShort63;
 
     function GetManyField(F: PUtf8Char): boolean;
     var
@@ -8071,7 +8071,7 @@ begin
   for f := 0 to length(ObjectsClass) - 1 do
     with ObjectsClass[f].OrmProps do
     begin
-      PWord(@aField[2])^ := ord('I') + ord('D') shl 8;
+      PWord(@aField[2])^ := _ID16;
       if not AddField(nil) then
         exit; // try to add the ID field
       if Props.fSqlFillPrepareMany = '' then

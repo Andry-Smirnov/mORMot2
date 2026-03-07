@@ -6652,7 +6652,7 @@ begin
   if BinBytes = 0 then
     exit;
   destlen := BinToBase64Length(BinBytes);
-  if destlen > 255 then
+  if destlen > high(result) then
     exit; // avoid buffer overflow
   result[0] := AnsiChar(destlen);
   Base64Encode(@result[1], Bin, BinBytes);
@@ -7031,7 +7031,7 @@ begin
   if BinBytes <= 0 then
     exit;
   len := BinToBase64uriLength(BinBytes);
-  if len > 255 then
+  if len > high(result) then
     exit;
   byte(result[0]) := len;
   Base64uriEncode(@result[1], Bin, BinBytes, enc);
@@ -7829,10 +7829,10 @@ begin
         end
         else
           IdemPCharAndGetNextItem(P, 'CONTENT-TRANSFER-ENCODING: ', part.Encoding);
-        P := GotoNextLine(P);
-        if P = nil then
+        P := GotoNextLineSmall(P);
+        if P^ = #0 then
           exit;
-      until PWord(P)^ = 13 + 10 shl 8;
+      until PWord(P)^ = EOLW;
       // decode section content
       i := P - PUtf8Char(pointer(Body)) + 3; // i = just after header
       j := PosEx(boundary, Body, i);
@@ -8854,6 +8854,7 @@ const
      mtGif,     mtFont,   mtWebm,   mtTiff,
      mtTiff,    mtTiff,   mtWebp{=riff}, mtDoc,
      mtOgg,     mtDicom,  mtZstd);
+  _HTML32 = ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24;
 
 function GetMimeContentTypeFromMemory(Content: pointer; Len: PtrInt): TMimeType;
 var
@@ -8867,14 +8868,13 @@ begin
   case PAnsiChar(Content)^ of
     '<':
       case PCardinal(PAnsiChar(Content) + 1)^ or $20202020 of
-        ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24:
+        _HTML32:
           result := mtHtml; // legacy HTML document
         ord('!') + ord('d') shl 8 + ord('o') shl 16 + ord('c') shl 24:
           if (PCardinal(PAnsiChar(Content) + 5)^ or $20202020 =
              ord('t') + ord('y') shl 8 + ord('p') shl 16 + ord('e') shl 24) and
              (PAnsiChar(Content)[9] = ' ') then
-            if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 =
-               ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24) then
+            if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 = _HTML32) then
               result := mtHtml // HTML5 markup
             else
               result := mtXml // malformed XML document
@@ -9445,7 +9445,7 @@ begin
       {$endif CPUX64}
       Map.ProcessOneLine(PBeg, P);
       if P + 1 < PEnd then
-        if PWord(P)^ = 13 + 10 shl 8 then
+        if PWord(P)^ = EOLW then
         begin
           inc(P, 2); // ignore #13#10
           if P < PEnd then
@@ -9678,13 +9678,13 @@ end;
 function EscapeToShort(source: PAnsiChar; sourcelen: integer): ShortString;
 begin
   result[0] := AnsiChar(
-    EscapeBuffer(source, sourcelen, @result[1], 255) - @result[1]);
+    EscapeBuffer(source, sourcelen, @result[1], high(result)) - @result[1]);
 end;
 
 function EscapeToShort(const source: RawByteString): ShortString;
 begin
   result[0] := AnsiChar(
-    EscapeBuffer(pointer(source), length(source), @result[1], 255) - @result[1]);
+    EscapeBuffer(pointer(source), length(source), @result[1], high(result)) - @result[1]);
 end;
 
 function ContentAppend(source: PAnsiChar; len, pos, max: PtrInt; txt: PUtf8Char): integer;
@@ -9726,7 +9726,7 @@ end;
 
 procedure ContentToShortAppend(source: PAnsiChar; len: PtrInt; var txt: ShortString);
 begin
-  txt[0] := AnsiChar(ContentAppend(source, len, ord(txt[0]), 255, @txt[1]));
+  txt[0] := AnsiChar(ContentAppend(source, len, ord(txt[0]), high(txt), @txt[1]));
 end;
 
 function BinToSource(const ConstName, Comment: RawUtf8;
@@ -9930,7 +9930,7 @@ begin
     PCardinal(@ctx[30])^ := ord('.') + ord('.') shl 8 + ord('.') shl 16;
   end
   else
-    Ansi7StringToShortString(Context, ctx);
+    Ansi7StringToShortString(Context, ctx{%H-});
   persec[0] := #0;
   if PerSecond <> 0 then
     FormatShort(' %/s', [KBNoSpace(PerSecond)], persec);
@@ -10745,7 +10745,7 @@ end;
 
 procedure TTextWriterEscape.Toggle(style: TTextWriterEscapeStyle);
 const
-  HTML: array[tweBold..tweCode] of string[7] = (
+  HTML: array[tweBold..tweCode] of TShort7 = (
     'strong>', 'em>', 'code>');
 begin
   W.Add('<');
@@ -10774,9 +10774,9 @@ end;
 
 procedure TTextWriterEscape.SetLine(style: TTextWriterEscapeLineStyle);
 const
-  HTML: array[twlParagraph..twlCode3] of string[5] = (
+  HTML: array[twlParagraph..twlCode3] of TShort7 = (
     'p>', 'li>', 'li>', 'p>', 'code>', 'code>');
-  HTML2: array[twlOrderedList..twlCode3] of string[11] = (
+  HTML2: array[twlOrderedList..twlCode3] of TShort15 = (
     'ol>', 'ul>', 'blockquote>', 'pre>', 'pre>');
 begin
   if lst >= low(HTML) then
