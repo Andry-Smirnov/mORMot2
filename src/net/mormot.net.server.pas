@@ -34,9 +34,10 @@ uses
   mormot.core.unicode,
   mormot.core.text,
   mormot.core.buffers,
+  mormot.core.datetime,
   mormot.core.rtti,
   mormot.core.json,
-  mormot.core.datetime,
+  mormot.core.fmt,
   mormot.core.variants,
   mormot.core.zip,
   mormot.core.log,
@@ -70,8 +71,8 @@ type
     fSock: TNetSocket;
     fSockAddr: TNetAddr;
     fFrame: PUdpFrame;
-    fReceived, fTimeout: integer;
-    fBound, fAutoRebind: boolean;
+    fReceived, fTimeout, fRebindRetry, fRebindCount: integer;
+    fInitialBound, fAutoRebind: boolean;
     fBindAddress, fBindPort: RawUtf8;
     function DoBind: TNetResult; virtual;
     function GetIPWithPort: RawUtf8;
@@ -88,6 +89,9 @@ type
       TimeoutMS: integer); reintroduce;
     /// finalize the processing thread
     destructor Destroy; override;
+    /// low-level access to the bound UDP socket (for debugging purposes)
+    property Sock: TNetSocket
+      read fSock;
   published
     property IPWithPort: RawUtf8
       read GetIPWithPort;
@@ -95,6 +99,10 @@ type
       read fReceived;
     property AutoRebind: boolean
       read fAutoRebind write fAutoRebind;
+    property RebindRetry: integer
+      read fRebindRetry;
+    property RebindCount: integer
+      read fRebindCount;
   end;
 
 const
@@ -844,36 +852,6 @@ procedure InitNetTlsContextSelfSignedServer(var TLS: TNetTlsContext;
 
 /// used by THttpServerGeneric.SetFavIcon to return a nice /favicon.ico
 function FavIconBinary: RawByteString;
-
-type
-  /// define how GetMacAddress() makes its sorting choices
-  // - used e.g. for THttpPeerCacheSettings.InterfaceFilter property
-  // - mafEthernetOnly will only select TMacAddress.Kind = makEthernet
-  // - mafLocalOnly will only select makEthernet or makWifi adapters
-  // - mafRequireBroadcast won't return any TMacAddress with Broadcast = ''
-  // - mafIgnoreGateway won't put the TMacAddress.Gateway <> '' first
-  // - mafIgnoreKind and mafIgnoreSpeed will ignore Kind or Speed properties
-  TMacAddressFilter = set of (
-    mafEthernetOnly,
-    mafLocalOnly,
-    mafRequireBroadcast,
-    mafIgnoreGateway,
-    mafIgnoreKind,
-    mafIgnoreSpeed);
-
-/// pickup the most suitable network according to some preferences
-// - will sort GetMacAddresses() results according to its Kind and Speed
-// to select the most suitable local interface e.g. for THttpPeerCache
-function GetMainMacAddress(out Mac: TMacAddress;
-  Filter: TMacAddressFilter = []): boolean; overload;
-
-/// get a network interface from its TMacAddress main fields
-// - search is case insensitive for TMacAddress.Name and Address fields or as
-// exact IP, and eventually as CIDR pattern (e.g. '192.168.1.0/24')
-function GetMainMacAddress(out Mac: TMacAddress;
-  const InterfaceNameAddressOrIP: RawUtf8;
-  UpAndDown: boolean = false): boolean; overload;
-
 
 
 { ******************** THttpServerSocket/THttpServer HTTP/1.1 Server }
@@ -2033,7 +2011,7 @@ const
   PEER_CACHE_PATTERN = '*.cache';
 
   PEER_CACHE_MESSAGELEN = SizeOf(THttpPeerCacheMessageEncoded);
-  PEER_CACHE_AESLEN = PEER_CACHE_MESSAGELEN - SizeOf(cardinal);
+  PEER_CACHE_AESLEN = PEER_CACHE_MESSAGELEN - SizeOf(cardinal); // length - crc
   /// base-64 HttpDirectUri() bearer size in chars, from PEER_CACHE_MESSAGELEN
   PEER_CACHE_BEARERLEN = 326;
 
@@ -2584,12 +2562,13 @@ end;
 
 function TUdpServerThread.DoBind: TNetResult;
 begin
-  fBound := false;
+  fInitialBound := false;
   fLogClass.Add.Log(sllDebug, 'DoBind %:%', [fBindAddress, fBindPort], self);
   result := NewSocket(fBindAddress, fBindPort, nlUdp, {bind=}true,
     fTimeout, fTimeout, fTimeout, 10, fSock, @fSockAddr);
-  fLogClass.Add.Log(sllDebug, 'DoBind=%', [ToText(result)^], self);
-  fBound := true; // notify DoExecute() ASAP that fSock was set (or not)
+  if result <> nrOK then
+    fLogClass.Add.Log(sllWarning, 'DoBind=%', [NetLastErrorMsg], self);
+  fInitialBound := true; // notify DoExecute() ASAP that fSock was set (or not)
 end;
 
 constructor TUdpServerThread.Create(LogClass: TSynLogClass;
@@ -2609,17 +2588,16 @@ begin
     [fBindAddress, fBindPort, ident], self);
   inherited Create({suspended=}false, nil, nil, LogClass, ident);
   res := DoBind;
-  if res <> nrOk then
-  begin
-    // Windows seems to require this to avoid breaking the process on error
-    {$ifdef OSWINDOWS}
-    Resume{%H-}; // force Execute/DoExecute launch
-    SleepHiRes(10);
-    {$endif OSWINDOWS}
-    // on binding error, raise exception before the thread is actually created
-    raise EUdpServer.Create('Create binding error on %s:%s', self,
-      [BindAddress, BindPort], res);
-  end;
+  if res = nrOk then
+    exit;
+  // Windows seems to require this to avoid breaking the process on error
+  {$ifdef OSWINDOWS}
+  Resume{%H-}; // force Execute/DoExecute launch
+  SleepHiRes(10);
+  {$endif OSWINDOWS}
+  // on binding error, raise exception before the thread is actually created
+  raise EUdpServer.Create('Create binding error on %s:%s', self,
+    [BindAddress, BindPort], res);
 end;
 
 destructor TUdpServerThread.Destroy;
@@ -2670,15 +2648,15 @@ procedure TUdpServerThread.DoExecute;
 var
   len: integer;
   tix64: Int64;
-  tix, lasttix: cardinal;
+  tix, lasttix, delay: cardinal;
   res: TNetResult;
   ev: TNetEvents;
   remote: TNetAddr;
 begin
   lasttix := 0;
   // main server process loop
-  if not fBound then
-    SleepHiRes(100, fBound, {fBound value done=}true);
+  if not fInitialBound then
+    SleepHiRes(100, fInitialBound, {Bound value done=}true);
   if fSock = nil then // paranoid check
     FormatUtf8('%.DoExecute: % Bind failed', [self, fProcessName], fExecuteMessage)
   else
@@ -2713,7 +2691,7 @@ begin
             if CompareBuf(UDP_SHUTDOWN, fFrame, len) <> 0 then // from Destroy
             begin
               inc(fReceived);
-              OnFrameReceived(len, remote);
+              OnFrameReceived(len, remote); // new request
             end;
           end
           else
@@ -2722,14 +2700,15 @@ begin
         end
         else if res <> nrRetry then
         begin
-          fLogClass.Add.Log(sllDebug, 'DoExecute: abort after RecvPending=% %',
-            [_NR[res], NetLastErrorMsg], self);
+          fLogClass.Add.Log(sllDebug, 'DoExecute: RecvPending=%',
+            [NetLastErrorMsg], self);
           break;
         end;
       end
       else if neError in ev then
       begin
-        fLogClass.Add.Log(sllWarning, 'DoExecute: abort after WaitFor', self);
+        fLogClass.Add.Log(sllWarning, 'DoExecute: WaitFor=%',
+          [NetLastErrorMsg], self);
         break;
       end;
       if Terminated then
@@ -2748,17 +2727,26 @@ begin
        not fAutoRebind then
       break;
     // implement fAutoRebind=true after main fSock error
-    // (e.g. transient "ip link set eth0 down/up" or "iptables DROP")
+    // (e.g. transient wifi down/up or "iptables DROP")
+    delay := 1000; // exponential retry period backoff from 1 to 10 seconds
     repeat
-      fLogClass.Add.Log(sllDebug, 'DoExecute: % AutoRebind attempt',
-        [fProcessName], self);
+      inc(fRebindRetry);
+      fLogClass.Add.Log(sllDebug, 'DoExecute: % AutoRebind attempt retry=% rebind=%',
+        [fProcessName, fRebindRetry, fRebindCount], self);
       fSock.Close;
       fSock := nil;
-      if SleepOrTerminated(2000) or // wait a little and retry
-         (DoBind = nrOk) then
+      if SleepOrTerminated(delay) then // wait a little and retry
+        break;
+      res := DoBind;
+      if res = nrOk then
+      begin
+        inc(fRebindCount);
         break; // re-bound = go back to the main WaitFor/RecFrom loop
+      end;
       fLogClass.Add.Log(sllWarning, 'DoExecute: DoBind=% -> sleep and retry',
-        [NetLastErrorMsg], self);
+        [_NR[res]], self);
+      if delay < 10000 then
+        inc(delay, delay shr 2); // up to 10 seconds retry period
     until false;
   until Terminated;
 end;
@@ -2772,20 +2760,20 @@ begin
   if Text = '' then
     exit;
   case PCardinal(Text)^ of // case-sensitive test in occurrence order
-    ord('G') + ord('E') shl 8 + ord('T') shl 16:
+    GET_24:
       Method := urmGet;
-    ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24:
+    POST_32:
       Method := urmPost;
-    ord('P') + ord('U') shl 8 + ord('T') shl 16:
+    PUT_24:
       Method := urmPut;
+    HEAD_32:
+      Method := urmHead;
+    DELE_32:
+      Method := urmDelete;
+    OPTI_32:
+      Method := urmOptions;
     ord('P') + ord('A') shl 8 + ord('T') shl 16 + ord('C') shl 24:
       Method := urmPatch;
-    ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24:
-      Method := urmHead;
-    ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24:
-      Method := urmDelete;
-    ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24:
-      Method := urmOptions;
   else
     exit;
   end;
@@ -3296,12 +3284,12 @@ begin
 end;
 
 const
-  _CMD_200: array[boolean, boolean] of string[31] = (
+  _CMD_200: array[boolean, boolean] of TShort31 = (
    ('HTTP/1.1 200 OK'#13#10,
     'HTTP/1.0 200 OK'#13#10),
    ('HTTP/1.1 206 Partial Content'#13#10,
     'HTTP/1.0 206 Partial Content'#13#10));
-  _CMD_XXX: array[boolean] of string[15] = (
+  _CMD_XXX: array[boolean] of TShort15 = (
     'HTTP/1.1 ',
     'HTTP/1.0 ');
 
@@ -3443,7 +3431,7 @@ function THttpServerRequest.TempJsonWriter(
 begin
   if fTempWriter = nil then
   begin
-    fTempWriter := TJsonWriter.CreateOwnedStream(temp, {noshared=}true);
+    fTempWriter := TJsonWriter.CreateOwnedStream(temp);
     fTempWriter.FlushToStreamNoAutoResize := true;
   end
   else
@@ -4044,152 +4032,6 @@ begin
   if _FavIconBinary = '' then
     _FavIconBinary := AlgoRle.Decompress(Base64ToBin(_FAVICON_BINARY));
   result := _FavIconBinary;
-end;
-
-type
-  TSortByMacAddress = class // a fake class to propagate TMacAddressFilter
-    function Compare(const A, B): integer;
-  end;
-
-const
-  NETHW_ORDER: array[TMacAddressKind] of byte = ( // Kind to sort priority
-    2,  // makUndefined
-    0,  // makEthernet
-    1,  // makWifi
-    4,  // makTunnel
-    3,  // makPpp
-    5,  // makCellular
-    6); // makSoftware
-
-function TSortByMacAddress.Compare(const A, B): integer;
-var
-  ma: TMacAddress absolute A;
-  mb: TMacAddress absolute B;
-  filter: TMacAddressFilter;
-begin
-  result := 0;
-  if @ma = @mb then
-    exit;
-  // was called as arr.Sort(TSortByMacAddress(PtrUInt(byte(Filter))).Compare)
-  byte(filter) := PtrInt(self);
-  // sort with gateway first
-  if not (mafIgnoreGateway in filter) then
-  begin
-    result := ord(ma.Gateway = '') - ord(mb.Gateway = '');
-    if result <> 0 then
-      exit;
-  end;
-  // sort by kind
-  if not (mafIgnoreKind in filter) then
-  begin
-    result := CompareCardinal(NETHW_ORDER[ma.Kind], NETHW_ORDER[mb.Kind]);
-    if result <> 0 then
-      exit;
-  end;
-  // sort by speed within this kind and gateway
-  if not (mafIgnoreSpeed in filter) then
-  begin
-    result := CompareCardinal(mb.Speed, ma.Speed);
-    if result <> 0 then
-      exit;
-  end;
-  // fallback to sort by IfIndex or plain MAC address
-  result := CompareCardinal(ma.IfIndex, mb.IfIndex);
-  if result = 0 then
-    result := SortDynArrayAnsiStringI(ma.Address, mb.Address);
-  if result = 0 then
-    result := ComparePointer(@ma, @mb);
-end;
-
-function GetMainMacAddress(out Mac: TMacAddress; Filter: TMacAddressFilter): boolean;
-var
-  allowed, available: TMacAddressKinds;
-  all: TMacAddressDynArray;
-  arr: TDynArray;
-  i, bct: PtrInt;
-begin
-  result := false;
-  all := copy(GetMacAddresses({upanddown=}false)); // using a 65-seconds cache
-  if all = nil then
-    exit;
-  arr.Init(TypeInfo(TMacAddressDynArray), all);
-  bct := 0;
-  available := [];
-  for i := 0 to high(all) do
-    with all[i] do
-    begin
-      include(available, Kind);
-      if Broadcast <> '' then
-        inc(bct);
-      {writeln(Kind, ' ', Address,' name=',Name,' ifindex=',IfIndex,
-         ' ip=',ip,' netmask=',netmask,' broadcast=',broadcast);}
-    end;
-  allowed := [];
-  if mafLocalOnly in Filter then
-    allowed := [makEthernet, makWifi]
-  else if mafEthernetOnly in Filter then
-    include(allowed, makEthernet);
-  if (available * allowed) <> [] then // e.g. if all makUndefined
-    for i := high(all) downto 0 do
-      if not (all[i].Kind in allowed) then
-        arr.Delete(i);
-  if (mafRequireBroadcast in Filter) and
-     (bct <> 0) then
-    for i := high(all) downto 0 do
-      if all[i].Broadcast = '' then
-        arr.Delete(i);
-  if all = nil then
-    exit;
-  if length(all) > 1 then
-    arr.Sort(TSortByMacAddress(PtrUInt(byte(Filter))).Compare);
-  Mac := all[0];
-  result := true;
-end;
-
-function GetMainMacAddress(out Mac: TMacAddress;
-  const InterfaceNameAddressOrIP: RawUtf8; UpAndDown: boolean): boolean;
-var
-  n: integer;
-  all: TMacAddressDynArray;
-  mask: TIp4SubNet;
-  m, fnd: ^TMacAddress;
-begin
-  // retrieve the current network interfaces
-  result := false;
-  if InterfaceNameAddressOrIP = '' then
-    exit;
-  all := GetMacAddresses(UpAndDown); // from cache
-  n := length(all);
-  if n = 0 then
-    exit;
-  m := pointer(all);
-  fnd := nil;
-  if mask.From(InterfaceNameAddressOrIP) then
-    // search as IP bitmask pattern e.g. '192.168.1.0/24' or '192.168.1.13'
-    repeat
-      if mask.Match(m^.IP) then // e.g. 192.168.1.2 against '192.168.1.0/24'
-        if (fnd = nil) or
-           (NETHW_ORDER[m^.Kind] < NETHW_ORDER[fnd^.Kind]) then
-          fnd := m; // pickup the interface with the best hardware (paranoid)
-      inc(m);
-      dec(n);
-    until n = 0
-  else
-    // search for interface Name or MAC Address
-    repeat
-      if IdemPropNameU(m^.Name,    InterfaceNameAddressOrIP) or
-         IdemPropNameU(m^.Address, InterfaceNameAddressOrIP) then
-      begin
-        fnd := m;
-        break;
-      end;
-      inc(m);
-      dec(n);
-    until n = 0;
-  if fnd = nil then
-    exit;
-  Mac := fnd^;
-  result := true;
 end;
 
 
@@ -5341,7 +5183,7 @@ end;
 function THttpServerSocket.GetRequest(withBody: boolean;
   headerMaxTix: Int64): THttpServerSocketGetRequestResult;
 var
-  P: PUtf8Char;
+  P, B: PUtf8Char;
   status, tix32: cardinal;
   noheaderfilter, http10: boolean;
 begin
@@ -5366,12 +5208,21 @@ begin
     P := pointer(Http.CommandResp);
     if P = nil then
       exit; // connection is likely to be broken or closed
-    GetNextItem(P, ' ', Http.CommandMethod); // 'GET'
+    GetNextItem(P, ' ', Http.CommandMethod);           // 'GET'
+    if (PCardinal(P)^ = HTTP__32) and                  // 'http'
+       (PCardinal(P + 4)^ and $ffffff = HTTP__24) then // '://'
+    begin
+      // absolute-URI from https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
+      B := P;
+      P := PosChar(P + 7, '/'); // use fast SSE2 asm on x86_64
+      if P = nil then
+        P := B; // paranoid
+    end;
     GetNextItem(P, ' ', Http.CommandUri);    // '/path'
     result := grRejected;
     if (P = nil) or
-       (PCardinal(P)^ <>
-         ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24) then
+       (PCardinal(P)^ <> HTTP_32) or
+       (Http.CommandMethod = '') then
       exit;
     http10 := P[7] = '0';
     fKeepAliveClient := ((fServer = nil) or
@@ -5442,7 +5293,7 @@ begin
         end
         else
         begin
-          tix32 := mormot.core.os.GetTickCount64 shr 12;
+          tix32 := GetTickSec shr 2;
           if fAuthTix32 = tix32 then
           begin
             // 403 HTTP error if not authorized (and close connection)
@@ -6329,7 +6180,7 @@ begin
 end;
 
 const
-  _LATE: array[boolean] of string[7] = ('', 'late ');
+  _LATE: array[boolean] of TShort7 = ('', 'late ');
 
 procedure THttpPeerCacheThread.OnFrameReceived(len: integer;
   var remote: TNetAddr);
@@ -7169,7 +7020,8 @@ begin
     include(err, eShutdown); // avoid GPF at shutdown
   if length(aBearerToken) < PEER_CACHE_BEARERLEN then // base64uri length
     include(err, eBearer);
-  if not (IsGet(aMethod) or
+  if (aMethod = '') or
+     not (IsGet(aMethod) or
           IsHead(aMethod)) then
     include(err, eNoGetHead);
   if aUrl = '' then // URI is just ignored but something should be specified
@@ -7870,29 +7722,41 @@ begin
 end;
 
 procedure MsgToShort(const msg: THttpPeerCacheMessage; var result: ShortString);
-var
-  algoext: PUtf8Char;
-  algohex: string[SizeOf(msg.Hash.Bin.b) * 2];
 begin
   result[0] := #0;
   if msg.Kind > high(msg.Kind) then
     exit; // clearly invalid message
-  algoext := nil;
-  algohex[0] := #0;
-  if not IsZero(msg.Hash.Bin.b) then // append e.g. 'xxxHexaHashxxx.sha256'
+  result := ToText(msg.Kind)^;
+  AppendShortTwoChars(ord(' ') + ord('#') shl 8, @result);
+  AppendShortIntHex(msg.Seq, result);
+  AppendShortChar(' ', @result);
+  AppendShortChar(OS_INITIAL[msg.Os.os], @result);
+  AppendShortChar(' ', @result);
+  AppendShort(OsvToShort(msg.Os)^, result);
+  AppendOsBuild(msg.Os, @result, ' ');
+  AppendShortChar(' ', @result);
+  AppendShortChar(MAK_TXT[msg.Hardware], @result);
+  AppendShortChar(' ', @result);
+  AppendShortIp4(@msg.IP4, @result, ' ');
+  AppendShort('to ', result);
+  AppendShortIp4(@msg.DestIP4, @result, ' ');
+  AppendShortIp4(@msg.MaskIP4, @result, ' ');
+  AppendShortIp4(@msg.BroadcastIP4, @result, ' ');
+  AppendShortCardinal(msg.Speed, result);
+  AppendShort('Mb/s ', result);
+  AppendShort(UnixTimeToFileShort(QWord(msg.Timestamp) + UNIXTIME_MINIMAL), result);
+  if (msg.Hash.Algo <= high(msg.Hash.Algo)) and
+     not IsZero(@msg.Hash.Bin.b, HASH_SIZE[msg.Hash.Algo]) then
   begin
-    BinToHexLower(@msg.Hash.Bin, @algohex[1], HASH_SIZE[msg.Hash.Algo]);
-    algohex[0] := AnsiChar(HASH_SIZE[msg.Hash.Algo] * 2);
-    algoext := pointer(HASH_EXT[msg.Hash.Algo]);
+    AppendShortChar(' ', @result); // append e.g. ' xxxHexaHashxxx.sha256'
+    AppendShortHex(@msg.Hash.Bin, HASH_SIZE[msg.Hash.Algo], result);
+    AppendShortAnsi7String(HASH_EXT[msg.Hash.Algo], result);
   end; // IsZero(Hash.Bin) = no hash known = no hash computed nor verified
-  with msg do
-    FormatShort('% #% % %% % % to % % % %Mb/s % %% siz=% con=% ',
-      [ToText(Kind)^, CardinalToHexShort(Seq), OS_INITIAL[Os.os],
-       OsvToShort(Os)^, WinOsBuild(Os, ' '), MAK_TXT[Hardware],
-       IP4ToShort(@IP4), IP4ToShort(@DestIP4),
-       IP4ToShort(@MaskIP4), IP4ToShort(@BroadcastIP4), Speed,
-       UnixTimeToFileShort(QWord(Timestamp) + UNIXTIME_MINIMAL),
-       algohex, algoext, Size, Connections], result);
+  AppendShort(' siz=', result);
+  AppendShortCardinal(msg.Size, result);
+  AppendShort(' con=', result);
+  AppendShortCardinal(msg.Connections, result);
+  AppendShortCharSafe(' ', result);
   AppendShortUuid(msg.Uuid, result);
 end;
 
@@ -8339,7 +8203,7 @@ var // lots of local variable so that this method is thread-safe
         '<h1>Server Error %: %</h1><p>', [StatusCode, outstat], outmsg);
       if E <> nil then
         Append(outmsg, [E, ' Exception raised:<br>']);
-      Append(outmsg, HtmlEscape(ErrorMsg), '</p><p><small>' + XPOWEREDVALUE);
+      Append(outmsg, HtmlEscapeShort(ErrorMsg), '</p><p><small>' + XPOWEREDVALUE);
       resp^.SetContent(datachunkmem, outmsg, HTML_CONTENT_TYPE);
       HttpSendResponse(0);
     except

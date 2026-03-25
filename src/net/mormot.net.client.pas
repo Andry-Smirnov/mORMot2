@@ -776,7 +776,12 @@ type
     /// setup web authentication using Kerberos via SSPI/GSSAPI for this instance
     // - will store the user/paswword credentials, and set OnAuthorizeSspi callback
     // - if Password is '', will search for an existing Kerberos token on UserName
+    // - set UserName='' and Password='FILE:/path/to/my.keytab' to use a keytab
     // - an in-memory token will be used to authenticate the connection
+    // - KerberosSpn could be only a 'MYDOMAIN.TLD' domain name - this method
+    // will compute the full 'HTTP/server@MYDOMAIN.TLD' SPN
+    // - if KerberosSpn is not set, 'HTTP/server@MYDOMAIN.TLD' will be used,
+    // trying to extract MYDOMAIN.TLD either from UserName of Password's keytab
     // - WARNING: on MacOS, the default system GSSAPI stack seems to create a
     // session-wide token (like kinit), not a transient token in memory - you
     // may prefer to load a proper libgssapi_krb5.dylib instead
@@ -799,7 +804,8 @@ type
     /// the Kerberos Service Principal Name, as registered in domain
     // - e.g. 'mymormotservice/myserver.mydomain.tld@MYDOMAIN.TLD'
     // - used by class procedure OnAuthorizeSspi/OnProxyAuthorizeSspi callbacks
-    // - on Linux/GSSAPI either this property or ClientForceSpn() is mandatory
+    // - on Linux/GSSAPI either this property or ClientForceSpn() is mandatory,
+    // unless you use a user@TLD or a keytab and the domain is extracted from it
     property AuthorizeSspiSpn: RawUtf8
       read fAuthorizeSspiSpn write fAuthorizeSspiSpn;
     {$endif DOMAINRESTAUTH}
@@ -941,6 +947,10 @@ var
 
   /// disable proxy for any IPv4 '1.2.3.4' address in GetSystemProxyUri() function
   DefaultHttpClientSocketProxyNotForIp4: boolean;
+
+  /// global debug hook for all THttpClientSocket instances - assign TSynLog.DoLog
+  // - see also the more global OnCrtSocketLog hook in mormot.net.sock
+  OnHttpClientSocketLog: TSynLogProc;
 
 
 /// ask the Operating System to return the Tunnel/Proxy settings for a given URI
@@ -2261,10 +2271,11 @@ begin
   // header to enable advanced behavior e.g. about JSON transmission
   vers[0] := #0;
   if Executable.Version.Major <> 0 then
-    FormatShort16('/%', [Executable.Version.Major], vers);
+    FormatShort('/%', [Executable.Version.Major], vers);
   FormatUtf8('Mozilla/5.0 (' + OS_TEXT + ' ' + CPU_ARCH_TEXT + '; mORMot) %/' +
     SYNOPSE_FRAMEWORK_BRANCH + ' %%',
     [name, Executable.ProgramName, vers], result);
+  // 'Mozilla/5.0 (Linux x64; mORMot) HCS/4 Tests/1' for THttpClientSocket 2.4
 end;
 
 
@@ -2771,7 +2782,7 @@ begin
     max := fCount;
     void := -1;
     p := pointer(fItems);
-    for ndx := 0 to PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1) do
+    for ndx := 0 to PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1) do // = high()
     begin
       if p^.LastAccess = 0 then
       begin
@@ -2835,7 +2846,7 @@ begin
   try
     p := pointer(fItems);
     if p <> nil then
-      for ndx := 0 to PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1) do
+      for ndx := 0 to PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1) do // = high
         if CacheEqual(@h, @p^.Hash) then
         begin
           FillZero(THash256(p^));
@@ -2937,28 +2948,15 @@ begin
   result := GetSetName(TypeInfo(TWGetAlternateState), st, trimmed);
 end;
 
-var
-  _PROXYSETFROMENV: boolean; // retrieve environment variables only once
-  _PROXYSAFE: TLightLock;
-  _PROXY: array[{https:}boolean] of RawUtf8;
-
 function GetProxyForUri(const uri: RawUtf8; fromSystem: boolean): RawUtf8;
 {$ifdef USEWININET}
 var
   pi: TProxyInfo;
 {$endif USEWININET}
 begin
-  if not _PROXYSETFROMENV then
-  begin
-    _PROXYSAFE.Lock;
-    StringToUtf8(GetEnvironmentVariable('HTTP_PROXY'),  _PROXY[false]);
-    StringToUtf8(GetEnvironmentVariable('HTTPS_PROXY'), _PROXY[true]);
-    if _PROXY[true] = '' then
-      _PROXY[true] := _PROXY[false];
-    _PROXYSETFROMENV := true;
-    _PROXYSAFE.UnLock;
-  end;
-  result := _PROXY[IdemPChar(pointer(uri), 'HTTPS://')];
+  if not IdemPChar(pointer(uri), 'HTTPS://') or
+     not GetSystemEnv('HTTPS_PROXY', result{%H-}) then // from cache
+    result := GetSystemEnv('HTTP_PROXY');
   {$ifdef USEWININET}
   if (result = '') and
      fromsystem then
@@ -3018,6 +3016,9 @@ constructor THttpClientSocket.Create(aTimeOut: integer);
 begin
   if aTimeOut = 0 then
     aTimeOut := HTTP_DEFAULT_RECEIVETIMEOUT;
+  if Assigned(OnHttpClientSocketLog) and
+     not Assigned(OnLog) then
+    OnLog := OnHttpClientSocketLog;
   inherited Create(aTimeOut);
   if fExtendedOptions.UserAgent = '' then
     fExtendedOptions.UserAgent := DefaultUserAgent(self);
@@ -3367,24 +3368,36 @@ end;
 procedure THttpClientSocket.RequestSendHeader(const url, method: RawUtf8);
 var
   secret: SpiUtf8;
+  noport: boolean;
 begin
   if not SockIsDefined then
     exit;
   if SockIn = nil then
     CreateSockIn; // use SockIn by default if not already initialized: 2x faster
+  // append command line
+  noport := (fPort = '') or // = '' for fProxyHttp on port 80
+            (fPort = DEFAULT_PORT[ServerTls]);
   fSndBufLen := 0;
+  SockSendRaw([method, ' ']);
+  if fProxyHttp in fFlags then
+  begin
+    // absolute-URI 'GET http://www.example.org/pub/TheProject.html HTTP/1.1'
+    // see https://datatracker.ietf.org/doc/html/rfc7230#section-5.3.2
+    SockSendRaw(['http://', fServer]);
+    if not noport then
+      SockSendRaw([':', fPort]);
+  end;
   if (url = '') or
      (url[1] <> '/') then
-    SockSendLine([method, ' /', url, ' HTTP/1.1']) // should always start with /
-  else
-    SockSendLine([method, ' ', url, ' HTTP/1.1']);
+    EnsureSockSend(1)^ := '/'; // should always start with /
+  SockSendLine([url, ' HTTP/1.1']);
+  // append main headers
   {$ifdef OSPOSIX}
   if SocketLayer = nlUnix then
     SockSend('Host: unix') // not part of the HTTP standard anyway
   else
   {$endif OSPOSIX}
-  if (fPort = '') or // = '' for fProxyHttp on port 80
-     (fPort = DEFAULT_PORT[ServerTls]) then
+  if noport then
     SockSendLine(['Host: ', fServer])
   else
     SockSendLine(['Host: ', fServer, ':', fPort]);
@@ -4017,7 +4030,7 @@ begin
     repeat
       FindNameValue(Sender.Http.Headers, pointer(InHeaderUp), RawUtf8(datain));
       datain := Base64ToBin(TrimU(datain));
-      if Sender.fExtendedOptions.Auth.UserName <> '' then // from AuthorizeSspiUser()
+      if Sender.fExtendedOptions.Auth.Password <> '' then // from AuthorizeSspiUser()
         ClientSspiAuthWithPassword(sc, datain, Sender.fExtendedOptions.Auth.UserName,
           Sender.fExtendedOptions.Auth.Password, Sender.AuthorizeSspiSpn, dataout)
       else                               // use current logged user
@@ -4057,11 +4070,23 @@ begin
       [self, SECPKGNAMEAPI]);
   fOnAuthorize := nil;
   fExtendedOptions.AuthorizeSspiUser(UserName, Password);
-  if UserName = '' then
-    exit;
   fOnAuthorize := OnAuthorizeSspi;
+  // prepare a Service Principal Name (SPN) - maybe partial
   if KerberosSpn <> '' then
-    fAuthorizeSspiSpn := KerberosSpn;
+    if (PosExChar('@', KerberosSpn) <> 0) or
+       (PosExChar('/', KerberosSpn) <> 0) then
+      // full 'HTTP/server@TLD' form - 'HTTP/server' is enough on Windows/SSPI
+      fAuthorizeSspiSpn := KerberosSpn
+    else
+      // here KerberosSpn is likely to be only the TLD
+      Join(['HTTP/', LowerCase(fServer), '@', UpperCase(KerberosSpn)], fAuthorizeSspiSpn)
+  else
+  begin
+    fAuthorizeSspiSpn := ClientForcedSpn;
+    if fAuthorizeSspiSpn = '' then
+      // set at least service name - @TLD extracted later from UserName or keytab
+      Join(['HTTP/', LowerCase(fServer)], fAuthorizeSspiSpn);
+  end;
 end;
 
 class function THttpClientSocket.OnProxyAuthorizeSspi(Sender: THttpClientSocket;
@@ -4161,7 +4186,8 @@ begin
   Auth.UserName := UserName;
   Auth.Password := Password;
   Auth.Token := '';
-  if UserName = '' then
+  if (UserName = '') and
+     not (Scheme in [wraNegotiate, wraNegotiateChannelBinding]) then
     Scheme := wraNone;
   Auth.Scheme := Scheme;
 end;
@@ -4282,6 +4308,7 @@ begin
     'te', TLS.Enabled,
     'ti', TLS.IgnoreCertificateErrors,
     'ta', TLS.AllowDeprecatedTls,
+    'td', TLS.DisableTls13,
     'tu', TLS.ClientAllowUnsafeRenegotation,
     'cf', TLS.CertificateFile,
     'ca', TLS.CACertificatesFile,
@@ -4299,6 +4326,7 @@ begin
   V.GetAsBoolean('te', TLS.Enabled);
   V.GetAsBoolean('ti', TLS.IgnoreCertificateErrors);
   V.GetAsBoolean('ta', TLS.AllowDeprecatedTls);
+  V.GetAsBoolean('td', TLS.DisableTls13);
   V.GetAsBoolean('tu', TLS.ClientAllowUnsafeRenegotation);
   V.GetAsRawUtf8('cf', TLS.CertificateFile);
   V.GetAsRawUtf8('ca', TLS.CACertificatesFile);
@@ -4867,7 +4895,7 @@ begin
       if not WinHttpApi.QueryHeaders(fRequest, Info, nil, tmp.buf, dwSize, dwIndex) then
         exit;
     end;
-    Win32PWideCharToUtf8(tmp.buf, dwSize shr 1, result);
+    Unicode_ToUtf8(tmp.buf, dwSize shr 1, result);
   finally
     tmp.Done;
   end;
@@ -5058,7 +5086,7 @@ begin
       if not HttpQueryInfoW(fRequest, Info, tmp.buf, dwSize, dwIndex) then
         exit;
     end;
-    Win32PWideCharToUtf8(tmp.buf, dwSize shr 1, result);
+    Unicode_ToUtf8(tmp.buf, dwSize shr 1, result);
   finally
     tmp.Done;
   end;

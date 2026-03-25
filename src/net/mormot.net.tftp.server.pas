@@ -27,6 +27,7 @@ uses
   mormot.core.os,
   mormot.core.unicode,
   mormot.core.text,
+  mormot.core.datetime,
   mormot.core.data,
   mormot.core.threads,
   mormot.core.log,
@@ -53,7 +54,9 @@ type
   // - ttoAllowSubFolders will allow RRW/WRQ to access nested files in
   // TTftpServerThread.FileFolder sub-directories
   // - ttoLowLevelLog will log each incoming/outgoing TFTP/UDP frames
-  // - ttoDropPriviledges on POSIX would impersonate the process as 'nobody'
+  // - ttoDropPriviledges on POSIX would impersonate the process as 'nobody' -
+  // but note that it is incompatible with the AutoRebind := true feature with
+  // any port < 1024 which requires root priviledged for socket binding
   // - ttoChangeRoot on POSIX would make the FileFolder the root folder
   // - ttoCaseInsensitiveFileName on POSIX would make file names case-insensitive
   // as they are on Windows (using an in-memory cache, refreshed every minute)
@@ -361,7 +364,10 @@ begin
   begin
     ok := DropPriviledges;
     if not ok then
-      exclude(fOptions, ttoDropPriviledges);
+      exclude(fOptions, ttoDropPriviledges)
+    else if fAutoRebind and
+            (GetInteger(pointer(BindPort)) < 1024) then
+      fAutoRebind := false; // only root can bind low ports
     LogClass.Add.Log(LOG_INFOWARNING[not ok],
       'Create: DropPriviledges(nobody)=%', [ok], self);
   end;
@@ -465,35 +471,40 @@ end;
 
 function TTftpServerThread.GetFileName(const RequestedFileName: RawUtf8): TFileName;
 var
-  fn: TFileName;
+  u: RawUtf8;
   {$ifdef OSPOSIX}
   readms: integer;
   {$endif OSPOSIX}
 begin
   result := '';
-  fn := NormalizeFileName(Utf8ToString(RequestedFileName));
-  if fn = '' then
-    exit;
-  while (fn[1] = '/') or
-        (fn[1] = '\') do
-    delete(fn, 1, 1); // trim any leading root (we start from fFileFolder anyway)
-  if SafeFileName(fn) and
+  u := RequestedFileName;
+  NormalizeFileNameU(u);
+  repeat
+    if u = '' then
+      exit;
+    if not (u[1] in ['/', '\']) then
+      break;
+    delete(u, 1, 1); // trim any leading path delimiter
+  until false;
+  if SafeFileNameU(u) and
      ((ttoAllowSubFolders in fOptions) or
-      (Pos(PathDelim, result) = 0)) then
+      (PosExChar(PathDelim, u) = 0)) then
   begin
     {$ifdef OSPOSIX}
     if Assigned(fPosixFileNames) then
     begin
-      fn := fPosixFileNames.Find(fn, @readms);
+      u := fPosixFileNames.Find(u, @readms);
       if readms <> 0 then
         // e.g. 4392 filenames from /home/ab/dev/lib/ in 7.20ms
         fLog.Log(sllDebug, 'GetFileName: cached % filenames from % in %',
           [fPosixFileNames.Count, fFileFolder, MicroSecToString(readms)], self);
-      if fn = '' then
+      if u = '' then
         exit; // file does not exist
     end;
+    result := fFileFolder + u;
+    {$else}
+    result := fFileFolder + Utf8ToString(u);
     {$endif OSPOSIX}
-    result := fFileFolder + fn;
   end;
 end;
 

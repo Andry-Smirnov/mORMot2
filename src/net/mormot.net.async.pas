@@ -1409,7 +1409,7 @@ type
     /// create a THttpProxyUrlSettings definition for using a callback
     function AddEvent(const request: TOnHttpProxyServerRequest;
       const uri: RawUtf8 = ''): THttpProxyUrlSettings;
-    /// load URI definitions from local *.json files
+    /// load URI definitions from local *.json files (also supports JSON5 or HJson)
     // - returns the number of added THttpProxyUrl instances into Url[]
     function AddFromFiles(const settingsfolder: TFileName;
       const mask: TFileName = '*.json'): integer;
@@ -4021,7 +4021,7 @@ begin
     // BIND + LISTEN (TLS is done later)
     fServer := TCrtSocket.Create(5000);
     if fLogClass <> nil  then
-      fServer.OnLog := fLogClass.DoLog;
+      fServer.OnLog := fLogClass.DoLog; // bind + TLS process
     fServer.BindPort(fSockPort, nlTcp, acoReusePort in fOptions);
     if not fServer.SockIsDefined then // paranoid check
       EAsyncConnections.RaiseUtf8('%.Execute: bind % failed', [self, fSockPort]);
@@ -5402,7 +5402,7 @@ begin
       fSock := fAsync.fServer;
       fAsync.DoLog(sllTrace, 'Execute: main loop', [], self);
       IdleEverySecond; // initialize idle process (e.g. fHttpDateNowUtc)
-      tix := mormot.core.os.GetTickCount64 shr 16; // delay=500 after 1 min idle
+      tix := GetTickSec shr 6; // delay=500 after 64s idle
       lasttix := tix;
       mscallbacks := 0;
       if fCallbackSendDelay <> nil then
@@ -5452,7 +5452,7 @@ begin
             fAsync.fSockets.ProcessWrite(notif, 0);
           if mscallbacks <> 0 then
           begin
-            tix := mormot.core.os.GetTickCount64 shr 16;
+            tix := GetTickSec shr 6;
             lasttix := tix;
           end;
         {$endif USE_WINIOCP}
@@ -5687,14 +5687,9 @@ type
   end;
 
 const
-  TOBEPURGEDPROXY: array[0..6] of PAnsiChar = (
-    'CONTENT-LENGTH:',
-    'CONTENT-RANGE:',
-    'CONTENT-ENCODING:',
-    'CONNECTION:',
-    'KEEP-ALIVE:',
-    'DATE:',
-    nil);
+  TOBEPURGEDPROXY: PUtf8Char =
+    'CONTENT-LENGTH:|CONTENT-RANGE:|CONTENT-ENCODING:|CONNECTION:|' +
+    'KEEP-ALIVE:|DATE:|';
 
 function TStartProxyRequest.AskRemoteServer(const path: TUriMatchName): cardinal;
 var
@@ -5728,7 +5723,7 @@ begin // this method is protected by proxy.fSafe.Lock
       exit;
     end;
   // check the header against the local cached file (headlastmod may be 0)
-  ctxt.OutCustomHeaders := PurgeHeaders(remotehead, false, @TOBEPURGEDPROXY);
+  ctxt.OutCustomHeaders := PurgeHeaders(remotehead, false, TOBEPURGEDPROXY);
   if (lastmod <> 0) and
      (size >= 0) then // check the local file
     if ((headsiz < 0) or
@@ -6335,7 +6330,7 @@ begin
     if ByteScanIndex(pointer(Uri.Path.Text), Uri.Path.Len, ord('/')) <> 0 then
       exit;
   req.remote := req.proxy.fRemoteUri;
-  AppendBufferToUtf8(Uri.Path.Text, StrLen(Uri.Path.Text), req.remote.Address);
+  Append(req.remote.Address, Uri.Path.Text, Uri.Path.Len);
   // check the local file (named from hashed URI)
   req.name := HttpRequestHashBase32(req.remote, nil, 20, @req.hash);
   if req.name = '' then

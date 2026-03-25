@@ -39,6 +39,7 @@ uses
   mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
+  mormot.core.fmt,
   mormot.core.threads,
   mormot.core.perf,
   mormot.crypt.core,
@@ -1920,7 +1921,7 @@ var
   ndx: integer;
   new: TInterfacedObjectMultiDest;
 const
-  NAM: array[boolean] of string[11] = ('Unsubscribe', 'Subscribe');
+  NAM: array[boolean] of TShort15 = ('Unsubscribe', 'Subscribe');
 begin
   if (self = nil) or
      (fFakeCallback = nil) then
@@ -2415,8 +2416,8 @@ class function TRest.CreateFromFile(aModel: TOrmModel;
   const aJsonFile: TFileName; aServerHandleAuthentication: boolean;
   aKey: cardinal): TRest;
 begin
-  result := CreateFromJson(
-    aModel, RawUtf8FromFile(aJsonFile), aServerHandleAuthentication, aKey);
+  result := CreateFromJson(aModel, JsonNormalizeFromFile(aJsonFile),
+    aServerHandleAuthentication, aKey);
 end;
 
 procedure TRest.ServicesRelease(Caller: TServiceContainer);
@@ -4019,7 +4020,7 @@ var
 begin
   if self = nil then
     exit;
-  c := TrimU(aOutSetCookie);
+  TrimU(aOutSetCookie, c);
   if not IsValidUtf8WithoutControlChars(c) then
     ERestException.RaiseUtf8('Unsafe %.SetOutSetCookie', [self]);
   if PosExChar('=', c) < 2 then
@@ -4247,10 +4248,12 @@ begin
         AddDirect('[');
         repeat
           AddJsonEscapeVarRec(v);
+          dec(n);
+          if n = 0 then
+            break;
           AddComma;
           inc(v);
-          dec(n);
-        until n = 0;
+        until false;
         AddDirect(']');
       end;
       AddDirect('}');

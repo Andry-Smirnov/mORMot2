@@ -29,7 +29,7 @@ uses
   mormot.core.os,
   mormot.core.unicode,
   mormot.core.text,
-  mormot.core.data, // already included in mormot.core.json
+  mormot.core.data, // already included in mormot.core.json anyway
   mormot.core.buffers,
   mormot.core.rtti,
   mormot.core.json;
@@ -2105,8 +2105,9 @@ type
     /// sort the document object values by value using a comparison function
     // - work for both dvObject and dvArray documents
     // - will sort by UTF-8 text (VariantCompare) if no custom aCompare is supplied
+    // - for dvObject, any SortFallbackName() would be used if SortCompare()=0
     procedure SortByValue(SortCompare: TVariantCompare = nil;
-      SortCompareReversed: boolean = false);
+      SortCompareReversed: boolean = false; SortFallbackName: TUtf8Compare = nil);
     /// sort the document object values by value using a comparison method
     // - work for both dvObject and dvArray documents
     // - you should supply a TVariantComparer callback method
@@ -3015,9 +3016,13 @@ function JsonToVariantInPlace(var Value: Variant; Json: PUtf8Char;
 procedure MultiPartToDocVariant(const MultiPart: TMultiPartDynArray;
   var Doc: TDocVariantData; Options: PDocVariantOptions = nil);
 
-/// parse a "key<value" or "key<" expression for SortMatch() comparison
-function ParseSortMatch(Expression: PUtf8Char; out Key: RawUtf8;
+/// parse a "key<value" or "key<" expression for EvaluateVariantExpression()
+function ParseVariantExpression(Expression: PUtf8Char; out Key: RawUtf8;
   out Match: TCompareOperator; Value: PVariant): boolean;
+
+/// evaluate if a ParseVariantExpression() operator match two variant values
+function EvaluateVariantExpression(Comp: TVariantCompare;
+  const A, B: variant; Match: TCompareOperator): boolean;
 
 
 { ************** Variant Binary Serialization }
@@ -3141,7 +3146,7 @@ type
 
   /// low-level Enumerator as returned by IDocList.Objects
   // - warning: weak reference to the main IDocList/IDocDict, so you need to
-  // explicitly call IDocDict.Copy to use any returned value outside of the loop
+  // explicitly call Current.Copy to use any returned value outside of the loop
   TDocObjectEnumerator = record
   private
     CurrDict: IDocDict; // a single instance reused during whole iteration
@@ -4368,7 +4373,7 @@ begin
 end;
 
 const
-  _VARDATATEXT: array[0.. varWord64 + 5] of string[10] = (
+  _VARDATATEXT: array[0.. varWord64 + 5] of TShort15 = (
     'Empty', 'Null', 'SmallInt', 'Integer', 'Single', 'Double', 'Currency',
     'Date', 'OleStr', 'Dispatch', 'Error', 'Boolean', 'Variant', 'Unknown',
     'Decimal', '15', 'ShortInt', 'Byte', 'Word', 'LongWord', 'Int64', 'QWord',
@@ -4458,11 +4463,11 @@ const
     SortDynArrayInt64,           // 12
     SortDynArrayQWord,           // 13
     SortDynArrayWordBoolean,     // 14
-    {$ifdef CPUINTEL}
-    SortDynArrayAnsiString,      // 15
+    {$ifdef ASMINTEL}
+    SortDynArrayAnsiString,      // 15 - optimized asm
     {$else}
-    SortDynArrayRawByteString,
-    {$endif CPUINTEL}
+    SortDynArrayRawByteString,   // 15 - pure pascal vesion
+    {$endif ASMINTEL}
     SortDynArrayAnsiStringI,     // 16
     SortDynArrayUnicodeString,   // 17 about hashing: UTF-16 equal = UTF-8 equal
     SortDynArrayUnicodeStringI); // 18
@@ -5403,7 +5408,7 @@ begin
         inc(nam);
         inc(val);
       until false;
-    W.CancelLastComma('}');
+    W.ReplaceLastComma('}');
   end
   else if dv^.IsArray then
   begin
@@ -6939,7 +6944,7 @@ begin
                 info.Json := @NULCHAR
               else
                 break; // invalid input
-            if NameLen <> 0 then // we just ignore void "":xxx field names
+            if NameLen <> 0 then // TDocVariant doesn't support void "" names
             begin
               if intnames <> nil then
                 intnames.Unique(VName[n], Name, NameLen)
@@ -7007,8 +7012,8 @@ end;
 
 function TDocVariantData.InitJsonFromFile(const FileName: TFileName;
   aOptions: TDocVariantOptions): boolean;
-begin
-  result := InitJsonInPlace(pointer(RawUtf8FromFile(FileName)), aOptions) <> nil;
+begin // detect BOM and JSON5/HJson
+  result := InitJsonInPlace(pointer(JsonNormalizeFromFile(FileName)), aOptions) <> nil;
 end;
 
 procedure TDocVariantData.InitFromPairs(aPairs: PUtf8Char;
@@ -7999,6 +8004,8 @@ type
     valueCompare: TVariantCompare;
     valueComparer: TVariantComparer;
     reversed: PtrInt;
+    function CompValueName(I, J: PtrInt; P: PVariant): PtrInt;
+      {$ifdef HASINLINE} inline; {$endif}
     procedure SortByName(L, R: PtrInt);
     procedure SortByValue(L, R: PtrInt);
   end;
@@ -8049,6 +8056,13 @@ begin
     until L >= R;
 end;
 
+function TQuickSortDocVariant.CompValueName(I, J: PtrInt; P: PVariant): PtrInt;
+begin
+  result := valueCompare(values[I], P^);
+  if result = 0 then
+    result := nameCompare(names[I], names[J]);
+end;
+
 procedure TQuickSortDocVariant.SortByValue(L, R: PtrInt);
 var
   I, J, P: PtrInt;
@@ -8061,15 +8075,22 @@ begin
       P := (L + R) shr 1;
       repeat
         pivot := @values[P];
-        if Assigned(valueCompare) then
-        begin // called from SortByValue
+        if Assigned(nameCompare) then
+        begin // called from SortByValue with a custom SortFallbackName function
+          while CompValueName(I, P, pivot) * reversed < 0 do
+            inc(I);
+          while CompValueName(J, P, pivot) * reversed > 0 do
+            dec(J);
+        end
+        else if Assigned(valueCompare) then
+        begin // called from SortByValue with SortFallbackName = nil
           while valueCompare(values[I], pivot^) * reversed < 0 do
             inc(I);
           while valueCompare(values[J], pivot^) * reversed > 0 do
             dec(J);
         end
         else
-        begin // called from SortByRow
+        begin // called from SortByRow with valueComparer as function of object
           while valueComparer(values[I], pivot^) * reversed < 0 do
             inc(I);
           while valueComparer(values[J], pivot^) * reversed > 0 do
@@ -8140,16 +8161,18 @@ begin
 end;
 
 procedure TDocVariantData.SortByValue(SortCompare: TVariantCompare;
-  SortCompareReversed: boolean);
+  SortCompareReversed: boolean; SortFallbackName: TUtf8Compare);
 var
   qs: TQuickSortDocVariant;
 begin
   if VCount <= 1 then
     exit;
-  if Assigned(SortCompare) then
-    qs.valueCompare := SortCompare
-  else
-    qs.valueCompare := @VariantCompare;
+  if not IsObject then
+    SortFallbackName := nil;
+  qs.nameCompare := SortFallbackName;
+  if not Assigned(SortCompare) then
+    SortCompare := @VariantCompare;
+  qs.valueCompare := SortCompare;
   qs.valueComparer := nil;
   qs.names := pointer(VName);
   qs.values := pointer(VValue);
@@ -8168,6 +8191,7 @@ begin
   if (VCount <= 1) or
      (not Assigned(SortComparer)) then
     exit;
+  qs.nameCompare := nil;
   qs.valueCompare := nil;
   qs.valueComparer := SortComparer;
   qs.names := pointer(VName);
@@ -8463,7 +8487,7 @@ begin
     else
       dv^.GetObjectProp(aKey, obj, @prev);
     if (obj <> nil) and
-       SortMatch(aCompare({%H-}obj^, aValue), aMatch) then
+       EvaluateVariantExpression(aCompare, {%H-}obj^, aValue, aMatch) then
     begin
       if result.VCount = 0 then
         SetLength(result.VValue, n); // prepare for maximum capacity
@@ -8485,7 +8509,7 @@ var
   v: variant;
   m: TCompareOperator;
 begin
-  ParseSortMatch(pointer(aExpression), k, m, @v);
+  ParseVariantExpression(pointer(aExpression), k, m, @v);
   ReduceFilter(k, v, m, aCompare, aLimit, aPathDelim, result);
 end;
 
@@ -8515,7 +8539,7 @@ var
   k: RawUtf8;
   m: TCompareOperator;
 begin
-  ParseSortMatch(pointer(aExpression), k, m, nil);
+  ParseVariantExpression(pointer(aExpression), k, m, nil);
   ReduceFilter(k, aValue, m, aCompare, aLimit, aPathDelim, result);
 end;
 
@@ -9474,7 +9498,7 @@ begin
       inc(nam);
       inc(val);
     until false;
-    wr.CancelLastComma('}');
+    wr.ReplaceLastComma('}');
     wr.SetText(result);
   finally
     wr.Free;
@@ -10277,17 +10301,17 @@ begin
     Json := GotoNextNotSpace(Json);
   if (Json = nil) or
      ((PInteger(Json)^ = NULL_LOW) and
-      (jcEndOfJsonValueField in JSON_CHARS[Json[4]])) then
+      (jcEndOfJsonValueField in JSON_CHARS[Json[4]])) then    // #0#10#13 ,}]
     TSynVarData(Value).VType := varNull
   else if (PInteger(Json)^ = FALSE_LOW) and
           (Json[4] = 'e') and
-          (jcEndOfJsonValueField in JSON_CHARS[Json[5]]) then
+          (jcEndOfJsonValueField in JSON_CHARS[Json[5]]) then // #0#10#13 ,}]
   begin
     TSynVarData(Value).VType := varBoolean;
     Value.VInteger := ord(false);
   end
   else if (PInteger(Json)^ = TRUE_LOW) and
-          (jcEndOfJsonValueField in JSON_CHARS[Json[4]]) then
+          (jcEndOfJsonValueField in JSON_CHARS[Json[4]]) then // #0#10#13 ,}]
   begin
     TSynVarData(Value).VType := varBoolean;
     Value.VInteger := ord(true);
@@ -10303,21 +10327,6 @@ begin
     end;
   end;
   result := true;
-end;
-
-function GotoEndOfJsonNumber(P: PUtf8Char; var PEndNum: PUtf8Char): PUtf8Char;
-  {$ifdef HASINLINE} inline; {$endif} // inlined for better code generation
-var
-  tab: PJsonCharSet;
-begin
-  result := P;
-  tab := @JSON_CHARS;
-  repeat
-    inc(result);
-  until not (jcDigitFloatChar in tab[result^]);
-  PEndNum := result;
-  while not (jcEndOfJsonFieldNotName in tab[result^]) do
-    inc(result); // #0, ',', ']', '}'
 end;
 
 {$ifndef PUREMORMOT2}
@@ -10375,8 +10384,8 @@ begin
           // it may be a double value, but we didn't allow them -> store as text
           J := Info.Value;
           repeat
-            inc(J); // #0, ',', ']', '}'
-          until not (jcDigitFloatChar in JSON_CHARS[J^]);
+            inc(J);
+          until not (jcDigitFloatChar in JSON_CHARS[J^]); // -+.eE0..9
           Info.ValueLen := J - Info.Value;
           J := GotoNextNotSpace(J);
           Info.EndOfObject := J^;
@@ -10422,7 +10431,7 @@ astext:     V.VType := varString;
       end;
     jtNullFirstChar:
       if (PInteger(J)^ = NULL_LOW) and
-         (jcEndOfJsonValueField in JSON_CHARS[J[4]]) then
+         (jcEndOfJsonValueField in JSON_CHARS[J[4]]) then // #0#10#13 ,}]
       begin
         Info.Value := J;
         V.VType := varNull;
@@ -10431,7 +10440,7 @@ astext:     V.VType := varString;
       end;
     jtFalseFirstChar:
       if (PInteger(J + 1)^ = FALSE_LOW2) and
-         (jcEndOfJsonValueField in JSON_CHARS[J[5]]) then
+         (jcEndOfJsonValueField in JSON_CHARS[J[5]]) then // #0#10#13 ,}]
       begin
         Info.Value := J;
         V.VType := varBoolean;
@@ -10441,7 +10450,7 @@ astext:     V.VType := varString;
       end;
     jtTrueFirstChar:
       if (PInteger(J)^ = TRUE_LOW) and
-         (jcEndOfJsonValueField in JSON_CHARS[J[4]]) then
+         (jcEndOfJsonValueField in JSON_CHARS[J[4]]) then // #0#10#13 ,}]
       begin
         Info.Value := J;
         V.VType := varBoolean;
@@ -10758,9 +10767,8 @@ begin
     v64 := -v64;
   // 2. now v64, frac, digit, exp contain number parsed from Json
   if (frac = 0) and
-     (remdigit >= 0) then
+     (remdigit >= 0) then // return an integer or Int64 value
   begin
-    // return an integer or Int64 value
     Value.VInt64 := v64;
     if remdigit <= 9 then
       TSynVarData(Value).VType := varInt64
@@ -10768,16 +10776,14 @@ begin
       TSynVarData(Value).VType := varInteger;
   end
   else if (frac < 0) and
-          (frac >= -4) then
+          (frac >= -4) then // currency as ###.0123
   begin
-    // currency as ###.0123
     TSynVarData(Value).VType := varCurrency;
     Value.VInt64 := v64 * CURRENCY_FACTOR[frac]; // as round(CurrValue*10000)
   end
   else if AllowVarDouble and
           (frac > -324) then // 5.0 x 10^-324 .. 1.7 x 10^308
-  begin
-    // converted into a double value
+  begin // convert into a double value
     d64 := v64;
     {$ifdef CPUX86NOTPIC}
     f := frac;
@@ -10978,58 +10984,65 @@ begin
           'contenttype', ContentType]));
 end;
 
-function ParseSortMatch(Expression: PUtf8Char; out Key: RawUtf8;
+function ParseVariantExpression(Expression: PUtf8Char; out Key: RawUtf8;
   out Match: TCompareOperator; Value: PVariant): boolean;
 var
-  KB, KE, B: PUtf8Char;
+  exp: TTextExpression;
+  tmp: TChar64;
 begin
   result := false;
-  if Expression = nil then
+  if (Expression = nil) or
+     (ParseTextExpression(Expression, exp) = nil) then
     exit;
-  Expression := GotoNextNotSpace(Expression);
-  KB := Expression;
-  while jcJsonIdentifier in JSON_CHARS[Expression^] do
-    inc(Expression);
-  if Expression^ = #0 then
-    exit;
-  KE := Expression;
-  Expression := GotoNextNotSpace(Expression);
-  B := Expression;
-  while Expression^ in ['<', '>', '='] do
-    inc(Expression);
-  case Expression - B of
-    1:
-      case B^ of
-        '=':
-          Match := coEqualTo;
-        '<':
-          Match := coLessThan;
-        '>':
-          Match := coGreaterThan
-      else
-        exit;
-      end;
-    2:
-      case cardinal(PWord(B)^) of
-        ord('=') + ord('=') shl 8: // c-style
-          Match := coEqualTo;
-        ord('!') + ord('=') shl 8, // c-style
-        ord('<') + ord('>') shl 8:
-          Match := coNotEqualTo;
-        ord('>') + ord('=') shl 8:
-          Match := coGreaterThanOrEqualTo;
-        ord('<') + ord('=') shl 8:
-          Match := coLessThanOrEqualTo;
-      else
-        exit;
-      end;
-  else
-    exit;
-  end;
-  FastSetString(Key, KB, KE - KB);
+  FastSetString(Key, exp.NameStart, exp.NameLen);
   if Value <> nil then
-    TextBufferToVariant(GotoNextNotSpace(Expression), {allowdouble=}true, Value^);
+    if (exp.ValueStart = nil) or
+       (exp.ValueLen >= SizeOf(tmp)) then // maybe ')' terminated
+      RawUtf8ToVariant(exp.ValueStart, exp.ValueLen, Value^)
+    else
+    begin
+      MoveFast(exp.ValueStart^, tmp, exp.ValueLen);
+      tmp[exp.ValueLen] := #0;
+      TextBufferToVariant(@tmp, {allowdouble=}true, Value^);
+    end;
+  Match := exp.Match;
   result := true;
+end;
+
+function EvaluateVariantExpression(Comp: TVariantCompare;
+  const A, B: variant; Match: TCompareOperator): boolean;
+var
+  au, bu: TTempUtf8; // almost never allocated
+  dummy: boolean;
+begin // same logic than EvaluateTextExpression() in mormot.core.unicode
+  if Match < coEqualCaseInsens then
+    result := SortMatch(Comp(A, B), Match)
+  else
+  begin
+    VariantToTempUtf8(A, au, dummy);
+    VariantToTempUtf8(B, bu, dummy);
+    case Match of
+      coEqualCaseInsens, coNotEqualCaseInsens:
+        result := (Match = coEqualCaseInsens) =
+                  (Utf8ILComp(au.Text, bu.Text, au.Len, bu.Len) = 0);
+      coContains, coNotContains:
+        result := (Match = coContains) =
+                  (StrPosL(bu.Text, au.Text, bu.Len, au.Len) <> nil);
+      coContainsCaseInsens, coNotContainsCaseInsens:
+        result := (Match = coContainsCaseInsens) =
+                  (StrPosIL(bu.Text, au.Text, bu.Len, au.Len) <> nil);
+      coGlob, coNotGlob:
+        result := Assigned(GlobBuffer) and ((Match = coGlob) =
+                  GlobBuffer(bu.Text, au.Text, bu.Len, au.Len, {ci=}false));
+      coGlobCaseInsens, coNotGlobCaseInsens:
+        result := Assigned(GlobBuffer) and ((Match = coGlobCaseInsens) =
+                  GlobBuffer(bu.Text, au.Text, bu.Len, au.Len, {ci=}true));
+    else
+      result := false; // paranoid
+    end;
+    TempUtf8Done(au);
+    TempUtf8Done(bu);
+  end;
 end;
 
 
@@ -11374,7 +11387,7 @@ begin
       end
       else if not dv^.GetObjectProp(CompKey, o, @CompKeyPrev) then
         continue;
-      if not SortMatch(CompFunc({%H-}o^, CompValue), CompMatch) then
+      if not EvaluateVariantExpression(CompFunc, {%H-}o^, CompValue, CompMatch) then
         continue;
     end;
     if CurrDict = nil then
@@ -12319,7 +12332,7 @@ var
   v: variant;
   m: TCompareOperator;
 begin
-  ParseSortMatch(pointer(expression), k, m, @v);
+  ParseVariantExpression(pointer(expression), k, m, @v);
   result := Objects(k, v, m, nil);
 end;
 
@@ -12329,7 +12342,7 @@ var
   k: RawUtf8;
   m: TCompareOperator;
 begin
-  ParseSortMatch(pointer(expression), k, m, nil);
+  ParseVariantExpression(pointer(expression), k, m, nil);
   result := Objects(k, value, m, nil);
 end;
 
