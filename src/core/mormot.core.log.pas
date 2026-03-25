@@ -28,8 +28,8 @@ uses
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
-  mormot.core.data,
   mormot.core.rtti,
+  mormot.core.data,
   mormot.core.json,
   mormot.core.unicode,
   mormot.core.text,
@@ -254,7 +254,7 @@ const
   /// the text equivalency of each logging level, as written in the log file
   // - PCardinal(@LOG_LEVEL_TEXT[L][3])^ will be used for fast level matching
   // so text must be unique for characters [3..6] -> e.g. 'ust4'
-  LOG_LEVEL_TEXT: array[TSynLogLevel] of string[7] = (
+  LOG_LEVEL_TEXT: array[TSynLogLevel] of TShort7 = (
     '       ',  // sllNone
     ' info  ',  // sllInfo
     ' debug ',  // sllDebug
@@ -769,7 +769,7 @@ type
     // TSynBackgroundThreadAbstract.OnAfterExecute
     // - is called e.g. by TRest.EndCurrentThread
     // - just a wrapper around TSynLog.NotifyThreadEnded
-    procedure OnThreadEnded(Sender: TThread);
+    class procedure OnThreadEnded(Sender: TThread);
     /// clean up *.log file by running OnArchive() on deprecated files
     // - will find and archive DestinationPath\*.log (or sourcePath\*.log)
     // files older than ArchiveAfterDays (or archiveDays), into the ArchivePath
@@ -1083,6 +1083,13 @@ type
   end;
   PSynLogThreadInfo = ^TSynLogThreadInfo;
 
+  /// low-level callback triggered within the raw logging context
+  // - allow TSynLog.RawLog() to ouput directly some data to Sender.Writer
+  // - is called between LogHeader/LogTrailer methods, in the global lock
+  // - the implementation should be stable and don't break the same-line output
+  TOnRawLog = procedure(Sender: TSynLog; Level: TSynLogLevel;
+    Opaque: pointer; Value: PtrInt; Instance: TObject) of object;
+
   /// a per-family and/or per-thread log file content
   // - you should create a sub class per kind of log file
   // ! TSynLogDB = class(TSynLog);
@@ -1115,12 +1122,9 @@ type
     class function FamilyCreate: TSynLogFamily;
     // TInterfacedObject methods for fake per-thread RefCnt
     function QueryInterface({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-      iid: TGuid; out obj): TIntQry;
-      {$ifdef OSWINDOWS} stdcall {$else} cdecl {$endif};
-    function _AddRef: TIntCnt;
-      {$ifdef OSWINDOWS} stdcall {$else} cdecl {$endif};
-    function _Release: TIntCnt;
-      {$ifdef OSWINDOWS} stdcall {$else} cdecl {$endif};
+      iid: TGuid; out obj): TIntQry; {$ifdef FPCPOSIX}cdecl{$else}stdcall{$endif};
+    function _AddRef: TIntCnt;       {$ifdef FPCPOSIX}cdecl{$else}stdcall{$endif};
+    function _Release: TIntCnt;      {$ifdef FPCPOSIX}cdecl{$else}stdcall{$endif};
     // internal methods
     function DoEnter: PSynLogThreadInfo; // returns nil if sllEnter is disabled
       {$ifdef FPC}inline;{$endif}
@@ -1321,8 +1325,8 @@ type
     class function Void: TSynLogClass;
     /// low-level method helper which can be called to make debugging easier
     // - log some warning message to the TSynLog family
-    // - will force a manual breakpoint if tests are run from the Delphi IDE, or
-    // will output the message to the current console
+    // - will force a manual breakpoint if tests are run from the Delphi IDE,
+    // and will output the message to the current console
     class procedure DebuggerNotify(Level: TSynLogLevel; const Format: RawUtf8;
       const Args: array of const); overload;
     /// low-level method helper which can be called to make debugging easier
@@ -1402,6 +1406,11 @@ type
     // be added to the log content (to be used e.g. with '--' for SQL statements)
     procedure LogLines(Level: TSynLogLevel; LinesToLog: PUtf8Char; aInstance: TObject = nil;
       const IgnoreWhenStartWith: PAnsiChar = nil);
+    /// call this method to execute a callback within custom TJsonWriter
+    // - can be used to output directly e.g. JSON content into Sender.Writer
+    // - Opaque/Value will be passed to Event, together with Instance
+    procedure RawLog(Level: TSynLogLevel; const Event: TOnRawLog;
+      Opaque: pointer = nil; Value: PtrInt = 0; Instance: TObject = nil);
     /// manual low-level TSynLog.Enter execution without the ISynLog overhead
     // - may be used to log Enter/Leave stack from non-pascal code
     // - each call to ManualEnter should be followed by a matching ManualLeave
@@ -3853,7 +3862,7 @@ type
 
 function RetrieveMemoryManagerInfo: RawUtf8;
 begin
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   // detect and include mormot.core.fpcx64mm raw information
   with GetHeapStatus do
     if PShortString(@TotalAddrSpace)^ = 'fpcx64mm' then // magic marker
@@ -3862,7 +3871,7 @@ begin
       exit;
     except
     end;
-  {$endif CPUX64}
+  {$endif ASMX64}
   // standard FPC memory manager
   with GetFPCHeapStatus do
     FormatUtf8(' - Heap: Current: used=% size=% free=%   Max: size=% used=%',
@@ -3872,6 +3881,7 @@ end;
 {$else}
 function RetrieveMemoryManagerInfo: RawUtf8;
 begin
+  {$ifdef OSWINDOWS}
   // standard Delphi memory manager
   with GetHeapStatus do
     if TotalAddrSpace <> 0 then
@@ -3883,6 +3893,7 @@ begin
          KBNoSpace(FreeBig),        KBNoSpace(Unused),
          KBNoSpace(Overhead)], result)
     else
+  {$endif OSWINDOWS}
       result := '';
 end;
 {$endif FPC}
@@ -4316,7 +4327,7 @@ end;
 function TSynLogFamily.GetArchiveDestPath(age: TDateTime): TFileName;
 var
   dt: TSynSystemTime;
-  tmp: string[7];
+  tmp: TShort7;
 begin
   // returns 'ArchivePath\log\YYYYMM\'
   result := EnsureDirectoryExists([ArchivePath, 'log']);
@@ -4497,6 +4508,7 @@ const
   // a 128 MB RawUtf8 seems fair enough
   MAXPREVIOUSCONTENTSIZE = 128 shl 20;
 var
+  stream: TStream;
   log: TSynLog;
   endpos, start: Int64;
   c: AnsiChar;
@@ -4515,7 +4527,8 @@ begin
       if log.fFamily <> self then
         continue;
       log.Writer.FlushToStream;
-      endpos := log.Writer.Stream.Position;
+      stream := log.Writer.Stream;
+      endpos := stream.Position;
       try
         if endpos > MAXPREVIOUSCONTENTSIZE then
           len := MAXPREVIOUSCONTENTSIZE
@@ -4526,20 +4539,20 @@ begin
            (endpos - start > len) then
         begin
           start := endpos - len;
-          log.Writer.Stream.Position := start;
+          stream.Position := start;
           repeat
             inc(start)
-          until (log.Writer.Stream.Read(c, 1) = 0) or
+          until (stream.Read(c, 1) = 0) or
                 (ord(c) in [10, 13]);
         end
         else
-          log.Writer.Stream.Position := start;
+          stream.Position := start;
         len := endpos - start;
         SetLength(result, len);
         P := pointer(result);
         total := 0;
         repeat
-          read := log.Writer.Stream.Read(P^, len);
+          read := stream.Read(P^, len);
           if read <= 0 then
           begin
             if total <> len then
@@ -4551,7 +4564,7 @@ begin
           inc(total, read);
         until len = 0;
       finally
-        log.Writer.Stream.Position := endpos;
+        stream.Position := endpos;
       end;
       break;
     end;
@@ -4560,7 +4573,7 @@ begin
   end;
 end;
 
-procedure TSynLogFamily.OnThreadEnded(Sender: TThread);
+class procedure TSynLogFamily.OnThreadEnded(Sender: TThread);
 begin
   TSynLog.NotifyThreadEnded;
 end;
@@ -4838,7 +4851,7 @@ begin // caller just made GlobalThreadLock.Lock
   p := pointer(log.fThreadNameLogged); // threads bit-set of this TSynLog
   if p <> nil then
   begin
-    ndx := nfo^.ThreadBitHi; // use pre-computed runtime constants
+    ndx := nfo^.ThreadBitHi; // use pre-computed runtime constants (favor FPC)
     if ndx <= PtrUInt(PDALen(PAnsiChar(p) - _DALEN)^ + (_DAOFF - 1)) then
       if p[ndx] and nfo^.ThreadBitLo <> 0 then // fast "if GetBitPtr() then"
         exit; // already done (most common case)
@@ -5120,7 +5133,7 @@ begin
   end;
 end;
 
-{$ifdef ISDELPHI} // specific to Delphi: fast get the caller method name
+{$ifdef WINTELDELPHI} // specific to Delphi: fast get the caller method name
 
 {$STACKFRAMES ON} // we need a stack frame for ebp/RtlCaptureStackBackTrace
 {$ifdef CPU64}
@@ -5169,7 +5182,7 @@ begin
   EnterLocal(result, aInstance, aMethodName);
 end;
 
-{$endif ISDELPHI}
+{$endif WINTELDELPHI}
 
 class function TSynLog.Enter(TextFmt: PUtf8Char;
   const TextArgs: array of const; aInstance: TObject): ISynLog;
@@ -5624,41 +5637,37 @@ begin
   LogText(Level, @tmp[1], Instance); // this method with ending #0 is the fastest
 end;
 
-{$STACKFRAMES OFF} // back to {$W-} normal state, as in mormot.defines.inc
-
-{$ifdef WIN64DELPHI} // Delphi Win64 has no 64-bit inline assembler
-{$ifdef CPUINTEL}
-procedure DebugBreak;
-asm
-     .noframe
-     int  3
-end;
-{$else}
-procedure DebugBreak; // no ARM64 assembler on Delphi
+procedure TSynLog.RawLog(Level: TSynLogLevel; const Event: TOnRawLog;
+  Opaque: pointer; Value: PtrInt; Instance: TObject);
 begin
+  if (self = nil) or
+     not (Level in fFamily.fLevel) or
+     not Assigned(Event) then
+    exit;
+  if LockAndDisableExceptions then
+  try
+    LogHeader(Level, Instance);
+    Event(self, Level, Opaque, Value, Instance);
+    fWriterEcho.AddEndOfLine(Level); // LogTrailer(Level) is not needed here
+  finally
+    fThreadInfo^.Flags := fThreadInfoBackup;
+    GlobalThreadLock.UnLock;
+  end;
 end;
-{$endif CPUINTEL}
-{$endif WIN64DELPHI}
+
+{$STACKFRAMES OFF} // back to {$W-} normal state, as in mormot.defines.inc
 
 class procedure TSynLog.DebuggerNotify(Level: TSynLogLevel; const Text: RawUtf8);
 begin
   if Text = '' then
     exit;
   Add.LogInternalText(Level, pointer(Text), length(Text), nil, 16384);
-  {$ifdef ISDELPHI} // Lazarus/fpdebug does not like "int 3" instructions
-  {$ifdef OSWINDOWS}
-  if IsDebuggerPresent then
-    {$ifdef WIN64DELPHI}
-    DebugBreak
-    {$else}
-    asm
-      int  3
-    end
-    {$endif WIN64DELPHI}
-  else
-  {$endif OSWINDOWS}
-  {$endif ISDELPHI}
+  if HasConsole then
     ConsoleWrite('%  ', [Text], LOG_CONSOLE_COLORS[Level], {noLF=}true);
+  {$ifdef WINTELDELPHI}
+  if IsDebuggerPresent then
+    DebuggerBreak;
+  {$endif WINTELDELPHI}
 end;
 
 class procedure TSynLog.DebuggerNotify(Level: TSynLogLevel;
@@ -5725,11 +5734,6 @@ procedure TSynLog.LogFileHeader;
 var
   w: TJsonWriter;
   i: PtrInt;
-  {$ifdef OSWINDOWS}
-  Env: PWideChar;
-  P: PWideChar;
-  L: integer;
-  {$endif OSWINDOWS}
 begin
   include(fFlags, logFileHeaderWritten);
   w := fWriter;
@@ -5756,14 +5760,10 @@ begin
     w.AddDirect('-');
     w.Add(SystemInfo.wProcessorRevision);
     {$endif OSWINDOWS}
-    {$ifdef CPUINTEL}
-    w.AddDirect(':');
+    {$ifdef HASCPUFEATURES}
+    w.AddDirect(':' {$ifdef ABIA32}, '-' {$endif} {$ifdef ABIA64}, '+' {$endif});
     w.AddBinToHexMinChars(@CpuFeatures, SizeOf(CpuFeatures), {lower=}true);
-    {$endif CPUINTEL}
-    {$ifdef CPUARM3264}
-    w.Add(':', {$ifdef CPUARM} '-' {$else} '+' {$endif}); // ARM marker
-    w.AddBinToHexMinChars(@CpuFeatures, SizeOf(CpuFeatures), {lower=}true);
-    {$endif CPUARM3264}
+    {$endif HASCPUFEATURES}
     w.AddDirect(' ', 'O', 'S', '=');
     {$ifdef OSWINDOWS}
     w.AddB(ord(OSVersion));
@@ -5800,25 +5800,18 @@ begin
       w.AddShort(' Instance=');
       w.AddNoJsonEscapeString(Executable.InstanceFileName);
     end;
-    {$ifdef OSWINDOWS}
+    {$ifdef OSWINDOWS} // too verbose on POSIX - even including some scripts :(
     if not fFamily.fNoEnvironmentVariable then
     begin
       w.AddDirect(#10);
       w.AddShort('Environment variables=');
-      Env := GetEnvironmentStringsW;
-      P := pointer(Env);
-      while P^ <> #0 do
+      for i := 0 to length(_SystemEnvNames) - 1 do
       begin
-        L := StrLenW(P);
-        if (L > 0) and
-           (P^ <> '=') then
-        begin
-          w.AddNoJsonEscapeW(pointer(P));
-          w.AddDirect(#9);
-        end;
-        inc(P, L + 1);
+        w.AddOnSameLine(pointer(_SystemEnvNames[i]));
+        w.AddDirect('=');
+        w.AddOnSameLine(pointer(_SystemEnvValues[i]));
+        w.AddDirect(#9);
       end;
-      FreeEnvironmentStringsW(Env);
       w.CancelLastChar(#9);
     end;
     {$endif OSWINDOWS}
@@ -6296,7 +6289,7 @@ end;
 {$else not FPC}
 
 procedure TSynLog.AddStackTrace(Stack: PPtrUInt);
-
+{$ifdef OSWINDOWS}
 {$ifdef CPU64}
 
   procedure AddStackManual(Stack: PPtrUInt);
@@ -6373,12 +6366,12 @@ procedure TSynLog.AddStackTrace(Stack: PPtrUInt);
 {$endif CPU64}
 
 var
-  n, i, logged: integer;
   {$ifndef NOEXCEPTIONINTERCEPT}
   bak: TSynLogThreadInfoFlags; // paranoid precaution
   threadflags: ^TSynLogThreadInfoFlags;
   {$endif NOEXCEPTIONINTERCEPT}
   {$ifdef OSWINDOWS}
+  n, i, logged: integer;
   BackTrace: array[byte] of PtrUInt;
   {$endif OSWINDOWS}
 begin
@@ -6415,6 +6408,10 @@ begin
   {$endif NOEXCEPTIONINTERCEPT}
 end;
 
+{$else}
+begin // not implemented yet on Delphi POSIX
+end;
+{$endif OSWINDOWS}
 {$endif FPC}
 
 
@@ -8332,7 +8329,7 @@ function SyslogBsdPrepare(Level: TSynLogLevel; Text: PUtf8Char; Len: PtrInt;
 var
   now: TSynSystemTime;
   day: TShort3;
-  h, a: string[32]; // truncated to 32 chars for legacy compatibility reasons
+  h, a: TShort32; // truncated to 32 chars for legacy compatibility reasons
 begin // <PRI>TIMESTAMP SP HOSTNAME SP TAG[: ]MESSAGE
   now.FromNowLocal; // the RFC 4.1.2 states it is the local time :(
   day[0] := #2;

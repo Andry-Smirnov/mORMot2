@@ -547,14 +547,13 @@ type
       newCase: TSetCase; resOrd: PIntegerDynArray = nil);
     /// retrieve all element names as CSV, with optional quotes
     procedure GetEnumNameAll(out result: RawUtf8; const Prefix: RawUtf8 = '';
-      quotedValues: boolean = false; const Suffix: RawUtf8 = '';
-      trimedValues: boolean = false; unCamelCased: boolean = false); overload;
+      const Suffix: RawUtf8 = ''; quotedValues: boolean = false;
+      trimedValues: boolean = false; separator: AnsiChar = ','); overload;
     /// retrieve all trimed element names as CSV
     procedure GetEnumNameTrimedAll(var result: RawUtf8; const Prefix: RawUtf8 = '';
       quotedValues: boolean = false; const Suffix: RawUtf8 = '');
     /// get all enumeration names as a JSON array of strings
-    function GetEnumNameAllAsJsonArray(TrimLeftLowerCase: boolean;
-      UnCamelCased: boolean = false): RawUtf8;
+    function GetEnumNameAllAsJsonArray(TrimLeftLowerCase: boolean): RawUtf8;
     /// get the corresponding enumeration ordinal value, from its name
     // - if EnumName does start with lowercases 'a'..'z', they will be searched:
     // e.g. GetEnumNameValue('sllWarning') will find sllWarning item
@@ -1801,7 +1800,7 @@ type
     TypeInfo: PRttiInfo;
     /// how the parameter has been defined (const/var/out/result)
     // - we don't support the FPC "constref" kind of argument by now, and
-    // follow the standard WIN64ABI / SYSVABI specs with "const"
+    // follow the standard WIN64/SYSV ABI specs with "const"
     Direction: TRttiMethodArgDirection;
   end;
   PRttiMethodArg = ^TRttiMethodArg;
@@ -1871,8 +1870,8 @@ function ObjectFromInterfaceImplements(const aValue: IInterface;
   const aInterface: TGuid): boolean;
 
 const
-  PSEUDO_RESULT_NAME: string[6] = 'Result';
-  PSEUDO_SELF_NAME:   string[4] = 'Self';
+  PSEUDO_RESULT_NAME: TShort7 = 'Result';
+  PSEUDO_SELF_NAME:   TShort7 = 'Self';
 
 
 
@@ -3524,7 +3523,7 @@ var
     nil,                      // vcSynObjectList
     nil,                      // vcRawUtf8List
     TObjectWithID,            // vcObjectWithID
-    TClonable);          // vcClonable
+    TClonable);               // vcClonable
 
 
 implementation
@@ -3758,12 +3757,11 @@ begin
   end;
 end;
 
-procedure TRttiEnumType.GetEnumNameAll(out result: RawUtf8; const Prefix: RawUtf8;
-  quotedValues: boolean; const Suffix: RawUtf8; trimedValues, unCamelCased: boolean);
+procedure TRttiEnumType.GetEnumNameAll(out result: RawUtf8; const Prefix,
+    Suffix: RawUtf8; quotedValues, trimedValues: boolean; separator: AnsiChar);
 var
   i: integer;
   V: PShortString;
-  uncamel: ShortString;
   temp: TTextWriterStackBuffer; // 8KB work buffer on stack
 begin
   if @self <> nil then
@@ -3775,21 +3773,16 @@ begin
       begin
         if quotedValues then
           AddDirect('"');
-        if unCamelCased then
-        begin
-          TrimLeftLowerCaseToShort(V, uncamel);
-          AddShort(uncamel);
-        end
-        else if trimedValues then
+        if trimedValues then
           AddTrimLeftLowerCase(V)
         else
           AddShort(V^);
         if quotedValues then
           AddDirect('"');
-        AddComma;
+        AddDirect(separator);
         inc(PByte(V), length(V^) + 1);
       end;
-      CancelLastComma;
+      CancelLastChar(separator);
       AddString(Suffix);
       SetText(result);
     finally
@@ -3800,13 +3793,12 @@ end;
 procedure TRttiEnumType.GetEnumNameTrimedAll(var result: RawUtf8;
   const Prefix: RawUtf8; quotedValues: boolean; const Suffix: RawUtf8);
 begin
-  GetEnumNameAll(result, Prefix, quotedValues, Suffix, {trimed=}true);
+  GetEnumNameAll(result, Prefix, Suffix, quotedValues, {trimed=}true);
 end;
 
-function TRttiEnumType.GetEnumNameAllAsJsonArray(TrimLeftLowerCase: boolean;
-  UnCamelCased: boolean): RawUtf8;
+function TRttiEnumType.GetEnumNameAllAsJsonArray(TrimLeftLowerCase: boolean): RawUtf8;
 begin
-  GetEnumNameAll(result, '[', {quoted=}true, ']', TrimLeftLowerCase, UnCamelCased);
+  GetEnumNameAll(result, '[', ']', {quoted=}true, TrimLeftLowerCase);
 end;
 
 function TRttiEnumType.GetEnumNameValue(const EnumName: ShortString): integer;
@@ -3991,7 +3983,7 @@ begin
     end;
   end;
   if QuoteChar <> #0 then
-    W.CancelLastComma(']')
+    W.ReplaceLastComma(']')
   else
     W.CancelLastComma;
 end;
@@ -10016,7 +10008,7 @@ begin
   result := slot^;
   if PClass(result)^ = c then // if fPrivateSlots[0].ClassType = c then
     exit;
-  n := PDALen(PAnsiChar(slot) - _DALEN)^ + (_DAOFF - 1);
+  n := PDALen(PAnsiChar(slot) - _DALEN)^ + (_DAOFF - 1); // favor FPC high()
   if n <> 0 then
     repeat
       inc(slot);
@@ -11073,7 +11065,7 @@ begin
 end;
 
 
-{$ifdef CPUX64}
+{$ifdef ASMX64}
 
 // very efficient branchless asm - rcx/rdi=Item1 rdx/rsi=Item2
 function TObjectWithIDDynArrayCompare(const Item1, Item2): integer;
@@ -11097,7 +11089,7 @@ begin
   // inlined branchless comparison or correct x86 asm for older Delphi
 end;
 
-{$endif CPUX64}
+{$endif ASMX64}
 
 function TObjectWithIDDynArrayHashOne(const Elem; Hasher: THasher): cardinal;
 begin

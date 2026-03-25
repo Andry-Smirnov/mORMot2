@@ -13,11 +13,12 @@ unit mormot.core.base;
     - Integer Arrays Manipulation
     - ObjArray PtrArray InterfaceArray Wrapper Functions
     - Low-level Types Mapping Binary or Bits Structures
+    - Low-level CPU Detection and Intrinsics
+    - Faster Alternative to RTL Standard Functions
     - Buffers (e.g. Hashing and SynLZ compression) Raw Functions
     - Efficient Variant Values Conversion
     - Sorting/Comparison Functions
     - Some Convenient TStream descendants and File access functions
-    - Faster Alternative to RTL Standard Functions
     - Raw Shared Constants / Types Definitions
 
    Aim of those types and functions is to be cross-platform and cross-compiler,
@@ -330,7 +331,7 @@ type
   PPUtf8Char = ^PUtf8Char;
   PPPUtf8Char = ^PPUtf8Char;
 
-  /// a Row/Col array of PUtf8Char, for containing sqlite3_get_table() result
+  /// a Row/Col array of PUtf8Char, for containing e.g. sqlite3_get_table() result
   TPUtf8CharArray = array[ 0 .. MaxInt div SizeOf(PUtf8Char) - 1 ] of PUtf8Char;
   PPUtf8CharArray = ^TPUtf8CharArray;
 
@@ -512,6 +513,18 @@ type
   PPShortString = ^PShortString;
   PTextFile = ^TextFile;
 
+  {$ifdef UNICODE}
+  CharInt = word;
+  PCharInt = PWord;
+  PTwoCharsInt = PCardinal;
+  PCharIntArray = PWordArray;
+  {$else}
+  CharInt = byte;
+  PCharInt = PByte;
+  PTwoCharsInt = PWord;
+  PCharIntArray = PByteArray;
+  {$endif UNICODE}
+
   PInterface = ^IInterface;
   TInterfaceDynArray = array of IInterface;
   PInterfaceDynArray = ^TInterfaceDynArray;
@@ -570,37 +583,41 @@ type
   {$M-}
 
 type
-  /// 128-bytes used e.g. by TNetAddr.IPShort() as output buffer
+  /// 128-bytes aligned shortstring - e.g. for TNetAddr.IPShort()
   TShort127 = string[127];
   PShort127 = ^TShort127;
 
-  /// used e.g. to serialize up to 256-bit binary as hexadecimal
+  /// used to serialize up to 256-bit binary as hexadecimal
   TShort64 = string[64];
   PShort64 = ^TShort64;
 
-  /// a shortstring which takes 64 bytes of memory
+  /// 64-bytes aligned shortstring - e.g. for GetCurrentThreadInfo
   TShort63 = string[63];
   PShort63 = ^TShort63;
 
-  /// a shortstring which takes 48 bytes of memory - e.g. for StatusCodeToShort
+  /// 48-bytes aligned shortstring - e.g. for StatusCodeToShort
   TShort47 = string[47];
   PShort47 = ^TShort47;
 
-  /// a shortstring which takes 32 bytes of memory - e.g. for SetThreadName
+  /// 40-bytes aligned shortstring - e.g. for THttpDateNowUtc/TShortGuid
+  TShort39 = string[39];
+
+  /// used to serialize up to 128-bit binary as hexadecimal
+  TShort32 = string[32];
+
+  /// 32-bytes aligned shortstring - e.g. for SetThreadName
   TShort31 = string[31];
   PShort31 = ^TShort31;
 
-  /// used e.g. by TwoDigits(), ToShort(Int64) or Int64ToHttpEtag()
+  /// 24-bytes aligned shortstring - e.g. for TwoDigits/ToShort/Int64ToHttpEtag
   TShort23 = string[23];
   PShort23 = ^TShort23;
 
-  /// used e.g. by PointerToHexShort/CardinalToHexShort/Int64ToHexShort
-  // - such result type would avoid a string allocation on heap, so are highly
-  // recommended e.g. when logging tiny pieces of information
+  /// used to serialize up to 64-bit binary (a pointer) as hexadecimal
   TShort16 = string[16];
   PShort16 = ^TShort16;
 
-  /// used e.g. for TSynSystemTime.ToTextDateShort
+  /// 16-bytes aligned shortstring - e.g. for TSynSystemTime.ToTextDateShort
   TShort15 = string[15];
   PShort15 = ^TShort15;
 
@@ -608,21 +625,20 @@ type
   TShort8 = string[8];
   PShort8 = ^TShort8;
 
-  /// used e.g; for WinOsBuild() to avoid heap allocation
+  /// 8-bytes aligned shortstring - e.g. for WinOsBuild()
   TShort7 = string[7];
 
-  /// used e.g. by UInt4DigitsToShort to avoid heap allocation
-  TShort4 = string[4];
-
-  /// used e.g. by UInt3DigitsToShort/UInt2DigitsToShort functions
-  // - when used as an array value type, will generate efficient 32-bit lookup
+  /// 4-bytes aligned shortstring - e.g. as efficient array[] constants
   TShort3 = string[3];
 
+  /// shortstring used to store none or one character
+  TShort1 = string[1];
+
   /// stack-allocated ASCII string, for mormot.core.text GuidToShort() function
-  TShortGuid = string[38];
+  TShortGuid = TShort39;
   PShortGuid = ^TShortGuid;
 
-  /// could be used e.g. by StrInt32() or StrInt64()
+  /// internal temporary buffer on stack used e.g. by StrInt32() or StrInt64()
   TTemp24 = array[0..23] of AnsiChar;
 
   /// cross-compiler type used for string length
@@ -716,10 +732,10 @@ type
 
   /// map the Delphi/FPC dynamic array header (stored before each instance)
   TDynArrayRec = packed record
-    {$ifdef CPUX64}
+    {$ifdef CPU64}
     /// padding bytes for 16 byte alignment of the header
     _Padding: cardinal;
-    {$endif}
+    {$endif CPU64}
     /// dynamic array reference count (basic garbage memory mechanism)
     refCnt: TDACnt; // 32-bit integer with Delphi
     /// length in element count
@@ -810,8 +826,20 @@ const
   HTTP_32    = ord('H') + ord('T') shl 8 + ord('T') shl 16 + ord('P') shl 24;
   HTTP__32   = ord('h') + ord('t') shl 8 + ord('t') shl 16 + ord('p') shl 24;
   HTTP__24   = ord(':') + ord('/') shl 8 + ord('/') shl 16;
+  NTLM_LOW   = ord('n') + ord('t') shl 8 + ord('l') shl 16 + ord('m') shl 24;
   HEAD_32    = ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24;
+  GET_24     = ord('G') + ord('E') shl 8 + ord('T') shl 16;
+  PUT_24     = ord('P') + ord('U') shl 8 + ord('T') shl 16;
   POST_32    = ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24;
+  DELE_32    = ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24;
+  OPTI_32    = ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24;
+  NONE_32    = ord('N') + ord('O') shl 8 + ord('N') shl 16 + ord('E') shl 24;
+  NOT_32     = ord('N') + ord('O') shl 8 + ord('T') shl 16 + ord(' ') shl 24;
+  SLASH_16   = ord('/') + ord('/') shl 8;
+  SLBEG_16   = ord('/') + ord('*') shl 8;
+  SLEND_16   = ord('*') + ord('/') shl 8;
+  DOT_16     = ord('.') + ord('.') shl 8;
+  DOT_24     = ord('.') + ord('.') shl 8 + ord('.') shl 16;
 
 /// fill a TGuid with 0
 procedure FillZero(var result: TGuid); overload;
@@ -980,6 +1008,7 @@ function UniqueRawUtf8(var u: RawUtf8): pointer;
 
 /// concatenate several string arguments into an UTF-8 string
 function Join(const Args: array of RawByteString): RawUtf8; overload;
+ {$ifdef FPC}inline;{$endif}
 
 /// concatenate several string arguments into an UTF-8 string
 procedure Join(const Args: array of RawByteString; var Text: RawUtf8); overload;
@@ -1001,6 +1030,9 @@ procedure Ansi7StringToShortString(const source: RawUtf8; var result: ShortStrin
 
 /// simple concatenation of a 32-bit unsigned integer as text into a shorstring
 procedure AppendShortCardinal(value: cardinal; var dest: ShortString);
+
+/// simple concatenation of a 8-bit unsigned integer as text into a shorstring
+procedure AppendShortByte(value: PtrUInt; dest: PAnsiChar);
 
 /// simple concatenation of a signed 64-bit integer as text into a shorstring
 procedure AppendShortInt64(const value: Int64; var dest: ShortString);
@@ -1048,7 +1080,7 @@ procedure AppendShortHex(value: PByte; len: PtrInt; var dest: ShortString);
 procedure AppendShortIntHex(value: Int64; var dest: ShortString);
 
 /// simple concatenation of a byte as uppercase hexadecimal into a shorstring
-procedure AppendShortByteHex(value: byte; var dest: ShortString);
+procedure AppendShortByteHex(value: PtrUInt; var dest: ShortString);
 
 /// simple concatenation of a ShortString text into a shorstring
 procedure AppendShort(const src: ShortString; var dest: ShortString);
@@ -1535,6 +1567,9 @@ function ToInt64(const text: RawUtf8; out value: Int64): boolean;
 function ToDouble(const text: RawUtf8; out value: double): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// get the signed 64-bit integer value stored in an UTF-8 text buffer
+function IsInt64(P: PUtf8Char; len: PtrInt; value: PInt64 = nil): boolean;
+
 /// internal fast integer value to text conversion
 // - expect the last available temporary char position in P
 // - return the last written char position (write in reverse order in P^)
@@ -1577,11 +1612,18 @@ function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
 
 /// fast convert an Int64 value into a temporary shortstring on stack
 function ToShort(const val: Int64): TShort23;
+
+/// fast convert an unsigned value into a string[>=23] variable
+procedure ToShortU(const val: PtrUInt; Dest: PShort23);
+
+/// internal fast unsigned 8-bit 0..255 value to '0'..'255' text conversion
+// - write into P^ and return the position after the last char written
+function UInt8ToPChar(P: PAnsiChar; val: PtrUInt; tab: PWordArray): PAnsiChar;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// add the 4 digits of integer Y to P^ as '0000'..'9999'
 procedure YearToPChar(Y: PtrUInt; P: PUtf8Char);
-  {$ifndef ASMX86} {$ifdef HASINLINE}inline;{$endif} {$endif}
+  {$ifndef ASMX86NOTPIC} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 const
   /// a typical error allowed when working with double floating-point values
@@ -1686,7 +1728,7 @@ function MaxPtrUInt(const A, B: PtrUInt): PtrUInt;
 // - returns nil if Value was not found
 // - is implemented via IntegerScanIndex() SSE2 asm on i386 and x86_64
 function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
-  {$ifdef CPUINTEL} {$ifndef HASNOSSE2} {$ifdef HASINLINE}inline;{$endif} {$endif} {$endif}
+  {$ifdef ASMINTEL} {$ifndef HASNOSSE2} {$ifdef HASINLINE}inline;{$endif} {$endif} {$endif}
 
 /// fast search of an unsigned integer position in a 32-bit integer array
 // - Count is the number of integer entries in P^
@@ -1694,14 +1736,14 @@ function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardin
 // - return -1 if Value was not found
 // - is implemented with SSE2 asm on i386 and x86_64
 function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): PtrInt;
-  {$ifndef CPUINTEL}inline;{$endif}
+  {$ifndef ASMINTEL}inline;{$endif}
 
 /// fast search of an unsigned integer in a 32-bit integer array
 // - returns true if P^=Value within Count entries
 // - returns false if Value was not found
 // - is implemented via IntegerScanIndex() SSE2 asm on i386 and x86_64
 function IntegerScanExists(P: PCardinalArray; Count: PtrInt; Value: cardinal): boolean;
-  {$ifdef CPUINTEL} {$ifndef HASNOSSE2} {$ifdef HASINLINE}inline;{$endif} {$endif} {$endif}
+  {$ifdef ASMINTEL} {$ifndef HASNOSSE2} {$ifdef HASINLINE}inline;{$endif} {$endif} {$endif}
 
 /// fast search of an integer position in a 64-bit integer array
 // - Count is the number of Int64 entries in P^
@@ -1756,14 +1798,14 @@ function PtrUIntScanExists(P: PPtrUIntArray; Count: PtrInt; Value: PtrUInt): boo
 // - return index of P^[index]=Value, -1 if Value was not found
 // - is implemented with SSE2 asm on i386 and x86_64
 function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// fast search of an unsigned Word value position in a Word array
 // - Count is the number of Word entries in P^
 // - return index of P^[index]=Value, -1 if Value was not found
 // - is implemented with SSE2 asm on i386 and x86_64
 function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 // raw pascal (slow) functions defined here for redirection if HASNOSSE2 is set
 function ByteScanIndexPas(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
@@ -2651,23 +2693,20 @@ procedure Rcu(var src, dst; len: integer);
 
 {$ifdef ISDELPHI}
 /// this function is an intrinsic in FPC
-procedure ReadBarrier; {$ifndef CPUINTEL} inline; {$endif}
+procedure ReadBarrier; {$ifndef ASMINTEL} inline; {$endif}
 {$endif ISDELPHI}
 
 /// fast computation of two 64-bit unsigned integers into a 128-bit value
-{$ifdef CPUINTEL}
+{$ifdef ASMINTEL}
 procedure mul64x64(const left, right: QWord; out product: THash128Rec);
 {$else}
 procedure mul64x64({$ifdef FPC}constref{$else}const{$endif} left, right: QWord;
   out product: THash128Rec); inline;
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
 /// simply compute inc(d[], s[]) in a loop, up to a few elements
 // - is implemented using plain pascal - for a few elements, AVX2 is not worth it
 procedure AddInt64Array(d, s: PInt64Array; n: PtrInt);
-
-
-{ ************ Low-level Functions Manipulating Bits }
 
 /// retrieve a particular bit status from a bit array
 // - this function can't be inlined, whereas GetBitPtr() function can
@@ -2783,8 +2822,7 @@ procedure UnSetBit64(var Bits: Int64; aIndex: PtrInt);
   {$ifdef HASINLINE}inline;{$endif}
 
 
-
-{ ************ Faster Alternative to RTL Standard Functions }
+{ ************ Low-level CPU Detection and Intrinsics }
 
 type
   /// the potential features, retrieved from an Intel/AMD CPU
@@ -2899,16 +2937,17 @@ const
 {$ifdef CPUARM3264}
 var
   /// the low-level ARM/AARCH64 CPU features retrieved from system.envp
-  // - text from CpuInfoFeatures may not be accurate on oldest kernels
+  // - text from /proc/cpuinfo may not be accurate on oldest kernels
   CpuFeatures: TArmHwCaps;
   /// the low-level ARM/AARCH64 CPU model text as retrieved by mormot.core.os
   CpuArmModel: RawUtf8;
+  CpuArmImplementer: RawUtf8;
 {$endif CPUARM3264}
 
 /// cross-platform wrapper function to check AES HW support on Intel or ARM
 function HasHWAes: boolean;
 
-{$ifdef CPUINTEL}
+{$ifdef ASMINTEL}
 
 var
   /// the available Intel/AMD CPU features, as recognized at program startup
@@ -2973,11 +3012,8 @@ procedure LockedDec32(int32: PInteger);
 /// slightly faster than InterlockedIncrement64()
 procedure LockedInc64(int64: PInt64);
 
-// defined here for mormot.test.base only
+// defined here for test.core.base
 function GetBitsCountSSE42(value: PtrInt): PtrInt;
-
-// defined here for mormot.test.base only
-// - use instead global crc32c() variable
 function crc32csse42(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
 
 {$else}
@@ -2998,33 +3034,7 @@ procedure LockedDec32(int32: PInteger); inline;
 /// redirect to FPC InterlockedIncrement64() or Delphi AtomicIncrement() on non Intel CPU
 procedure LockedInc64(int64: PInt64); inline;
 
-{$endif CPUINTEL}
-
-/// low-level string reference counter increment (do nothing if constant)
-procedure FastStringAddRef(str: pointer);
-
-/// low-level string reference counter decrement (do nothing if constant)
-procedure FastStringDecRef(str: pointer);
-  {$ifdef HASINLINE} {$ifdef ISDELPHI} inline; {$endif} {$endif}
-
-/// low-level string reference counter unprocess
-// - caller should have tested that refcnt>=0
-// - returns true if the managed variable should be released (i.e. refcnt was 1)
-function StrCntDecFree(var refcnt: TStrCnt): boolean;
-  {$ifndef CPUINTEL} inline; {$endif}
-
-/// low-level dynarray reference counter unprocess
-// - caller should have tested that refcnt>=0
-function DACntDecFree(var refcnt: TDACnt): boolean;
-  {$ifndef CPUINTEL} inline; {$endif}
-
-/// low-level string reference counter process
-procedure StrCntAdd(var refcnt: TStrCnt; increment: TStrCnt = 1);
-  {$ifdef HASINLINE} inline; {$endif}
-
-/// low-level dynarray reference counter process
-procedure DACntAdd(var refcnt: TDACnt; increment: TDACnt = 1);
-  {$ifdef HASINLINE} inline; {$endif}
+{$endif ASMINTEL}
 
 /// fast atomic compare-and-swap operation on a pointer-sized integer value
 // - via Intel/AMD custom asm or FPC RTL InterlockedCompareExchange(pointer)
@@ -3032,25 +3042,25 @@ procedure DACntAdd(var refcnt: TDACnt; increment: TDACnt = 1);
 // - used e.g. as thread-safe atomic operation for TLightLock/TRWLock
 // - Target should be aligned, which is the case when defined as a class field
 function LockedExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt): boolean;
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// fast atomic addition operation on a pointer-sized integer value
 // - via Intel/AMD custom asm or FPC RTL InterlockedExchangeAdd(pointer)
 // - Target should be aligned, which is the case when defined as a class field
 procedure LockedAdd(var Target: PtrUInt; Increment: PtrUInt);
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// fast atomic substraction operation on a pointer-sized integer value
 // - via Intel/AMD custom asm or FPC RTL InterlockedExchangeAdd(-pointer)
 // - Target should be aligned, which is the case when defined as a class field
 procedure LockedDec(var Target: PtrUInt; Decrement: PtrUInt);
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// fast atomic addition operation on a 32-bit integer value
 // - via Intel/AMD custom asm or FPC RTL InterlockedExchangeAdd(pointer)
 // - Target should be aligned, which is the case when defined as a class field
 procedure LockedAdd32(var Target: cardinal; Increment: cardinal);
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 {$ifdef ISDELPHI}
 
@@ -3063,13 +3073,11 @@ function BSRdword(c: cardinal): cardinal;
 // - returns 255 if q equals 0
 // - mimics the FPC intrinsic, via asm on Intel x64 or optimized pure pascal
 function BSRqword(const q: Qword): cardinal;
-  {$ifndef CPUX64} {$ifdef HASINLINE} inline; {$endif} {$endif}
+  {$ifndef ASMX64} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
 {$endif ISDELPHI}
 
-{$ifdef ASMINTEL}
-
-{$ifdef ASMX64} // will define its own self-dispatched SSE2/AVX functions
+{$ifdef ASMX64NOTPIC} // will define its own self-dispatched SSE2/AVX functions
 
 type
   /// most common x86_64 CPU abilities, used e.g. by FillCharFast/MoveFast
@@ -3088,15 +3096,46 @@ const
   // identify Intel/AMD AVX2+BMI support at Haswell level
   CPUAVX2HASWELL = [cfAVX2, cfSSE42, cfBMI1, cfBMI2, cfCLMUL];
 
-{$ifdef ASMX64AVXNOCONST}
+{$ifdef ASMX64AVX1}
 /// simdjson asm as used by mormot.core.unicode on Haswell for FPC IsValidUtf8()
 function IsValidUtf8Avx2(source: PUtf8Char; sourcelen: PtrInt):  boolean;
 // avx2 asm as used by mormot.core.buffers for Base64EncodeMain/Base64DecodeMain
 procedure Base64EncodeAvx2(var b: PAnsiChar; var blen: PtrUInt; var b64: PAnsiChar);
 procedure Base64DecodeAvx2(var b64: PAnsiChar; var b64len: PtrInt; var b: PAnsiChar);
-{$endif ASMX64AVXNOCONST}
+{$endif ASMX64AVX1}
 
-{$endif ASMX64}
+{$endif ASMX64NOTPIC}
+
+
+{ ************ Faster Alternative to RTL Standard Functions }
+
+/// low-level string reference counter increment (do nothing if constant)
+procedure FastStringAddRef(str: pointer);
+
+/// low-level string reference counter decrement (do nothing if constant)
+procedure FastStringDecRef(str: pointer);
+  {$ifdef HASINLINE} {$ifdef ISDELPHI} inline; {$endif} {$endif}
+
+/// low-level string reference counter unprocess
+// - caller should have tested that refcnt>=0
+// - returns true if the managed variable should be released (i.e. refcnt was 1)
+function StrCntDecFree(var refcnt: TStrCnt): boolean;
+  {$ifndef ASMINTEL} inline; {$endif}
+
+/// low-level dynarray reference counter unprocess
+// - caller should have tested that refcnt>=0
+function DACntDecFree(var refcnt: TDACnt): boolean;
+  {$ifndef ASMINTEL} inline; {$endif}
+
+/// low-level string reference counter process
+procedure StrCntAdd(var refcnt: TStrCnt; increment: TStrCnt = 1);
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// low-level dynarray reference counter process
+procedure DACntAdd(var refcnt: TDACnt; increment: TDACnt = 1);
+  {$ifdef HASINLINE} inline; {$endif}
+
+{$ifdef ASMINTELNOTPIC}
 
 /// our fast version of FillChar() on Intel/AMD
 // - on Intel i386/x86_64, will use fast SSE2/AVX instructions (if available)
@@ -3133,7 +3172,7 @@ procedure MoveFast(const src; var dst; cnt: PtrInt); { use our AVX-ready asm }
 var FillcharFast: procedure(var Dest; count: PtrInt; Value: byte);
 var MoveFast: procedure(const Source; var Dest; Count: PtrInt);
 
-{$endif ASMINTEL}
+{$endif ASMINTELNOTPIC}
 
 /// Move() with one-by-one byte copy
 // - expects Source <> nil, Dest <> nil and Count > 0
@@ -3170,15 +3209,18 @@ procedure FillZeroSmall(P: pointer; Length: PtrInt);
 // (which is also used by CompareMem and CompareBuf)
 // - on other platforms, run a simple but efficient per-byte comparison
 function MemCmp(P1, P2: PByteArray; L: PtrInt): integer;
-  {$ifndef CPUX64} {$ifdef HASINLINE} inline; {$endif} {$endif}
+  {$ifndef ASMX64} {$ifdef HASINLINE} inline; {$endif} {$endif}
 
 /// our fast version of CompareMem()
 // - tuned asm for x86, call MemCmpSse2 for x64, or fallback to tuned pascal
 function CompareMem(P1, P2: pointer; Length: PtrInt): boolean;
-  {$ifdef CPUX64}inline;{$endif}
+  {$ifdef ASMX64}inline;{$endif}
+
+/// overload wrapper of MemCmp() to compare memory buffers with length
+function CompareBuf(P1, P2: pointer; P1Len, P2Len: PtrInt): integer;
+  overload; {$ifdef HASINLINE}inline;{$endif}
 
 /// overload wrapper of MemCmp() to compare a RawByteString vs a memory buffer
-// - will first check length(P1)=P2Len then call MemCmp()
 function CompareBuf(const P1: RawByteString; P2: pointer; P2Len: PtrInt): integer;
   overload; {$ifdef HASINLINE}inline;{$endif}
 
@@ -3203,11 +3245,15 @@ function CompareMemFixed(P1, P2: pointer; Length: PtrInt): boolean;
 function CompareMemSmall(P1, P2: pointer; Length: PtrInt): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
-{$ifndef CPUX86}
+/// a CompareMem()-like function designed for comparison with a small shortstring
+function CompareShort(P1: pointer; const P2: ShortString): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
+
+{$ifndef ASMX86}
 /// low-level efficient pure pascal function used when inlining PosEx()
 // - not to be called directly
 function PosExPas(sub, p: PUtf8Char; offset: PtrUInt): PtrInt;
-{$endif CPUX86}
+{$endif ASMX86}
 
 {$ifdef UNICODE}
 /// low-level efficient pure pascal function used when inlining PosExString()
@@ -3215,9 +3261,9 @@ function PosExPas(sub, p: PUtf8Char; offset: PtrUInt): PtrInt;
 function PosExStringPas(sub, p: PChar; offset: PtrUInt): PtrInt;
 {$endif UNICODE}
 
-/// faster RawUtf8 Equivalent of standard StrUtils.PosEx
+/// faster RawUtf8 Equivalent of standard StrUtils.PosEx - with x86 asm version
 function PosEx(const SubStr, S: RawUtf8; Offset: PtrUInt = 1): PtrInt;
-  {$ifndef CPUX86}{$ifdef HASINLINE}inline;{$endif}{$endif}
+  {$ifndef ASMX86}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
 /// our own PosEx() function dedicated to RTL string process
 // - Delphi XE or older don't support Pos() with an Offset
@@ -3232,7 +3278,7 @@ function PosExChar(Chr: AnsiChar; const Str: RawUtf8): PtrUInt;
 /// fast retrieve the position of a given character in a #0 ended buffer
 // - will use fast SSE2 asm on x86_64
 function PosChar(Str: PUtf8Char; Chr: AnsiChar): PUtf8Char; overload;
-  {$ifndef CPUX64}{$ifdef FPC}inline;{$endif}{$endif}
+  {$ifndef ASMX64}{$ifdef FPC}inline;{$endif}{$endif}
 
 /// fast retrieve the position of a given character in a #0 ended buffer
 // - will use fast SSE2 asm on i386 and x86_64
@@ -3278,7 +3324,7 @@ function Split(const Str, SepStr: RawUtf8; StartPos: PtrInt = 1): RawUtf8; overl
 
 /// buffer-overflow safe version of StrComp(), to be used with PUtf8Char/PAnsiChar
 function StrComp(Str1, Str2: pointer): PtrInt;
-  {$ifndef CPUX86}{$ifdef HASINLINE}inline;{$endif}{$endif}
+  {$ifndef ASMX86}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
 /// our fast version of StrComp(), to be used with PWideChar
 function StrCompW(Str1, Str2: PWideChar): PtrInt;
@@ -3297,11 +3343,11 @@ function StrLenSafe(S: pointer): PtrInt;
 // - under x86, will detect SSE2 and use it if available, reaching e.g.
 // 37.5 GB/s on a Core i5-13500 under Linux x86_64
 // - on ARM/AARCH64 POSIX, mormot.core.os would redirect to optimized libc
-{$ifdef CPUX64}
+{$ifdef ASMX64}
 function StrLen(S: pointer): PtrInt;
 {$else}
 var StrLen: function(S: pointer): PtrInt = StrLenSafe;
-{$endif CPUX64}
+{$endif ASMX64}
 
 /// our fast version of StrLen(), to be used with PWideChar
 function StrLenW(S: PWideChar): PtrInt;
@@ -3310,6 +3356,11 @@ function StrLenW(S: PWideChar): PtrInt;
 // - source is expected to be not nil
 // - returns the beginning of next line, or nil if source^=#0 was reached
 function GotoNextLine(source: PUtf8Char): PUtf8Char;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// go to next text line, ended by #10 or #13#10 - smaller version
+// - returns the beginning of next line, or #0 (not nil) if source^=#0 was reached
+function GotoNextLineSmall(source: PUtf8Char): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// fast go to the first char <= #13
@@ -3460,7 +3511,7 @@ function bswap16(a: cardinal): cardinal;
 
 /// convert the endianness of a given unsigned 32-bit integer
 function bswap32(a: cardinal): cardinal;
-  {$ifndef CPUINTEL}inline;{$endif}
+  {$ifndef ASMINTEL}inline;{$endif}
 
 /// in-place convert the endianness of several unsigned 32-bit integers
 // - n is required to be > 0
@@ -3468,7 +3519,7 @@ procedure bswap32array(a: PCardinalArray; n: PtrInt);
 
 /// convert the endianness of a given unsigned 64-bit integer
 function bswap64({$ifdef FPC_X86}constref{$else}const{$endif} a: QWord): QWord;
-  {$ifndef CPUINTEL}inline;{$endif}
+  {$ifndef ASMINTEL}inline;{$endif}
 
 /// convert the endianness of an array of unsigned 64-bit integer
 // - n is required to be > 0
@@ -3552,17 +3603,19 @@ function EventEquals(const eventA, eventB): boolean;
 
 type
   /// define a buffer of 1KB of data
-  TBuffer1K = array[0..1023] of AnsiChar;
+  TBuffer1K = array[0 .. pred(1 shl 10)] of AnsiChar;
   /// define a buffer of 2KB of data
-  TBuffer2K = array[0..2047] of AnsiChar;
+  TBuffer2K = array[0 .. pred(2 shl 10)] of AnsiChar;
   /// define a buffer of 4KB of data
-  TBuffer4K = array[0..4095] of AnsiChar;
+  TBuffer4K = array[0 .. pred(4 shl 10)] of AnsiChar;
   /// define a buffer of 8KB of data
-  TBuffer8K = array[0..8191] of AnsiChar;
+  TBuffer8K = array[0 .. pred(8 shl 10)] of AnsiChar;
   /// define a buffer of 16KB of data
-  TBuffer16K = array[0..16383] of AnsiChar;
+  TBuffer16K = array[0 .. pred(16 shl 10)] of AnsiChar;
   /// define a buffer of 64KB of data
   TBuffer64K = array[word] of AnsiChar;
+  /// define a buffer of 128KB of data
+  TBuffer128K = array[0 .. pred(128 shl 10)] of AnsiChar;
 
   /// implements a 4KB stack-based storage of some (UTF-8 or binary) content
   // - could be used e.g. to make a temporary copy when JSON is parsed in-place
@@ -3637,7 +3690,7 @@ type
   private
     procedure AddRealloc(new: PtrInt);
   public
-    /// direct access to the internal temporary buffer
+    /// direct access to the internal 4KB temporary buffer
     Store: TSynTempBuffer;
     /// initialize a local buffer from stack, as Temp.InitOnStack
     procedure Init; overload;
@@ -3692,7 +3745,7 @@ procedure OrMemory(Dest, Source: PByteArray; Size: PtrInt);
 
 /// logical "Dest := Dest XOR Source" of two memory buffers - using SSE2 asm on x86_64
 procedure XorMemory(Dest, Source: PByteArray; Size: PtrInt); overload;
-  {$ifndef CPUX64} {$ifdef HASINLINE}inline;{$endif} {$endif}
+  {$ifndef ASMX64} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 /// logical "Dest := Source1 XOR Source2" of two memory buffers into a third
 procedure XorMemory(Dest, Source1, Source2: PByteArray; Size: PtrInt); overload;
@@ -3720,7 +3773,7 @@ function IsZeroSmall(P: pointer; Length: PtrInt): boolean;
 // from mormot.core.text may be preferred, e.g. on memory mapped files
 // - expects Text and TextEnd to be not nil - see GetLineSize() instead
 function BufferLineLength(Text, TextEnd: PUtf8Char): PtrInt;
-  {$ifndef CPUX64}{$ifdef HASINLINE}inline;{$endif}{$endif}
+  {$ifndef ASMX64}{$ifdef HASINLINE}inline;{$endif}{$endif}
   
 type
   TCrc32tab = array[0..7, byte] of cardinal;
@@ -4018,13 +4071,13 @@ function SynLZdecompress1partial(src: PAnsiChar; size: integer; dst: PAnsiChar;
 // with somewhat already pre-encoded data like text, JSON or our mormot.core.data
 // binary serialization
 function SynLZcompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): integer;
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// raw SynLZ decompression algorithm
 // - includes optimized x86/x64 asm version on Intel/AMD
 // - just redirects to SynLZcompress1pas on other CPUs
 function SynLZdecompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): integer;
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// compress a data content using the SynLZ algorithm
 // - as expected by THttpClientSocket/THttpServerGeneric.RegisterCompress
@@ -4325,19 +4378,6 @@ type
   // and SortDynArrayPUtf8CharI/SortDynArrayStringI in mormot.core.text
   TDynArraySortCompare = function(const A, B): integer;
 
-  /// the recognized operators for comparison functions results match
-  TCompareOperator = (
-    coEqualTo,
-    coNotEqualTo,
-    coLessThan,
-    coLessThanOrEqualTo,
-    coGreaterThan,
-    coGreaterThanOrEqualTo);
-
-/// fast search if a comparison function result (<0,0,>0) match an operator
-function SortMatch(CompareResult: integer; CompareOperator: TCompareOperator): boolean;
-  {$ifdef HASINLINE} inline; {$endif}
-
 /// compare two "array of boolean" 8-bit elements
 function SortDynArrayBoolean(const A, B): integer;
 
@@ -4397,11 +4437,11 @@ function SortDynArrayAnsiString(const A, B): integer;
 /// compare two "array of RawByteString" elements, with case sensitivity
 // - can't use StrComp() or similar functions since RawByteString may contain #0
 // - on Intel/AMD, the more efficient SortDynArrayAnsiString asm is used instead
-{$ifdef CPUINTEL}
+{$ifdef ASMINTEL}
 var SortDynArrayRawByteString: TDynArraySortCompare = SortDynArrayAnsiString;
 {$else}
 function SortDynArrayRawByteString(const A, B): integer;
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
 /// compare two "array of PUtf8Char/PAnsiChar" elements, with case sensitivity
 function SortDynArrayPUtf8Char(const A, B): integer;
@@ -5452,19 +5492,20 @@ const
   HexCharsUpper: array[0..15] of AnsiChar = '0123456789ABCDEF';
   HexCharsLower: array[0..15] of AnsiChar = '0123456789abcdef';
 
-procedure AppendShortByteHex(value: byte; var dest: ShortString);
+procedure AppendShortByteHex(value: PtrUInt; var dest: ShortString);
 var
   len: PtrInt;
-  d: PAnsiChar;
+  d, hex: PAnsiChar;
 begin
   d := @dest;
   len := ord(d[0]);
   if len + 2 > high(dest) then
     exit;
-  d[len + 1] := HexCharsUpper[value shr 4];
+  hex := @HexCharsUpper;
+  d[len + 1] := hex[value shr 4];
   inc(len, 2);
   value := value and $0f;
-  d[len] := HexCharsUpper[value];
+  d[len] := hex[value];
   d[0] := AnsiChar(len);
 end;
 
@@ -6664,7 +6705,7 @@ begin
     {$endif CPUX86NOTPIC}
     c := val;
     repeat
-      {$ifdef CPUX86}
+      {$ifdef ASMX86}
       asm // by-passing the RTL is a good idea here
         push    ebx
         mov     edx, dword ptr [c + 4]
@@ -6689,7 +6730,7 @@ begin
       {$else}
       c100 := c div 100;   // one div by two digits
       dec(c, c100 * 100);  // fast c := c mod 100
-      {$endif CPUX86}
+      {$endif ASMX86}
       dec(P, 2);
       PWord(P)^ := tab[c];
       c := c100;
@@ -6720,12 +6761,20 @@ end;
 
 function ToShort(const val: Int64): TShort23;
 var
-  tmp: TTemp24;
   p: PAnsiChar;
 begin
-  p := {%H-}StrInt64(@tmp[23], val);
-  result[0] := AnsiChar(@tmp[23] - p);
+  p := {%H-}StrInt64(@result[23], val); // use result as TTemp24
+  result[0] := AnsiChar(@result[23] - p);
   MoveFast(p^, result[1], ord(result[0]));
+end;
+
+procedure ToShortU(const val: PtrUInt; Dest: PShort23);
+var
+  p: PAnsiChar;
+begin
+  p := {%H-}StrUInt32(@Dest^[23], val); // use Dest^ as TTemp24
+  Dest^[0] := AnsiChar(@Dest^[23] - p);
+  MoveFast(p^, Dest^[1], ord(Dest^[0]));
 end;
 
 function GetExtended(P: PUtf8Char): TSynExtended;
@@ -6884,6 +6933,43 @@ begin
     result := default;
 end;
 
+function IsInt64(P: PUtf8Char; len: PtrInt; value: PInt64): boolean;
+var
+  v: QWord;
+  min: boolean;
+  c: byte;
+begin
+  result := false;
+  if (P = nil) or
+     (len <= 0) then
+    exit;
+  inc(len, PtrUInt(P)); // PUtf8Char(len) = PEnd
+  min := false;
+  v := 0;
+  if P^ = '-' then
+  begin
+    min := true;
+    inc(P);
+    if P >= PUtf8Char(len) then
+      exit;
+  end;
+  repeat
+    c := byte(P^);
+    inc(P);
+    dec(c, 48);
+    if c > 9 then
+      exit;
+    if value <> nil then
+      v := v * 10 + c;
+  until P >= PUtf8Char(len);
+  result := true;
+  if value = nil then
+    exit;
+  if min then
+    v := -v;
+  value^ := v;
+end;
+
 function ToInteger(const text: RawUtf8; out value: integer): boolean;
 var
   v, err: integer;
@@ -7003,17 +7089,15 @@ begin
   result := ord(A > B) - ord(A < B);
 end;
 
-{$else}
+{$else} // Delphi x86 compiler struggles at compiling Int64/QWord comparisons
 
 function CompareInt64(const A, B: Int64): integer;
 begin
-  // Delphi x86 compiler is not efficient at compiling Int64 comparisons
   result := SortDynArrayInt64(A, B);
 end;
 
 function CompareQword(const A, B: QWord): integer;
 begin
-  // Delphi x86 compiler is not efficient, and oldest even incorrect
   result := SortDynArrayQWord(A, B);
 end;
 
@@ -7269,7 +7353,7 @@ end;
 
 {$else}
 
-{$ifndef CPUINTEL}
+{$ifndef ASMINTEL}
 procedure FastStringAddRef(str: pointer);
 begin
   if str = nil then
@@ -7278,7 +7362,7 @@ begin
   if PStrCnt(str)^ >= 0 then
     AtomicIncrement(PStrCnt(str)^);
 end;
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
 procedure FastStringDecRef(str: pointer);
 begin
@@ -7794,22 +7878,22 @@ begin
       j := R;
       p := (L + R) shr 1;
       repeat
-      {$ifdef CPUX86} // circumvent QWord comparison slowness (and bug)
-        while CompareQWord(ID[i], ID[p]) < 0 do
+      {$ifdef FPC_OR_UNICODE}
+      tmp := ID[p];
+      if ID[i] < tmp then
+        repeat
+          inc(i)
+        until ID[i] >= tmp;
+      if ID[j] > tmp then
+        repeat
+          dec(j)
+        until ID[j] <= tmp;
+      {$else} // circumvent oldest Delphi slowness (and bug on Delphi 7)
+        while SortDynArrayQWord(ID[i], ID[p]) < 0 do
           inc(i);
-        while CompareQWord(ID[j], ID[p]) > 0 do
+        while SortDynArrayQWord(ID[j], ID[p]) > 0 do
           dec(j);
-      {$else}
-        tmp := ID[p];
-        if ID[i] < tmp then
-          repeat
-            inc(i)
-          until ID[i] >= tmp;
-        if ID[j] > tmp then
-          repeat
-            dec(j)
-          until ID[j] <= tmp;
-      {$endif CPUX86}
+      {$endif FPC_OR_UNICODE}
         if i <= j then
         begin
           tmp := ID[j];
@@ -7945,7 +8029,7 @@ begin
   result := FastFindIntegerSorted(pointer(Values), Length(Values) - 1, Value);
 end;
 
-{$ifndef CPUX64} // x86_64 has fast branchless asm for those functions
+{$ifndef ASMX64} // x86_64 has fast branchless asm for those functions
 
 function FastFindWordSorted(P: PWordArray; R: PtrInt; Value: Word): PtrInt;
 var
@@ -8018,7 +8102,7 @@ begin
   result := -1
 end;
 
-{$endif CPUX64}
+{$endif ASMX64}
 
 function FastFindQWordSorted(P: PQWordArray; R: PtrInt; const Value: QWord): PtrInt;
 var
@@ -8617,7 +8701,7 @@ begin
   a := pointer(aPtrArray);
   if a = nil then
     exit;
-  n := PDALen(a - _DALEN)^ + (_DAOFF - 1);
+  n := PDALen(a - _DALEN)^ + (_DAOFF - 1);  // = high()
   result := PPointerArray(a)[n];
   if n = 0 then
     TPointerDynArray(aPtrArray) := nil
@@ -8781,7 +8865,7 @@ begin
   if a = nil then
     exit;
   // release all owned TObject instances
-  RawObjectsClear(pointer(aObjArray), PDALen(PAnsiChar(a) - _DALEN)^ + _DAOFF);
+  RawObjectsClear(pointer(a), PDALen(PAnsiChar(a) - _DALEN)^ + _DAOFF);
   // release the dynamic array itself
   a := nil;
 end;
@@ -9243,7 +9327,7 @@ begin
 end;
 
 {$ifdef ISDELPHI} // intrinsic in FPC
-{$ifdef CPUINTEL}
+{$ifdef ASMINTEL}
 procedure ReadBarrier;
 asm
         {$ifdef CPUX86}
@@ -9258,7 +9342,7 @@ procedure ReadBarrier;
 begin
   MemoryBarrier; // modern Delphi intrinsic
 end;
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 {$endif ISDELPHI}
 
 procedure Rcu32(var src, dst);
@@ -9328,8 +9412,6 @@ begin
       inc(d[n], s[n]);
     until n = 0;
 end;
-
-{ ************ low-level functions manipulating bits }
 
 // naive code gives the best performance - bts [Bits] has an overhead
 // we tried with PPtrIntArray but PIntegerArray seems to generate better code
@@ -9434,7 +9516,7 @@ end;
 
 { ************ Faster alternative to RTL standard functions }
 
-{$ifndef CPUX86} // those functions have their own PIC-compatible x86 asm version
+{$ifndef ASMX86} // those functions have their own PIC-compatible x86 asm version
 
 function StrLenSafe(S: pointer): PtrInt;
 begin
@@ -9606,7 +9688,7 @@ begin
   result := (s1 and $ffff) + (s2 and $ffff) shl 16;
 end;
 
-{$endif CPUX86}
+{$endif ASMX86}
 
 function StrCompW(Str1, Str2: PWideChar): PtrInt;
 var
@@ -9766,11 +9848,11 @@ end;
 
 function PosExString(const SubStr, S: string; Offset: PtrUInt): PtrInt;
 begin
-  {$ifdef CPUX86}
+  {$ifdef ASMX86}
   result := PosEx(SubStr, S, Offset); // call x86 asm
   {$else}
   result := PosExPas(pointer(SubStr), pointer(S), Offset);
-  {$endif CPUX86}
+  {$endif ASMX86}
 end;
 
 {$endif UNICODE}
@@ -10016,9 +10098,24 @@ _0: if source[0] = #0 then
       inc(source);
       continue; // e.g. #9
     end;
-    result := source + 1;
+    result := source + 1; // points just after #10
     exit;
   until false;
+end;
+
+function GotoNextLineSmall(source: PUtf8Char): PUtf8Char;
+begin
+  result := source;
+  while true do
+    if result^ > #10 then
+      inc(result)
+    else if result^ = #10 then
+      break
+    else if result^ = #0 then
+      exit
+    else
+      inc(result);
+  inc(result); // points just after #10
 end;
 
 function IsAnsiCompatible(PC: PAnsiChar): boolean;
@@ -10171,7 +10268,7 @@ end;
 {$ifdef OSWINDOWS} // not defined in the Delphi RTL but in its Windows unit :(
 function GetCurrentThreadId: PtrUInt; stdcall; external 'kernel32';
 function CoCreateGuid(var h: THash128): PtrUInt; stdcall; external 'ole32.dll';
-{$ifndef CPUINTEL} // always available on WinARM on not defined on Delphi RTL
+{$ifndef CPUINTEL} // always available on WinARM but not defined in Delphi RTL
 function GetTickCount64: UInt64; stdcall; external 'kernel32';
 {$endif CPUINTEL}
 
@@ -10186,7 +10283,11 @@ function GetTickCount64: UInt64; cdecl external 'c' name 'mach_absolute_time';
 {$endif OSDDARWIN}
 procedure __Fill256FromOs(out e: THash256Rec);
 begin
+  {$ifdef FPC}
   e.q[0] := GetTickCount64;         // always available in FPC RTL
+  {$else}
+  PDouble(@e)^ := Now;              // good enough as fallback
+  {$endif FPC}
   crc256c(@e, SizeOf(e.q[0]), e.b); // weak but not void
 end; // mormot.core.os.posix.inc overrides to use OS API - but not /dev/urandom
 {$endif OSWINDOWS}
@@ -10199,16 +10300,17 @@ begin
   XorMemory(e.r[0], tmp.l);
   XorMemory(e.r[1], tmp.h);
   e.r[2].L := e.r[2].L xor PtrUInt(@tmp) xor tmp.d3;
-  e.r[2].H := e.r[2].H xor PtrUInt(GetCurrentThreadId) xor tmp.d2;
-  {$ifdef CPUINTEL}
+  e.r[2].H := e.r[2].H xor tmp.d2 xor PtrUInt(
+    {$ifdef POSIXDELPHI} MainThreadID {$else} GetCurrentThreadId {$endif});
+  {$ifdef ASMINTEL}
   if cfTSC in CpuFeatures then      // may trigger GPF if CR4.TSD bit is set
     tmp.d0 := tmp.d0 xor Rdtsc;     // 64-bit CPU cycles
   RdRand32(@tmp.l, 4);              // xor 128-bit HW CSPRNG: no-op if no cfSSE42
   if cfTSC in CpuFeatures then
     e.r[2].L := e.r[2].L xor Rdtsc; // has changed during slow RdRand32()
   {$else}
-  e.r[2].L := e.r[2].L xor GetTickCount64; // defined in FPC RTL or just above
-  {$endif CPUINTEL}
+  {$ifdef FPC} e.r[2].L := e.r[2].L xor GetTickCount64; {$endif FPC}
+  {$endif ASMINTEL}
   crcblock(@e.r[3], @tmp.l);        // crc32c 128-bit diffusion
 end; // note: RTL Random() not used because it is not thread-safe nor consistent
 
@@ -10495,13 +10597,27 @@ begin
             (a.Data = b.Data);
 end;
 
+
+{ ************ Low-level CPU Detection and Intrinsics }
+
 type
-  // 16KB/32KB hash table used by SynLZ - as used by the asm .inc files
+  // 16KB/32KB hash table used by SynLZ - as used by the asm .inc files below
   TOffsets = array[0..4095] of PAnsiChar;
 
-{$ifdef CPUINTEL}
+{$ifdef ASMINTEL}
+
+type
+  TIntelRegisters = packed record
+    eax, ebx, ecx, edx: cardinal;
+  end;
 
 // optimized asm for x86 and x86_64 is located in include files
+{$ifdef ASMX64}
+  {$include mormot.core.base.asmx64.inc}
+{$endif ASMX64}
+{$ifdef ASMX86}
+  {$include mormot.core.base.asmx86.inc}
+{$endif ASMX86}
 
 {$ifndef HASNOSSE2}
 
@@ -10536,19 +10652,6 @@ begin
       dec(n);
     until n = 0;
 end;
-
-type
-  TIntelRegisters = packed record
-    eax, ebx, ecx, edx: cardinal;
-  end;
-
-{$ifdef CPUX64}
-  {$include mormot.core.base.asmx64.inc}
-{$endif CPUX64}
-
-{$ifdef CPUX86}
-  {$include mormot.core.base.asmx86.inc}
-{$endif CPUX86}
 
 function IntelManufacturer: RawUtf8;
 var
@@ -10666,7 +10769,7 @@ begin
     except // clearly invalid opcode
       exclude(CpuFeatures, cfPOPCNT);
     end;
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   // note: cfERMS has no cpuid within some VMs -> ignore and assume present
   if cfAVX in CpuFeatures then
   begin
@@ -10676,7 +10779,7 @@ begin
     if CpuFeatures * CPUAVX2HASWELL = CPUAVX2HASWELL then
       include(X64CpuFeatures, cpuHaswell);
   end;
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
   // redirect some CPU-aware functions
   if cfSSE42 in CpuFeatures then // for both i386 and x86_64
   begin
@@ -10688,7 +10791,7 @@ begin
     InterningHasher := @crc32csse42;
   end;
   {$endif DISABLE_SSE42}
-  {$ifdef ASMX86}
+  {$ifdef ASMX86NOTPIC}
   {$ifndef HASNOSSE2}
   {$ifdef WITH_ERMS}
   if not (cfSSE2 in CpuFeatures) then // introduced in year 2000 with Pentium 4
@@ -10707,10 +10810,10 @@ begin
   {$endif HASNOSSE2}
   if cfSSE2 in CpuFeatures then
     StrLen := @StrLenSSE2;
-  {$endif ASMX86}
+  {$endif ASMX86NOTPIC}
 end;
 
-{$else not CPUINTEL}
+{$else not ASMINTEL}
 
 // fallback to pure pascal (or FPC RTL) for non-Intel CPUs
 
@@ -11166,7 +11269,7 @@ begin
   until n = 0;
 end;
 
-function bswap64(const a: QWord): QWord;
+function bswap64({$ifdef FPC_X86}constref{$else}const{$endif} a: QWord): QWord;
 begin
   result := SwapEndian(a); // use fast platform-specific function
 end;
@@ -11342,9 +11445,9 @@ end;
 
 {$endif CPUARM3264}
 
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
-{$ifndef ASMINTEL}
+{$ifndef ASMINTELNOTPIC}
 
 // fallback to pure pascal version for ARM or Intel PIC
 function crc32fasttab(crc: cardinal; buf: PAnsiChar; len: cardinal;
@@ -11438,12 +11541,12 @@ begin
 end;
 {$endif FPC}
 
-{$endif ASMINTEL}
+{$endif ASMINTELNOTPIC}
 
 
 { ************ Buffers (e.g. Hashing and SynLZ compression) Raw Functions }
 
-{$ifndef CPUX64} // there is fast branchless SSE2 assembly on x86-64
+{$ifndef ASMX64} // there is fast branchless SSE2 assembly on x86-64
 
 function BufferLineLength(Text, TextEnd: PUtf8Char): PtrInt;
 var
@@ -11503,7 +11606,7 @@ begin
   result := P1[L] - P2[L];
 end;
 
-{$endif CPUX64}
+{$endif ASMX64}
 
 function SynLZcompressdestlen(in_len: integer): integer;
 begin
@@ -11986,11 +12089,11 @@ begin
   result := PAnsiChar(dst) - dststart;
 end;
 
-{$ifdef CPUINTEL}
+{$ifdef ASMINTEL}
   {$ifndef HASNOSSE2}
     {$define INLINEDSEARCH} // leverage ByteScanIndex() SSE2 asm
   {$endif HASNOSSE2}
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 {.$define INLINEDFILL} // actually slower
 
 function RleUnCompress(src, dst: PByteArray; size: PtrUInt): PtrUInt;
@@ -12323,7 +12426,6 @@ begin
   dec(Store.added); // caller should have tested that Size = Store.added > 0
 end;
 
-
 procedure OrMemory(Dest, Source: PByteArray; Size: PtrInt);
 begin
   while Size >= SizeOf(PtrInt) do
@@ -12340,7 +12442,7 @@ begin
   end;
 end;
 
-{$ifndef CPUX64} // SSE2 version in mormot.core.base.asmx64.inc
+{$ifndef ASMX64} // SSE2 version in mormot.core.base.asmx64.inc
 procedure XorMemory(Dest, Source: PByteArray; Size: PtrInt);
 begin
   while Size >= SizeOf(PtrInt) do
@@ -12356,7 +12458,7 @@ begin
     Dest[Size] := Dest[Size] xor Source[Size];
   end;
 end;
-{$endif CPUX64}
+{$endif ASMX64}
 
 procedure XorMemory(Dest, Source1, Source2: PByteArray; Size: PtrInt);
 begin
@@ -12652,9 +12754,9 @@ begin
                 tab[1, ToByte(c shr 16)] xor tab[0, ToByte(c shr 24)];
 end;
 
-{$ifndef ASMX86} // those functions have their tuned x86 asm version
+{$ifndef ASMX86NOTPIC} // those functions have their tuned x86 asm version
 
-{$ifdef CPUX64}
+{$ifdef ASMX64}
 function CompareMem(P1, P2: pointer; Length: PtrInt): boolean;
 begin
   result := MemCmp(P1, P2, Length) = 0; // use our SSE2 optimized asm
@@ -12727,7 +12829,7 @@ begin
 zero:
   result := false;
 end;
-{$endif CPUX64}
+{$endif ASMX64}
 
 procedure crcblockfast(crc128, data128: PBlock128);
 begin
@@ -12768,7 +12870,39 @@ begin
   PWordArray(P)[1] := tab[Y - (d100 * 100)];
 end;
 
-{$endif ASMX86}
+{$endif ASMX86NOTPIC}
+
+function UInt8ToPChar(P: PAnsiChar; val: PtrUInt; tab: PWordArray): PAnsiChar;
+begin
+  result := P;
+  if val >= 10 then      // 0..9 branch below
+  begin
+    if val >= 100 then
+    begin
+      dec(val, 100);     // 100..199 is the most common pattern (40-60% for IP4)
+      result^ := '1';
+      if val >= 100 then // branch not taken is lighter than a div/mod
+      begin
+        dec(val, 100);
+        result^ := '2';
+      end;
+      inc(result);
+    end;
+    PWord(result)^ := tab[val]; // append remaining '00'..'99'
+    inc(PWord(result));
+  end
+  else
+  begin
+    result^ := AnsiChar(val + ord('0')); // '0'..'9'
+    inc(result);
+  end;
+end;
+
+procedure AppendShortByte(value: PtrUInt; dest: PAnsiChar);
+begin
+  dest[0] := AnsiChar(UInt8ToPChar(dest + ord(dest[0]) + 1, value,
+    @TwoDigitLookupW) - (dest + 1));
+end;
 
 function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
 var
@@ -12805,11 +12939,16 @@ begin
   end;
 end;
 
+function CompareBuf(P1, P2: pointer; P1Len, P2Len: PtrInt): integer;
+begin
+  result := MemCmp(P1, P2, MinPtrInt(P1Len, P2Len)); // natural string order
+  if result = 0 then
+    result := ComparePtrInt(P1Len, P2Len);
+end;
+
 function CompareBuf(const P1: RawByteString; P2: pointer; P2Len: PtrInt): integer;
 begin
-  result := ComparePtrInt(length(P1), P2Len);
-  if result = 0 then
-    result := MemCmp(pointer(P1), P2, P2Len);
+  result := CompareBuf(pointer(P1), P2, length(P1), P2Len);
 end;
 
 function CompareBuf(const P1, P2: RawByteString): integer;
@@ -12820,6 +12959,11 @@ end;
 function EqualBuf(const P1, P2: RawByteString): boolean;
 begin
   result := SortDynArrayRawByteString(P1, P2) = 0;
+end;
+
+function CompareShort(P1: pointer; const P2: ShortString): boolean;
+begin
+  result := CompareMemSmall(P1, @P2[1], ord(P2[0]));
 end;
 
 function CompareMemFixed(P1, P2: pointer; Length: PtrInt): boolean;
@@ -13379,25 +13523,6 @@ end;
 
 { ************ Sorting/Comparison Functions }
 
-function SortMatch(CompareResult: integer; CompareOperator: TCompareOperator): boolean;
-begin
-  case CompareOperator of
-    coEqualTo:
-      result := CompareResult = 0;
-    coNotEqualTo:
-      result := CompareResult <> 0;
-    coLessThan:
-      result := CompareResult < 0;
-    coLessThanOrEqualTo:
-      result := CompareResult <= 0;
-    coGreaterThan:
-      result := CompareResult > 0;
-  // coGreaterThanOrEqualTo:
-  else
-    result := CompareResult >= 0;
-  end;
-end;
-
 function SortDynArrayVariant(const A, B): integer;
 begin
   result := SortDynArrayVariantComp(TVarData(A), TVarData(B), {caseins=}false);
@@ -13451,11 +13576,11 @@ begin
   {$ifdef UNICODE}
   result := StrCompW(PWideChar(A), PWideChar(B));
   {$else}
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   result := SortDynArrayAnsiString(A, B); // has its own optimized asm
   {$else}
   result := StrComp(PUtf8Char(A), PUtf8Char(B));
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   {$endif UNICODE}
 end;
 
@@ -13521,7 +13646,7 @@ begin
 end;
 
 
-{$if not defined(CPUX64ASM) and not defined(CPUX86)} // fallback if no asm
+{$if not defined(ASMX64AVX0) and not defined(ASMX86)} // fallback if no asm
 
 procedure DynArrayHashTableAdjust(P: PIntegerArray; deleted: integer; count: PtrInt);
 begin
@@ -13832,7 +13957,7 @@ begin
   SetPointer(Data, DataLen);
 end;
 
-function TSynMemoryStream.Write(const Buffer; Count: integer): Longint;
+function TSynMemoryStream.Write(const Buffer; Count: Longint): Longint;
 begin
   result := RaiseStreamError(self, 'Write');
 end;

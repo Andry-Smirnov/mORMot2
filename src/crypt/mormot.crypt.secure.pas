@@ -43,6 +43,7 @@ uses
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
+  mormot.core.search,
   mormot.lib.sspi,   // for WinCertDecode() - void unit on POSIX
   mormot.crypt.core;
 
@@ -387,7 +388,7 @@ type
     /// convert this identifier as an explicit TDocVariant JSON object
     // - returns e.g.
     // ! {"Created":"2016-04-19T15:27:58","Identifier":1,"Counter":1,
-    // ! "Value":3137644716930138113,"Hex":"2B8B273F00008001"}
+    // !  "Value":3137644716930138113,"Hex":"2B8B273F00008001"}
     function AsVariant: variant;
       {$ifdef HASINLINE}inline;{$endif}
     /// convert this identifier to an explicit TDocVariant JSON object
@@ -3253,6 +3254,7 @@ const
   // - 4096-bit has no security advantage, just slower process
   // - 7680-bit is highly impractical (e.g. generation can be more than 30 secs)
   // and offers only 192-bit of security, so other algorithms may be preferred
+  // - see also OpenSslDefaultRsaBits() and RSA_INTERNAL_DEFAULT_GENERATION_BITS
   RSA_DEFAULT_GENERATION_BITS = 2048;
 
   /// the JWT algorithm names according to our known asymmetric algorithms
@@ -3871,6 +3873,10 @@ type
       aIsComputer: boolean = false; const aSalt: RawUtf8 = '';
       aEncType: integer = ENCTYPE_AES256_CTS_HMAC_SHA1_96;
       aIterations: integer = 0): boolean;
+    /// compute a binary KeyTab with one entry with supplied credentials
+    class function Generate(const aPrincipal: RawUtf8; const aPassword: SpiUtf8;
+      aIsComputer: boolean = false; const aSalt: RawUtf8 = '';
+      aEncType: integer = ENCTYPE_AES256_CTS_HMAC_SHA1_96): RawByteString;
   end;
 
 /// raw function to recognize the OID(s) of a public key ASN1_SEQ definition
@@ -4921,7 +4927,7 @@ var
   logN, R, P: cardinal;
   hasher: TSynHasher absolute signer;
   dig: THash256 absolute signer;
-begin
+{%H-}begin
   case format of
     mcfMd5Crypt .. mcfSha512Crypt:
       result := hasher.UnixCryptHash(MCF_ALGO[format], password, rounds, saltsize, salt);
@@ -4999,6 +5005,11 @@ begin
         SCryptRoundsDecode(rounds, logN, R, P);
         h := SCryptHash(password, salt, logN, R, P, @pos);
       end;
+  else
+    begin
+      result := mcfUnknown;
+      exit;
+    end;
   end;
   if (pos = 0) or
      (mormot.core.base.StrComp(checksum, PUtf8Char(pointer(h)) + pos - 1) <> 0) then
@@ -5358,8 +5369,8 @@ var
 begin
   fAlgo := aAlgo;
   a := SIGN_HASH[Algo];
-  fSignatureSize := SIGN_SIZE[Algo];
-  fBlockMax := BLOCK_SIZE[Algo]; // typically 15 (256-bit) or 31 (512-bit)
+  fSignatureSize := SIGN_SIZE[fAlgo];
+  fBlockMax := BLOCK_SIZE[fAlgo]; // typically 15 (256-bit) or 31 (512-bit)
   fBlockSize := (fBlockMax + 1) shl 2;
   if fBlockMax = 0 then
   begin // we estimate that the HMAC pattern is part of the SHA-3 sponge design
@@ -5464,7 +5475,7 @@ end;
 function TSynSigner.Hash(aAlgo: TSignAlgo; aBuffer: pointer; aLen: integer;
   out aDigest: THash512Rec): integer;
 begin
-  result := fHasher.Full(SIGN_HASH[fAlgo], aBuffer, aLen, aDigest);
+  result := fHasher.Full(SIGN_HASH[aAlgo], aBuffer, aLen, aDigest);
 end;
 
 function TSynSigner.Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
@@ -5478,7 +5489,7 @@ begin
   if aSecretPbkdf2Round <> 0 then
     fHasher.CopyTo(bak); // save initial PRF(secret) state
   Update(aSalt);
-  if not (Algo in SIGNER_SHA3) then // padding + XOF mode are part of SHA-3
+  if not (fAlgo in SIGNER_SHA3) then // padding + XOF mode are part of SHA-3
     // U1 = PRF(secret, salt + INT_32_BE(part))
     UpdateBigEndian(aPartNumber);  // is a 1-based index
   Final(aDerivatedKey, {noinit=}true);
@@ -5576,10 +5587,10 @@ begin
   r := aDestLen - (l * hlen); // mod
   if r <> 0 then
     inc(l); // ceil()
-  if (Algo in SIGNER_SHA3) and
+  if (aAlgo in SIGNER_SHA3) and
      (l > 1) then
     ESynCrypto.RaiseUtf8('TSynSigner.Pbkdf2(%) with DestLen=%: use SHAKE instead',
-      [ToText(algo)^, aDestLen]);
+      [ToText(aAlgo)^, aDestLen]);
   // DK = T1 + T2 + .. + Tl with Ti = F(secret, salt, round, part)
   p := FastNewString(l * hlen); // pre-allocate destination buffer
   pointer(result) := p;
@@ -5662,7 +5673,7 @@ procedure TSynSigner.AssignTo(var aDerivatedKey: THash512Rec;
 var
   ks: integer;
 begin
-  case algo of
+  case fAlgo of
     saSha3S128:
       ks := 128; // truncate to Keccak sponge precision
     saSha3S256:
@@ -6150,7 +6161,7 @@ function DigestServerInit(Algo: TDigestAlgo;
   const QuotedRealm, Prefix, Suffix: RawUtf8; Opaque, Tix64: Int64): RawUtf8;
 var
   h: THash128Rec;
-  noncehex, opaquehex: string[32];
+  noncehex, opaquehex: TShort32;
 begin
   result := '';
   if (Algo = daUndefined) or
@@ -7997,7 +8008,7 @@ end;
 // core is not published outside of the system unit, it consumes 2KB from a weak
 // 32-bit seed from GetTickCount/fptime, and is not thread-safe either
 
-{$ifdef CPUINTEL}
+{$ifdef ASMINTEL}
 
 { TCryptRandomRdRand }
 
@@ -8012,7 +8023,7 @@ begin
   result := RdRand32; // class is only registered if cfRAND in CpuFeatures
 end;
 
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
 { TCryptHash }
 
@@ -8073,7 +8084,7 @@ end;
 
 function TCryptHash.UpdateStream(stream: TStream): Int64;
 var
-  temp: array[word] of word; // 128KB temporary buffer
+  temp: TBuffer128K;
   read: integer;
 begin
   result := 0;
@@ -9985,10 +9996,10 @@ begin
     TCryptRandomAesPrng.Implements('rnd-default,rnd-aes');
     TCryptRandomLecuyerPrng.Implements('rnd-lecuyer');
     TCryptRandomDelphi.Implements('rnd-delphi');
-    {$ifdef CPUINTEL}
+    {$ifdef ASMINTEL}
     if cfRAND in CpuFeatures then
       TCryptRandomRdRand.Implements('rnd-rdrand');
-    {$endif CPUINTEL}
+    {$endif ASMINTEL}
     TCryptRandomEntropy.Implements(RndAlgosText);
     TCryptRandomSysPrng.Implements('rnd-system,rnd-systemblocking');
     TCryptHasherInternal.Implements(HashAlgosText);
@@ -10737,6 +10748,22 @@ begin
               aIsComputer, aEncType, aIterations) and
             Add(e);
   FillZero(e.Key); // anti-forensic
+end;
+
+class function TKerberosKeyTabGenerator.Generate(const aPrincipal: RawUtf8;
+  const aPassword: SpiUtf8; aIsComputer: boolean; const aSalt: RawUtf8;
+  aEncType: integer): RawByteString;
+var
+  gen: TKerberosKeyTabGenerator;
+begin
+  result := '';
+  gen := TKerberosKeyTabGenerator.Create;
+  try
+    if gen.AddNew(aPrincipal, aPassword, aIsComputer, aSalt, aEncType) then
+      result := gen.SaveToBinary;
+  finally
+    gen.Free;
+  end;
 end;
 
 function OidToCka(const oid, oid2: RawUtf8): TCryptKeyAlgo;

@@ -30,6 +30,7 @@ uses
   mormot.core.rtti,
   mormot.core.data,
   mormot.core.variants,
+  mormot.core.json,
   mormot.db.core,
   mormot.db.rad,
   {$ifdef ISDELPHIXE2}
@@ -838,7 +839,7 @@ begin
       W.AddDirect('}', ',');
       Data.Next;
     until Data.Eof;
-    W.CancelLastComma(']');
+    W.ReplaceLastComma(']');
     W.SetText(RawUtf8(result));
   finally
     W.Free;

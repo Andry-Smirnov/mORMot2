@@ -40,6 +40,7 @@ uses
   mormot.core.unicode,
   mormot.core.datetime,
   mormot.core.rtti,
+  mormot.core.json,
   mormot.core.variants,
   mormot.core.data,
   mormot.core.log,
@@ -109,6 +110,9 @@ type
   end;
   /// pointer to domain information as returned by CldapGetDomainInfo()
   PCldapDomainInfo = ^TCldapDomainInfo;
+
+function ToText(lt: TCldapDomainLogonType): RawUtf8; overload;
+function ToText(f: TCldapDomainFlags): RawUtf8; overload;
 
 /// send a CLDAP NetLogon message to a LDAP server over UDP to retrieve all
 // information of the domain
@@ -703,7 +707,7 @@ const
     '', ':1.2.840.113556.1.4.1941:');
 
   // traditionally, computer sAMAccountName ends with $
-  MACHINE_CHAR: array[boolean] of string[1] = ('', '$');
+  MACHINE_CHAR: array[boolean] of TShort1 = ('', '$');
 
 
 { **************** LDAP Attributes Definitions }
@@ -1935,8 +1939,9 @@ type
     /// the user password for non-anonymous Bind/BindSaslKerberos
     // - if you can, use instead password-less Kerberos authentication, or
     // at least ensure the connection is secured via TLS
-    // - as an alternative, on POSIX you can specify a keytab associated with
-    // UserName as 'FILE:/full/path/to/my.keytab' into this property
+    // - as an alternative, on POSIX you can specify a keytab as
+    // 'FILE:/full/path/to/my.keytab' into this property, and assign an UserName
+    // or let mormot.lib.gssapi.pas use TKerberosKeyTab.MachineAccountPrincipal
     property Password: SpiUtf8
       read fPassword write fPassword;
     /// Kerberos Canonical Domain Name
@@ -2789,13 +2794,23 @@ implementation
 
 { **************** CLDAP Client Functions }
 
+function ToText(lt: TCldapDomainLogonType): RawUtf8;
+begin
+  result := GetEnumNameTrimed(TypeInfo(TCldapDomainLogonType), ord(lt));
+end;
+
+function ToText(f: TCldapDomainFlags): RawUtf8;
+begin
+  result := GetSetName(TypeInfo(TCldapDomainFlags), f, {trimmed=}true);
+end;
+
 function TCldapDomainInfo.ToVariant: variant;
 begin
   VarClear(result);
   TDocVariantData(result).InitObject([
     'nt_version',       NTVersion,
-    'logon_type',       GetEnumNameTrimed(TypeInfo(TCldapDomainLogonType), ord(LogonType)),
-    'flags',            GetSetName(TypeInfo(TCldapDomainFlags), Flags, {trimmed=}true),
+    'logon_type',       ToText(LogonType),
+    'flags',            ToText(Flags),
     'guid',             GuidToRawUtf8(Guid),
     'forest',           Forest,
     'domain',           Domain,
@@ -3662,6 +3677,32 @@ end;
 
 { **************** LDAP Attributes Definitions }
 
+procedure _GlobalInfoLdap(Sender: TBinDictionary);
+var
+  server, dn, spn: RawUtf8;
+  nfo: TCldapDomainInfo;
+begin // late discovery of the LDAP server using CLDAP
+  server := CldapGetDefaultLdapController(@dn, @spn, @nfo, {timeout=}500);
+  if server = '' then
+    exit;
+  Sender.UpdateTextNotVoid( 'ldap:server',        server);
+  Sender.UpdateTextNotVoid( 'ldap:dn',            dn);
+  Sender.UpdateTextNotVoid( 'ldap:spn',           spn);
+  Sender.UpdateTextNotVoid( 'ldap:domain',        nfo.Domain);
+  Sender.UpdateTextNotVoid( 'ldap:flags',         ToText(nfo.Flags));
+  Sender.UpdateTextNotVoid( 'ldap:forest',        nfo.Forest);
+  Sender.UpdateTextNotVoid( 'ldap:guid',          GuidToRawUtf8(nfo.Guid));
+  Sender.UpdateTextNotVoid( 'ldap:host',          nfo.HostName);
+  Sender.UpdateTextNotVoid( 'ldap:ip',            nfo.IP);
+  Sender.UpdateTextNotVoid( 'ldap:logon',         LowerCaseU(ToText(nfo.LogonType)));
+  Sender.UpdateTextNotVoid( 'ldap:netbiosdomain', nfo.NetbiosDomain);
+  Sender.UpdateTextNotVoid( 'ldap:netbioshost',   nfo.NetbiosHostname);
+  Sender.UpdateTextNotVoid( 'ldap:unk',           nfo.Unk);
+  Sender.UpdateTextNotVoid( 'ldap:user',          nfo.User);
+  Sender.UpdateTextNotVoid( 'ldap:clientsite',    nfo.ClientSite);
+  Sender.UpdateTextNotVoid( 'ldap:serversite',    nfo.ServerSite);
+end;
+
 // private copy from constant to global variables because of Delphi which makes
 // a new RefCnt > 0 copy when assigning a RefCnt = -1 constant to a variable :(
 const
@@ -3786,6 +3827,7 @@ begin
     ELdap.RaiseUtf8('32-bit pointer collision of %', [_LdapIntern32[failed]]);
   _LdapIntern.Unique(sObjectName, 'objectName');
   _LdapIntern.Unique(sCanonicalName, 'canonicalName');
+  GlobalInfoRegister('ldap:', @_GlobalInfoLdap);
 end;
 
 // internal function: O(n) search of AttrName 32-bit-truncated interned pointer
@@ -6632,10 +6674,15 @@ begin
     SetUnknownError('Kerberos: Error initializing the library');
     exit;
   end;
-  if (fSettings.KerberosSpn = '') and
-     (fSettings.KerberosDN <> '') then
-    fSettings.KerberosSpn := 'LDAP/' + fSettings.TargetHost + {noport}
-                             '@' + UpperCase(fSettings.KerberosDN);
+  if fSettings.KerberosSpn = '' then
+  begin
+    // default SPN for the LDAP service - even with no SPN yet
+    fSettings.KerberosSpn := Join(['LDAP/', fSettings.TargetHost]); // no port
+    if fSettings.KerberosDN <> '' then
+      fSettings.KerberosSpn := Join([fSettings.KerberosSpn,
+        '@', UpperCase(fSettings.KerberosDN)]);
+    // if KerberosDN is not set, it would be taken from the UserName or keytab
+  end;
   fLog.EnterLocal(log, 'BindSaslKerberos(%) on %',
     [fSettings.UserName, fSettings.KerberosSpn], self);
   needencrypt := false;
@@ -6672,7 +6719,7 @@ begin
            (fResultCode = LDAP_RES_SUCCESS) then
           break;
         try
-          if fSettings.UserName <> '' then
+          if fSettings.Password <> '' then // UserName may be '' for FILE:keytab
             ClientSspiAuthWithPassword(fSecContext, datain, fSettings.UserName,
               fSettings.Password, fSettings.KerberosSpn, dataout)
           else
@@ -8266,7 +8313,7 @@ var
   datain, dataout: RawByteString;
 begin
   result := false;
-  if StartWithExact(aPassword, 'FILE:') then
+  if ClientSspiPasswordIsFile(aPassword) then
     exit; // don't cheat with this server credentials :)
   InvalidateSecContext(client);
   try

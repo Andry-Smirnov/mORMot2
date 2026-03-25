@@ -90,7 +90,8 @@ uses
   unixtype,
   {$endif OSPOSIX}
   mormot.core.os,
-  mormot.net.sock; // for INetTls
+  mormot.core.os.security, // for TSystemCertificateStore
+  mormot.net.sock;         // for INetTls
 
 
 { ******************** Dynamic or Static OpenSSL Library Loading }
@@ -6045,7 +6046,7 @@ begin
     // read and validate OPENSSL_LIBPATH environment variable
     libenv := OpenSslDefaultPath; // priority to the global variable
     if libenv = '' then
-      libenv := GetEnvironmentVariable('OPENSSL_LIBPATH');
+      libenv := GetSystemEnvString('OPENSSL_LIBPATH');
     if libenv <> '' then
       if DirectoryExists(libenv) then
         libenv := IncludeTrailingPathDelimiter(libenv)
