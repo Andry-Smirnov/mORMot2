@@ -52,6 +52,7 @@ uses
   Posix.SysWait,
   Posix.SysSocket,
   Posix.SysUtsname,
+  Posix.SysSysctl,
   Posix.DirEnt,
   Posix.NetinetIn,
   Posix.Termios;
@@ -61,6 +62,7 @@ uses
 
 // in the code below, PChar = PWideChar so those wrapper functions could make the
 // proper temporary conversion from UTF-16 to UTF-8 before calling the POSIX API
+// from regular pointer(aFileName) parameters
 
 type
   cint8   = shortint;
@@ -73,8 +75,10 @@ type
   clong   = PtrInt;
   culong  = PtrUInt;
   cuint64 = QWord;
+  pcint   = ^cint;
   ssize_t = PtrInt;
   size_t  = PtrUInt;
+  psize_t = ^size_t;
   TUid    = cardinal;
   TGid    = cardinal;
   PGid    = ^TGid;
@@ -86,6 +90,8 @@ function dlsym(Lib: pointer; Name: PAnsiChar): pointer;
 function dlclose(Lib: pointer): cint;
 function dlerror: UnicodeString;
 function dladdr(Lib: pointer; info: Pdl_info): cint;
+
+function envp: PPAnsiChar; // system.envp is nil !
 
 procedure InitCriticalSection(var cs);
 procedure DoneCriticalSection(var cs);
@@ -151,52 +157,24 @@ const
   S_IXGRP = Posix.SysStat.S_IXGRP;
   S_IXOTH = Posix.SysStat.S_IXOTH;
 
-  IPPROTO_TCP  = IPPROTO_TCP;
-  IPPROTO_UDP  = IPPROTO_UDP;
-  TCP_NODELAY  = 1;
-  TCP_CORK     = 3; // Linux specific
-  TCP_NOPUSH   = 4; // BSD specific
-  MSG_PEEK     = Posix.SysSocket.MSG_PEEK;
-  SHUT_RD      = Posix.SysSocket.SHUT_RD;
-  SHUT_WR      = Posix.SysSocket.SHUT_WR;
-  SHUT_RDWR    = Posix.SysSocket.SHUT_RDWR;
-
-  SOCK_RAW     = Posix.SysSocket.SOCK_RAW;
-  SOCK_STREAM  = Posix.SysSocket.SOCK_STREAM;
-  SOCK_DGRAM   = Posix.SysSocket.SOCK_DGRAM;
-  AF_INET      = Posix.SysSocket.AF_INET;
-  AF_INET6     = Posix.SysSocket.AF_INET6;
-  AF_UNIX      = Posix.SysSocket.AF_UNIX;
-  AF_PACKET    = 17; // Linux specific
-  SOMAXCONN    = Posix.SysSocket.SOMAXCONN;
-  SOL_SOCKET   = Posix.SysSocket.SOL_SOCKET;
-  SO_SNDTIMEO  = Posix.SysSocket.SO_SNDTIMEO;
-  SO_RCVTIMEO  = Posix.SysSocket.SO_RCVTIMEO;
-  SO_REUSEADDR = Posix.SysSocket.SO_REUSEADDR;
-  SO_LINGER    = Posix.SysSocket.SO_LINGER;
-  SO_PRIORITY  = Posix.SysSocket.SO_PRIORITY;
-  SO_KEEPALIVE = Posix.SysSocket.SO_KEEPALIVE;
-  SO_SNDBUF    = Posix.SysSocket.SO_SNDBUF;
-  SO_RCVBUF    = Posix.SysSocket.SO_RCVBUF;
-  SO_BROADCAST = Posix.SysSocket.SO_BROADCAST;
-
 type
   clockid_t = cint;
-  ptimeval = Posix.SysTime.ptimeval;
-  TTimeVal = timeval;
+  time_t    = Posix.SysTime.time_t;
+  ptimeval  = Posix.SysTime.ptimeval;
+  TTimeVal  = Posix.SysTime.timeval;
   ptimezone = pointer;
   ptimespec = ^timespec;
   TTimeSpec = timespec;
   TStat     = _stat;
   TUtimBuf  = utimbuf;
   UtsName   = TUtsName;
-  TLinger   = linger;
 
 function fpgeterrno: cint;
 procedure fpseterrno(err: cint);
 function cerrno: cint; inline; // internal to mormot.net.sock.posix.inc
 
-function fpsettimeofday(tp: ptimeval; tzp: ptimezone): cint;
+function fpgettimeofday(tp: ptimeval; tzp: pointer): cint;
+function fpsettimeofday(tp: ptimeval; tzp: pointer): cint;
 function fpnanosleep(t, rem: ptimespec): cint;
 function GetLocalTimeOffset: integer;
 function TZSeconds: integer;
@@ -224,71 +202,42 @@ function fpread(fd: cint; buf: pointer; n: PtrInt): PtrInt;
 function fpioctl(fd, ndx: cint; data: pointer): cint;
 function fpreadlink(fn, lnk: pointer; max: cint): cint;
 
-function FpS_ISDIR(m: cint): boolean;  inline;
-function FpS_ISSOCK(m: cint): boolean; inline;
-function FpS_ISBLK(m: cint): boolean;  inline;
-function FpS_ISCHR(m: cint): boolean;  inline;
-function FpS_ISFIFO(m: cint): boolean; inline;
-function FpS_ISLNK(m: cint): boolean;  inline;
+function FpS_ISDIR(m: cint): boolean;
+function FpS_ISSOCK(m: cint): boolean;
+function FpS_ISBLK(m: cint): boolean;
+function FpS_ISCHR(m: cint): boolean;
+function FpS_ISFIFO(m: cint): boolean;
+function FpS_ISLNK(m: cint): boolean;
 
-type
-  // POSIX definitions to share the same type fields between FPC and Delphi
-  TSockLen  = Posix.SysSocket.socklen_t;
-
-const
-  POLLIN      = $0001;
-  POLLPRI     = $0002;
-
-type
-  TPollFD = record
-    fd: cint;
-    events: cshort;
-    revents: cshort;
-  end;
-  PPollFD = ^TPollFD;
-
-function fppoll(fds: PPollFD; nfds, timeout: cint): cint; cdecl;
-  external clib name 'poll';
 function fpkill(pid, sig: cint): cint; cdecl;
   external clib name 'kill';
 function fpfork: TPid; cdecl;
   external clib name 'fork';
 
+{$ifdef OSDARWIN}
+
 const
-  EPOLLIN      = $01;
-  EPOLLPRI     = $02;
-  EPOLLOUT     = $04;
-  EPOLLERR     = $08;
-  EPOLLHUP     = $10;
-  EPOLLONESHOT = $40000000;
-  EPOLLET      = $80000000;
+  CTL_HW          = 6;
+  MAP_ANONYMOUS   = $1000; // not defined in Delphi RTL
+  HW_USERMEM      = HW_USERMEM;
+  HW_PAGESIZE     = HW_PAGESIZE;
+  HW_MACHINE      = HW_MACHINE;
+  HW_MODEL        = HW_MODEL;
+  HW_NCPU         = HW_NCPU;
+  HW_CACHELINE    = HW_CACHELINE;
+  HW_L1DCACHESIZE = HW_L1DCACHESIZE;
+  HW_L2CACHESIZE  = HW_L2CACHESIZE;
+  HW_L3CACHESIZE  = HW_L3CACHESIZE;
+  HW_MEMSIZE      = HW_MEMSIZE;
 
-  EPOLL_CTL_ADD = 1;
-  EPOLL_CTL_DEL = 2;
-  EPOLL_CTL_MOD = 3;
+function fpsysctl(name: pcint; namelen: cuint; oldp: pointer;
+    oldlenp: psize_t; newp: pointer; newlen: size_t): cint; cdecl;
+  external clib name 'sysctl';
+function fpsysctlbyname(name: PAnsiChar; oldp: pointer; oldlenp: psize_t;
+    newp: pointer; newlen: size_t): cint; cdecl;
+  external clib name 'sysctlbyname';
 
-type
-  TEPoll_Data = record
-    case integer of
-      0: (ptr: pointer);
-      1: (fd:  cint);
-      2: (u32: cuint);
-      3: (u64: cuint64);
-  end;
-  PEPoll_Data = ^TEpoll_Data;
-  TEPoll_Event = {$ifdef CPUX64} packed {$endif} record
-    events: cuint32;
-    data: TEpoll_Data;
-  end;
-  PEPoll_Event = ^TEPoll_Event;
-
-function epoll_create(size: cint): cint; cdecl;
-  external clib name 'epoll_create';
-function epoll_ctl(epfd, op, fd: cint; event: PEPoll_Event): cint; cdecl;
-  external clib name 'epoll_ctl';
-function epoll_wait(epfd: cint; events: PEPoll_Event;
-    maxevents, timeout: cint): cint; cdecl;
-  external clib name 'epoll_wait';
+{$endif OSDARWIN}
 
 function FpGetuid: TUid;
 function FpGetgid: TGid;
@@ -352,6 +301,100 @@ function IsAtty(fd: cint): cint;
 
 { ****************** Network POSIX Operating Systems API for Delphi }
 
+const
+  IPPROTO_TCP  = IPPROTO_TCP;
+  IPPROTO_UDP  = IPPROTO_UDP;
+  TCP_NODELAY  = 1;
+  TCP_CORK     = 3; // Linux specific
+  TCP_NOPUSH   = 4; // BSD specific
+  MSG_PEEK     = Posix.SysSocket.MSG_PEEK;
+  SHUT_RD      = Posix.SysSocket.SHUT_RD;
+  SHUT_WR      = Posix.SysSocket.SHUT_WR;
+  SHUT_RDWR    = Posix.SysSocket.SHUT_RDWR;
+
+  SOCK_RAW     = Posix.SysSocket.SOCK_RAW;
+  SOCK_STREAM  = Posix.SysSocket.SOCK_STREAM;
+  SOCK_DGRAM   = Posix.SysSocket.SOCK_DGRAM;
+  AF_INET      = Posix.SysSocket.AF_INET;
+  AF_INET6     = Posix.SysSocket.AF_INET6;
+  AF_UNIX      = Posix.SysSocket.AF_UNIX;
+  AF_PACKET    = 17; // Linux specific
+  SOMAXCONN    = Posix.SysSocket.SOMAXCONN;
+  SOL_SOCKET   = Posix.SysSocket.SOL_SOCKET;
+  SO_SNDTIMEO  = Posix.SysSocket.SO_SNDTIMEO;
+  SO_RCVTIMEO  = Posix.SysSocket.SO_RCVTIMEO;
+  SO_REUSEADDR = Posix.SysSocket.SO_REUSEADDR;
+  SO_LINGER    = Posix.SysSocket.SO_LINGER;
+  SO_KEEPALIVE = Posix.SysSocket.SO_KEEPALIVE;
+  SO_SNDBUF    = Posix.SysSocket.SO_SNDBUF;
+  SO_RCVBUF    = Posix.SysSocket.SO_RCVBUF;
+  SO_BROADCAST = Posix.SysSocket.SO_BROADCAST;
+  {$ifdef OSLINUXANDROID}
+  SO_PRIORITY  = Posix.SysSocket.SO_PRIORITY;
+  {$endif OSLINUXANDROID}
+
+
+type
+  // POSIX definitions to share the same type fields between FPC and Delphi
+  TSockLen  = Posix.SysSocket.socklen_t;
+  TLinger   = linger;
+
+const
+  POLLIN      = $0001;
+  POLLPRI     = $0002;
+
+type
+  TPollFD = record
+    fd: cint;
+    events: cshort;
+    revents: cshort;
+  end;
+  PPollFD = ^TPollFD;
+
+function fppoll(fds: PPollFD; nfds, timeout: cint): cint; cdecl;
+  external clib name 'poll';
+
+{$ifdef OSLINUX}
+
+const
+  EPOLLIN      = $01;
+  EPOLLPRI     = $02;
+  EPOLLOUT     = $04;
+  EPOLLERR     = $08;
+  EPOLLHUP     = $10;
+  EPOLLONESHOT = $40000000;
+  EPOLLET      = $80000000;
+
+  EPOLL_CTL_ADD = 1;
+  EPOLL_CTL_DEL = 2;
+  EPOLL_CTL_MOD = 3;
+
+type
+  TEPoll_Data = record
+    case integer of
+      0: (ptr: pointer);
+      1: (fd:  cint);
+      2: (u32: cuint);
+      3: (u64: cuint64);
+  end;
+  PEPoll_Data = ^TEpoll_Data;
+  TEPoll_Event = {$ifdef CPUX64} packed {$endif} record
+    events: cuint32;
+    data: TEpoll_Data;
+  end;
+  PEPoll_Event = ^TEPoll_Event;
+
+function epoll_create(size: cint): cint; cdecl;
+  external clib name 'epoll_create';
+function epoll_ctl(epfd, op, fd: cint; event: PEPoll_Event): cint; cdecl;
+  external clib name 'epoll_ctl';
+function epoll_wait(epfd: cint; events: PEPoll_Event;
+    maxevents, timeout: cint): cint; cdecl;
+  external clib name 'epoll_wait';
+
+{$endif OSLINUX}
+
+
 
 implementation
 
@@ -389,6 +432,10 @@ begin
   result := Posix.Dlfcn.dladdr(PtrUInt(Lib), info^);
 end;
 
+function envp: PPAnsiChar;
+begin
+  result := Posix.Unistd.environ;
+end;
 
 procedure InitCriticalSection(var cs);
 begin
@@ -397,7 +444,7 @@ end;
 
 procedure DoneCriticalSection(var cs);
 begin
-  TRTLCriticalSection(cs).Free;
+  FreeAndNil(TRTLCriticalSection(cs));
 end;
 
 procedure ThreadSwitch;
@@ -405,7 +452,7 @@ begin
   sched_yield();
 end;
 
-// do-nothing implementation - expect eventfd() on Linux
+
 function RTLEventCreate: TEvent;
 begin
   result := TEvent.Create;
@@ -452,9 +499,14 @@ begin
   system.SetLastError(err);
 end;
 
-function fpsettimeofday(tp: ptimeval; tzp: ptimezone): cint;
+function fpsettimeofday(tp: ptimeval; tzp: pointer): cint;
 begin
   result := settimeofday(tp, tzp);
+end;
+
+function fpgettimeofday(tp: ptimeval; tzp: pointer): cint;
+begin
+  result := gettimeofday(tp^, tzp);
 end;
 
 function fpnanosleep(t, rem: ptimespec): cint;

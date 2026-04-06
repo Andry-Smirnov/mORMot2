@@ -734,13 +734,16 @@ var
   CpuCacheSize: cardinal;
   /// how many hardware CPU sockets are defined on this system
   // - i.e. the number of physical CPU slots
-  // - SystemInfo.dwNumberOfProcessors is the number of logical CPU threads
+  // - CpuThreads = SystemInfo.dwNumberOfProcessors is the logical CPU count
   // - as used e.g. by SetThreadAffinity()
-  CpuSockets: integer;
+  CpuSockets: cardinal;
   /// how many hardware CPU cores are defined on this system
   // - i.e. the number of physical CPU cores
-  // - SystemInfo.dwNumberOfProcessors is the number of logical CPU threads
-  CpuCores: integer;
+  // - CpuThreads = SystemInfo.dwNumberOfProcessors is the logical CPU count
+  CpuCores: cardinal;
+  /// the number of available logical CPUs threads
+  // - just an alias to SystemInfo.dwNumberOfProcessors compatibility value
+  CpuThreads: cardinal;
 
   /// Level 1 to 4 CPU caches as returned by GetLogicalProcessorInformation
   // - yes, Intel introduced a Level 4 cache (eDRAM) with some Haswell/Iris CPUs
@@ -874,8 +877,8 @@ type
     actCortexA8,
     actCortexA9,
     actCortexA12,
-    actCortexA15,
     actCortexA17,
+    actCortexA15,
     actCortexR4,
     actCortexR5,
     actCortexR7,
@@ -900,8 +903,14 @@ type
     actCortexA77,
     actCortexA76AE,
     actCortexR52,
+    actCortexR82AE,
+    actCortexR82,
+    actCortexR52P,
     actCortexM23,
     actCortexM33,
+    actCortexM55,
+    actCortexM85,
+    actCortexM52,
     actNeoverseV1,
     actCortexA78,
     actCortexA78AE,
@@ -974,6 +983,141 @@ procedure ArmCpuTypeNameAppend(act: TArmCpuType; id: word; var txt: ShortString)
 procedure ArmCpuImplementerNameAppend(aci: TArmCpuImplementer; id: word;
   var txt: ShortString);
 
+{ all those constants are defined here only for testing purposes }
+const
+  // https://github.com/karelzak/util-linux/blob/master/sys-utils/lscpu-arm.c
+  ARMCPU_ID: array[TArmCpuType] of word = (
+    0,      // actUnknown
+    $0810,  // actARM810
+    $0920,  // actARM920
+    $0922,  // actARM922
+    $0926,  // actARM926
+    $0940,  // actARM940
+    $0946,  // actARM946
+    $0966,  // actARM966
+    $0a20,  // actARM1020
+    $0a22,  // actARM1022
+    $0a26,  // actARM1026
+    $0b02,  // actARM11MPCore
+    $0b36,  // actARM1136
+    $0b56,  // actARM1156
+    $0b76,  // actARM1176
+    $0c05,  // actCortexA5
+    $0c07,  // actCortexA7
+    $0c08,  // actCortexA8
+    $0c09,  // actCortexA9
+    $0c0d,  // actCortexA12
+    $0c0e,  // actCortexA17
+    $0c0f,  // actCortexA15
+    $0c14,  // actCortexR4
+    $0c15,  // actCortexR5
+    $0c17,  // actCortexR7
+    $0c18,  // actCortexR8
+    $0c20,  // actCortexM0
+    $0c21,  // actCortexM1
+    $0c23,  // actCortexM3
+    $0c24,  // actCortexM4
+    $0c27,  // actCortexM7
+    $0c60,  // actCortexM0P
+    $0d01,  // actCortexA32
+    $0d03,  // actCortexA53
+    $0d04,  // actCortexA35
+    $0d05,  // actCortexA55
+    $0d06,  // actCortexA65
+    $0d07,  // actCortexA57
+    $0d08,  // actCortexA72
+    $0d09,  // actCortexA73
+    $0d0a,  // actCortexA75
+    $0d0b,  // actCortexA76
+    $0d0c,  // actNeoverseN1
+    $0d0d,  // actCortexA77
+    $0d0e,  // actCortexA76AE
+    $0d13,  // actCortexR52
+    $0d14,  // actCortexR82AE
+    $0d15,  // actCortexR82
+    $0d16,  // actCortexR52P
+    $0d20,  // actCortexM23
+    $0d21,  // actCortexM33
+    $0d22,  // actCortexM55
+    $0d23,  // actCortexM85
+    $0d24,  // actCortexM52
+    $0d40,  // actNeoverseV1
+    $0d41,  // actCortexA78
+    $0d42,  // actCortexA78AE
+    $0d44,  // actCortexX1
+    $0d46,  // actCortex510
+    $0d47,  // actCortex710
+    $0d48,  // actCortexX2
+    $0d49,  // actNeoverseN2
+    $0d4a,  // actNeoverseE1
+    $0d4b,  // actCortexA78C
+    $0d4c,  // actCortexX1C
+    $0d4d,  // actCortexA715
+    $0d4e,  // actCortexX3
+    $0d4f,  // actNeoverseV2
+    $0d80,  // actCortexA520
+    $0d81,  // actCortexA720
+    $0d82,  // actCortexX4
+    $0d83,  // actNeoverseV3AE
+    $0d84,  // actNeoverseV3
+    $0d85,  // actCortextX925
+    $0d87,  // actCortextA725
+    $0d88,  // actCortextA520AE
+    $0d89,  // actCortextA720AE
+    $0d8a,  // actC1Nano
+    $0d8b,  // actC1Pro
+    $0d8c,  // actC1Ultra
+    $0d8e,  // actNeoverseN3
+    $0d8f,  // actCortextA320
+    $0d90); // actC1Premium
+
+  ARMCPU_IMPL: array[TArmCpuImplementer] of byte = (
+    0,    // aciUnknown
+    $41,  // aciARM
+    $42,  // aciBroadcom
+    $43,  // aciCavium
+    $44,  // aciDEC
+    $46,  // aciFUJITSU
+    $48,  // aciHiSilicon
+    $49,  // aciInfineon
+    $4d,  // aciMotorola
+    $4e,  // aciNVIDIA
+    $50,  // aciAPM
+    $51,  // aciQualcomm
+    $53,  // aciSamsung
+    $56,  // aciMarvell
+    $61,  // aciApple
+    $66,  // aciFaraday
+    $69,  // aciIntel
+    $6d,  // aciMicrosoft
+    $70,  // aciPhytium
+    $c0); // aciAmpere
+
+  ARMCPU_ID_TXT: array[TArmCpuType] of TShort15 = (
+     '',
+     'ARM810', 'ARM920', 'ARM922', 'ARM926', 'ARM940', 'ARM946', 'ARM966',
+     'ARM1020', 'ARM1022', 'ARM1026', 'ARM11 MPCore', 'ARM1136', 'ARM1156',
+     'ARM1176',     'Cortex-A5',   'Cortex-A7',   'Cortex-A8',   'Cortex-A9',
+     'Cortex-A17',{originally A12} 'Cortex-A17',  'Cortex-A15',  'Cortex-R4',
+     'Cortex-R5',   'Cortex-R7',   'Cortex-R8',   'Cortex-M0',   'Cortex-M1',
+     'Cortex-M3',   'Cortex-M4',   'Cortex-M7',   'Cortex-M0+',  'Cortex-A32',
+     'Cortex-A53',  'Cortex-A35',  'Cortex-A55',  'Cortex-A65',  'Cortex-A57',
+     'Cortex-A72',  'Cortex-A73',  'Cortex-A75',  'Cortex-A76',  'Neoverse-N1',
+     'Cortex-A77',  'Cortex-A76AE','Cortex-R52',  'Cortex-R82AE','Cortex-R82',
+     'Cortex-R52+', 'Cortex-M23',  'Cortex-M33',  'Cortex-M55',  'Cortex-M85',
+     'Cortex-M52',
+     'Neoverse-V1', 'Cortex-A78',  'Cortex-A78AE','Cortex-X1',   'Cortex-510',
+     'Cortex-710',  'Cortex-X2',   'Neoverse-N2', 'Neoverse-E1', 'Cortex-A78C',
+     'Cortex-X1C',  'Cortex-A715', 'Cortex-X3',   'Neoverse-V2', 'Cortex-A520',
+     'Cortex-A720', 'Cortex-X4',   'Neoverse-V3AE','Neoverse-V3','Cortex-X925',
+     'Cortex-A725', 'Cortex-A520AE', 'Cortex-A720AE', 'C1-Nano', 'C1-Pro',
+     'C1-Ultra',    'Neoverse-N3',   'Cortex-A320',   'C1-Premium');
+
+  ARMCPU_IMPL_TXT: array[TArmCpuImplementer] of string[18] = (
+      '',
+      'ARM', 'Broadcom', 'Cavium', 'DEC', 'FUJITSU', 'HiSilicon', 'Infineon',
+      'Motorola/Freescale', 'NVIDIA', 'APM', 'Qualcomm', 'Samsung', 'Marvell',
+      'Apple', 'Faraday', 'Intel', 'Microsoft', 'Phytium', 'Ampere');
 
 const
   /// contains the Delphi/FPC Compiler Version as text
@@ -982,41 +1126,45 @@ const
   {$ifdef FPC}
     'Free Pascal ' + {$I %FPCVERSION%} // FPC makes it simple
   {$else}
-    'Delphi'
-    {$if     defined(VER140)} + ' 6'
-    {$elseif defined(VER150)} + ' 7'
-    {$elseif defined(VER160)} + ' 8'
-    {$elseif defined(VER170)} + ' 2005'
-    {$elseif defined(VER185)} + ' 2007'
-    {$elseif defined(VER180)} + ' 2006'
-    {$elseif defined(VER200)} + ' 2009'
-    {$elseif defined(VER210)} + ' 2010'
-    {$elseif defined(VER220)} + ' XE'
-    {$elseif defined(VER230)} + ' XE2'
-    {$elseif defined(VER240)} + ' XE3'
-    {$elseif defined(VER250)} + ' XE4'
-    {$elseif defined(VER260)} + ' XE5'
-    {$elseif defined(VER265)} + ' AppMethod 1'
-    {$elseif defined(VER270)} + ' XE6'
-    {$elseif defined(VER280)} + ' XE7'
-    {$elseif defined(VER290)} + ' XE8'
-    {$elseif defined(VER300)} + ' 10 Seattle'
-    {$elseif defined(VER310)} + ' 10.1 Berlin'
-    {$elseif defined(VER320)} + ' 10.2 Tokyo'
-    {$elseif defined(VER330)} + ' 10.3 Rio'
-    {$elseif defined(VER340)} + ' 10.4 Sydney'
-    {$elseif defined(VER350)} + ' 11'
+    'Delphi '
+    {$if     defined(VER140)} + '6'
+    {$elseif defined(VER150)} + '7'
+    {$elseif defined(VER160)} + '8'
+    {$elseif defined(VER170)} + '2005'
+    {$elseif defined(VER185)} + '2007'
+    {$elseif defined(VER180)} + '2006'
+    {$elseif defined(VER200)} + '2009'
+    {$elseif defined(VER210)} + '2010'
+    {$elseif defined(VER220)} + 'XE'
+    {$elseif defined(VER230)} + 'XE2'
+    {$elseif defined(VER240)} + 'XE3'
+    {$elseif defined(VER250)} + 'XE4'
+    {$elseif defined(VER260)} + 'XE5'
+    {$elseif defined(VER265)} + 'AppMethod 1'
+    {$elseif defined(VER270)} + 'XE6'
+    {$elseif defined(VER280)} + 'XE7'
+    {$elseif defined(VER290)} + 'XE8'
+    {$elseif defined(VER300)} + '10 Seattle'
+    {$elseif defined(VER310)} + '10.1 Berlin'
+    {$elseif defined(VER320)} + '10.2 Tokyo'
+    {$elseif defined(VER330)} + '10.3 Rio'
+    {$elseif defined(VER340)} + '10.4 Sydney'
+    {$elseif defined(VER350)} + '11'
       {$if declared(RTLVersion113)} + '.3' {$else}
       {$if declared(RTLVersion112)} + '.2' {$else}
       {$if declared(RTLVersion111)} + '.1' {$ifend} {$ifend} {$ifend}
                               + ' Alexandria'
-    {$elseif defined(VER360)} + ' 12'
+    {$elseif defined(VER360)} + '12'
       {$if declared(RTLVersion123)} + '.3' {$else}
       {$if declared(RTLVersion122)} + '.2' {$else}
       {$if declared(RTLVersion121)} + '.1' {$ifend} {$ifend} {$ifend}
                               + ' Athens'
-    {$elseif defined(VER370)} + ' 13 Florence'
-    {$elseif defined(VER380)} + ' 14 Next'
+    {$elseif defined(VER370)} + '13'
+      {$if declared(RTLVersion133)} + '.3' {$else}
+      {$if declared(RTLVersion132)} + '.2' {$else}
+      {$if declared(RTLVersion131)} + '.1' {$ifend} {$ifend} {$ifend}
+                              + ' Florence'
+    {$elseif defined(VER380)} + '14 Next'
     {$ifend}
   {$endif FPC}
   {$ifdef CPU64} + ' 64 bit' {$else} + ' 32 bit' {$endif};
@@ -1083,7 +1231,7 @@ type
     fDetailed: string;
     fFileName: TFileName;
     fBuildDateTime: TDateTime;
-    fVersionInfo, fUserAgent: RawUtf8;
+    fBuildDateTimeString, fVersionInfo, fUserAgent: RawUtf8;
     // change the version - returns true if supplied values are actually new
     function SetVersion(aMajor, aMinor, aRelease, aBuild: integer): boolean;
   public
@@ -1139,7 +1287,7 @@ type
     // - following Major shl 16+Minor shl 8+Release bit pattern
     function Version32: integer;
     /// build date and time of this exe file, as plain text
-    function BuildDateTimeString: string;
+    function BuildDateTimeString: RawUtf8;
     /// version info of the exe file as '3.1.0.123' or ''
     // - this method returns '' if Detailed is '0.0.0.0'
     function DetailedOrVoid: string;
@@ -1496,6 +1644,7 @@ var
     dwPageSize: cardinal;
     /// the number of available logical CPUs threads
     // - from HW_NCPU (BSD), hw.logicalcpu (macOS) or /proc/cpuinfo (Linux)
+    // - prefer the CpuThreads global variable instead of this legacy Windowism
     // - see CpuSockets/CpuCores for the number of physical CPU sockets/cores
     dwNumberOfProcessors: cardinal;
     /// meaningful system information, as returned by fpuname()
@@ -2680,7 +2829,7 @@ procedure Unicode_ToUtf8(Text: PWideChar; TextLen: PtrInt; var Dest: RawUtf8); o
 
 /// return a code page number into ICU-compatible charset name
 // - Unicode_CodePageName(932) returns e.g. 'SHIFT_JIS'
-// - Unicode_CodePageName(1251) returns 'MS1251' since 'CP####' is used
+// - Unicode_CodePageName(1251) returns 'WINDOWS-1251' since 'CP####' is used
 // for IBM code pages by ICU - which do not match Windows code pages
 procedure Unicode_CodePageName(CodePage: cardinal; var Name: ShortString);
 
@@ -3914,6 +4063,10 @@ var
   // - this unit defaults to the RTL, but mormot.core.text.pas will override it
   AppendShortUuid: TAppendShortUuid;
 
+  /// return a date/time value as '2026-03-27 13:59:30' UTF-8 text
+  // - slow RTL function in this unit, properly set by mormot.core.datetime.pas
+  DoDateTimeToText: function(dt: TDateTime): RawUtf8;
+
   /// late binding to binary encoding to Base64 or Base64-URI
   // - as used by mormot.net.sock.pas for its NetBinToBase64() function
   // - this unit raises an EOSException - properly injected by mormot.core.buffers.pas
@@ -4819,6 +4972,27 @@ type
 function NewSynLocker: PSynLocker;
 
 type
+  TCachedValueCall = function(Param: pointer): RawByteString;
+  /// raw thread-safe cache of a RawByteString content
+  {$ifdef USERECORDWITHMETHODS}
+  TCachedValue = record
+  {$else}
+  TCachedValue = object
+  {$endif USERECORDWITHMETHODS}
+  public
+    Safe: TLightLock;
+    Tix32: cardinal;
+    Value: RawByteString;
+    procedure Reset;
+    procedure Cache(Call: TCachedValueCall; CallParam: pointer; TixShr: cardinal;
+      var Dest; Flush: boolean = false);
+  end;
+
+/// thread-safe cache of a File content with default 1 shl 6 = 64 secs timeout
+function StringFromFileCached(const FileName: TFileName;
+  var Cache: TCachedValue; TixShr: cardinal = 6): RawByteString;
+
+type
   /// a thread-safe Pierre L'Ecuyer gsl_rng_taus2 software random generator
   // - just wrap a TLecuyer generator with a TLighLock in a 20-24 bytes structure
   // - as used by SharedRandom to implement Random32/RandomBytes/... functions
@@ -5045,7 +5219,7 @@ function CurrentCpuSet(out CpuSet: TCpuSet): integer;
 function SetThreadMaskAffinity(Thread: TThread; const Mask: TCpuSet): boolean;
 
 /// try to assign a given thread to a specific logical CPU core
-// - CpuIndex should be in 0 .. SystemInfo.dwNumberOfProcessors - 1 range
+// - CpuIndex should be in 0 .. CpuThreads - 1 range
 function SetThreadCpuAffinity(Thread: TThread; CpuIndex: cardinal): boolean;
 
 /// try to assign a given thread to a specific hardware CPU socket
@@ -5173,16 +5347,7 @@ const
   SERVICE_PAUSE_CONTINUE       = $0040;
   SERVICE_INTERROGATE          = $0080;
   SERVICE_USER_DEFINED_CONTROL = $0100;
-  SERVICE_ALL_ACCESS           = STANDARD_RIGHTS_REQUIRED or
-                                 SERVICE_QUERY_CONFIG or
-                                 SERVICE_CHANGE_CONFIG or
-                                 SERVICE_QUERY_STATUS or
-                                 SERVICE_ENUMERATE_DEPENDENTS or
-                                 SERVICE_START or
-                                 SERVICE_STOP or
-                                 SERVICE_PAUSE_CONTINUE or
-                                 SERVICE_INTERROGATE or
-                                 SERVICE_USER_DEFINED_CONTROL;
+  SERVICE_ALL_ACCESS           = $01ff;
 
   SC_MANAGER_CONNECT            = $0001;
   SC_MANAGER_CREATE_SERVICE     = $0002;
@@ -5190,13 +5355,7 @@ const
   SC_MANAGER_LOCK               = $0008;
   SC_MANAGER_QUERY_LOCK_STATUS  = $0010;
   SC_MANAGER_MODIFY_BOOT_CONFIG = $0020;
-  SC_MANAGER_ALL_ACCESS         = STANDARD_RIGHTS_REQUIRED or
-                                  SC_MANAGER_CONNECT or
-                                  SC_MANAGER_CREATE_SERVICE or
-                                  SC_MANAGER_ENUMERATE_SERVICE or
-                                  SC_MANAGER_LOCK or
-                                  SC_MANAGER_QUERY_LOCK_STATUS or
-                                  SC_MANAGER_MODIFY_BOOT_CONFIG;
+  SC_MANAGER_ALL_ACCESS         = STANDARD_RIGHTS_REQUIRED or $003f;
 
   SERVICE_CONFIG_DESCRIPTION    = $0001;
 
@@ -5621,7 +5780,8 @@ var
 // - ServiceSingle provided by this application (most probably from
 // TServiceSingle.Create) is sent to the operating system
 // - returns TRUE on success
-// - returns FALSE on error (to get extended information, call GetLastError)
+// - returns FALSE on error (to get extended information, call GetLastError
+// and check e.g. ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)
 function ServiceSingleRun: boolean;
 
 /// convert the Control Code retrieved from Windows into a service state
@@ -5669,9 +5829,11 @@ function AssignJobToProcess(job, process: THandle; const ctxt: ShortString): boo
 // then execute the start/stop methods of a TSynDaemon / TDDDDaemon instance
 // - dofork will create e.g. a /run/.[ProgramName][ProgramFilePathHash].pid file
 // - onLog can be assigned from TSynLog.DoLog for proper logging
+// - warning: the parent process would be killed immediately by design, to
+// avoid any unexpected cleanup of the resource shared by both processes
 procedure RunUntilSigTerminated(daemon: TObject; dofork: boolean;
   const start, stop: TThreadMethod; const onlog: TSynLogProc = nil;
-  const servicename: string = '');
+  const servicename: RawUtf8 = '');
 
 /// kill a process previously created by RunUntilSigTerminated(dofork=true)
 // - will lookup a local /run/.[ProgramName][ProgramFilePathHash].pid file
@@ -5679,6 +5841,7 @@ procedure RunUntilSigTerminated(daemon: TObject; dofork: boolean;
 // waitseconds for the .pid file to disapear
 // - returns true on success, false on error (e.g. no valid .pid file or
 // the file didn't disappear, which may mean that the daemon is broken)
+// - warning: on OpenBSD the current process needs to be killed via fpexit()
 function RunUntilSigTerminatedForKill(waitseconds: integer = 30): boolean;
 
 var
@@ -6067,6 +6230,14 @@ end;
 procedure _AppendShortUuid(const u: TGuid; var s: ShortString);
 begin
   AppendShortAnsi7String(AnsiString(LowerCase(copy(GUIDToString(u), 2, 36))), s);
+end;
+
+function _DoDateTimeToText(dt: TDateTime): RawUtf8;
+var
+  tmp: string; // avoid to link mormot.core.datetime
+begin
+  DateTimeToString(tmp, 'yyyy-mm-dd hh:nn:ss', dt);
+  _toutf8(tmp, result);
 end;
 
 function TextToUuid(const text: RawUtf8; out uuid: TGuid): boolean;
@@ -6650,139 +6821,10 @@ begin
   FastSetString(result, @txt[1], ord(txt[0]));
 end;
 
-const
-  // https://github.com/karelzak/util-linux/blob/master/sys-utils/lscpu-arm.c
-  ARMCPU_ID: array[TArmCpuType] of word = (
-    0,      // actUnknown
-    $0810,  // actARM810
-    $0920,  // actARM920
-    $0922,  // actARM922
-    $0926,  // actARM926
-    $0940,  // actARM940
-    $0946,  // actARM946
-    $0966,  // actARM966
-    $0a20,  // actARM1020
-    $0a22,  // actARM1022
-    $0a26,  // actARM1026
-    $0b02,  // actARM11MPCore
-    $0b36,  // actARM1136
-    $0b56,  // actARM1156
-    $0b76,  // actARM1176
-    $0c05,  // actCortexA5
-    $0c07,  // actCortexA7
-    $0c08,  // actCortexA8
-    $0c09,  // actCortexA9
-    $0c0d,  // actCortexA12
-    $0c0f,  // actCortexA15
-    $0c0e,  // actCortexA17
-    $0c14,  // actCortexR4
-    $0c15,  // actCortexR5
-    $0c17,  // actCortexR7
-    $0c18,  // actCortexR8
-    $0c20,  // actCortexM0
-    $0c21,  // actCortexM1
-    $0c23,  // actCortexM3
-    $0c24,  // actCortexM4
-    $0c27,  // actCortexM7
-    $0c60,  // actCortexM0P
-    $0d01,  // actCortexA32
-    $0d03,  // actCortexA53
-    $0d04,  // actCortexA35
-    $0d05,  // actCortexA55
-    $0d06,  // actCortexA65
-    $0d07,  // actCortexA57
-    $0d08,  // actCortexA72
-    $0d09,  // actCortexA73
-    $0d0a,  // actCortexA75
-    $0d0b,  // actCortexA76
-    $0d0c,  // actNeoverseN1
-    $0d0d,  // actCortexA77
-    $0d0e,  // actCortexA76AE
-    $0d13,  // actCortexR52
-    $0d20,  // actCortexM23
-    $0d21,  // actCortexM33
-    $0d40,  // actNeoverseV1
-    $0d41,  // actCortexA78
-    $0d42,  // actCortexA78AE
-    $0d44,  // actCortexX1
-    $0d46,  // actCortex510
-    $0d47,  // actCortex710
-    $0d48,  // actCortexX2
-    $0d49,  // actNeoverseN2
-    $0d4a,  // actNeoverseE1
-    $0d4b,  // actCortexA78C
-    $0d4c,  // actCortexX1C
-    $0d4d,  // actCortexA715
-    $0d4e,  // actCortexX3
-    $0d4f,  // actNeoverseV2
-    $0d80,  // actCortexA520
-    $0d81,  // actCortexA720
-    $0d82,  // actCortexX4
-    $0d83,  // actNeoverseV3AE
-    $0d84,  // actNeoverseV3
-    $0d85,  // actCortextX925
-    $0d87,  // actCortextA725
-    $0d88,  // actCortextA520AE
-    $0d89,  // actCortextA720AE
-    $0d8a,  // actC1Nano
-    $0d8b,  // actC1Pro
-    $0d8c,  // actC1Ultra
-    $0d8e,  // actNeoverseN3
-    $0d8f,  // actCortextA320
-    $0d90); // actC1Premium
-
-  ARMCPU_IMPL: array[TArmCpuImplementer] of byte = (
-    0,    // aciUnknown
-    $41,  // aciARM
-    $42,  // aciBroadcom
-    $43,  // aciCavium
-    $44,  // aciDEC
-    $46,  // aciFUJITSU
-    $48,  // aciHiSilicon
-    $49,  // aciInfineon
-    $4d,  // aciMotorola
-    $4e,  // aciNVIDIA
-    $50,  // aciAPM
-    $51,  // aciQualcomm
-    $53,  // aciSamsung
-    $56,  // aciMarvell
-    $61,  // aciApple
-    $66,  // aciFaraday
-    $69,  // aciIntel
-    $6d,  // aciMicrosoft
-    $70,  // aciPhytium
-    $c0); // aciAmpere
-
-  ARMCPU_ID_TXT: array[TArmCpuType] of TShort15 = (
-     '',
-     'ARM810', 'ARM920', 'ARM922', 'ARM926', 'ARM940', 'ARM946', 'ARM966',
-     'ARM1020', 'ARM1022', 'ARM1026', 'ARM11 MPCore', 'ARM1136', 'ARM1156',
-     'ARM1176',     'Cortex-A5',   'Cortex-A7',   'Cortex-A8',   'Cortex-A9',
-     'Cortex-A17',{originally A12} 'Cortex-A15',  'Cortex-A17',  'Cortex-R4',
-     'Cortex-R5',   'Cortex-R7',   'Cortex-R8',   'Cortex-M0',   'Cortex-M1',
-     'Cortex-M3',   'Cortex-M4',   'Cortex-M7',   'Cortex-M0+',  'Cortex-A32',
-     'Cortex-A53',  'Cortex-A35',  'Cortex-A55',  'Cortex-A65',  'Cortex-A57',
-     'Cortex-A72',  'Cortex-A73',  'Cortex-A75',  'Cortex-A76',  'Neoverse-N1',
-     'Cortex-A77',  'Cortex-A76AE','Cortex-R52',  'Cortex-M23',  'Cortex-M33',
-     'Neoverse-V1', 'Cortex-A78',  'Cortex-A78AE','Cortex-X1',   'Cortex-510',
-     'Cortex-710',  'Cortex-X2',   'Neoverse-N2', 'Neoverse-E1', 'Cortex-A78C',
-     'Cortex-X1C',  'Cortex-A715', 'Cortex-X3',   'Neoverse-V2', 'Cortex-A520',
-     'Cortex-A720', 'Cortex-X4',   'Neoverse-V3AE','Neoverse-V3','Cortex-X925',
-     'Cortex-A725', 'Cortex-A520AE', 'Cortex-A720AE', 'C1-Nano', 'C1-Pro',
-     'C1-Ultra',    'Neoverse-N3',   'Cortex-A320', 'C1-Premium');
-
-  ARMCPU_IMPL_TXT: array[TArmCpuImplementer] of string[18] = (
-      '',
-      'ARM', 'Broadcom', 'Cavium', 'DEC', 'FUJITSU', 'HiSilicon', 'Infineon',
-      'Motorola/Freescale', 'NVIDIA', 'APM', 'Qualcomm', 'Samsung', 'Marvell',
-      'Apple', 'Faraday', 'Intel', 'Microsoft', 'Phytium', 'Ampere');
-
 function ArmCpuType(id: word): TArmCpuType;
 begin
-  for result := low(TArmCpuType) to high(TArmCpuType) do
-    if ARMCPU_ID[result] = id then
-      exit;
-  result := actUnknown;
+  result := TArmCpuType(FastFindWordSorted(
+    @ARMCPU_ID[succ(low(result))], ord(high(result)) - 1, id) + 1);
 end;
 
 procedure ArmCpuTypeNameAppend(act: TArmCpuType; id: word; var txt: ShortString);
@@ -6799,10 +6841,8 @@ end;
 
 function ArmCpuImplementer(id: byte): TArmCpuImplementer;
 begin
-  for result := low(TArmCpuImplementer) to high(TArmCpuImplementer) do
-    if ARMCPU_IMPL[result] = id then
-      exit;
-  result := aciUnknown;
+  result := TArmCpuImplementer(ByteScanIndex(
+    @ARMCPU_IMPL[succ(low(result))], ord(high(result)), id) + 1);
 end;
 
 procedure ArmCpuImplementerNameAppend(aci: TArmCpuImplementer; id: word;
@@ -6911,13 +6951,32 @@ begin
   else
     // use WinAPI, ICU or cwstring/RTL for accurate conversion
     res[0] := AnsiChar(
-      Unicode_WideToAnsi(W, PAnsiChar(@res[1]), LW, 255, CodePage));
+      Unicode_WideToAnsi(W, PAnsiChar(@res[1]), LW, high(res), CodePage));
+end;
+
+procedure _utf16fromascii(s: PByteArray; d: PWordArray; l: PtrInt);
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  d[l] := 0; // ensure is #0 terminated
+  repeat
+    dec(l);
+    d[l] := cardinal(s[l]); // fast direct 7-bit conversion
+  until l = 0;
+end;
+
+function _utf16toascii(s: PWordArray; d: PByteArray; l: PtrInt): pointer;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  d[l] := 0; // ensure is #0 terminated
+  repeat
+    dec(l);
+    d[l] := s[l]; // 7-bit ASCII direct conversion
+  until l = 0;
+  result := d;
 end;
 
 function Unicode_FromUtf8(Text: PUtf8Char; TextLen: PtrInt;
   var Dest: TSynTempBuffer): PWideChar;
-var
-  i: PtrInt;
 begin
   if (Text = nil) or
      (TextLen <= 0) then
@@ -6925,9 +6984,7 @@ begin
   else if IsAnsiCompatible(pointer(Text), TextLen) then // optimistic way
   begin
     result := Dest.Init(TextLen);
-    for i := 0 to TextLen - 1 do
-      PWordArray(result)[i] := PByteArray(Text)[i];
-    result[Dest.len] := #0; // Text[TextLen] may not be #0
+    _utf16fromascii(pointer(Text), pointer(result), Dest.Len);
   end
   else // use the RTL to perform the UTF-8 to UTF-16 conversion
   begin                               
@@ -6943,17 +7000,6 @@ begin
   end;
 end;
 
-function _utf16ascii(s: PWordArray; d: PByteArray; l: PtrInt): pointer;
-  {$ifdef HASINLINE} inline; {$endif}
-begin
-  d[l] := 0;      // ensure is #0 terminated
-  repeat
-    dec(l);
-    d[l] := s[l]; // 7-bit ASCII direct conversion
-  until l = 0;
-  result := d;
-end;
-
 function Unicode_ToUtf8(Text: PWideChar; var Dest: TSynTempBuffer; TextLen: PtrInt): pointer;
 begin
   if TextLen = 0 then         // e.g. from mormot.core.os.delphi.pas
@@ -6961,7 +7007,7 @@ begin
   if TextLen = 0 then
     result := Dest.Init(0)
   else if IsAnsiCompatibleW(Text, TextLen) then
-    result := _utf16ascii(pointer(Text), Dest.Init(TextLen), TextLen)
+    result := _utf16toascii(pointer(Text), Dest.Init(TextLen), TextLen)
   else // complex UTF-16 to UTF-8 conversion via RTL or mormot.core.unicode
     result := DoWideCharToUtf8Temp(Text, TextLen, Dest);
 end;
@@ -6979,7 +7025,7 @@ procedure Unicode_ToUtf8(Text: PWideChar; TextLen: PtrInt; var Dest: RawUtf8);
 begin
   if TextLen > 0 then
     if IsAnsiCompatibleW(Text, TextLen) then
-      _utf16ascii(pointer(Text), FastSetString(Dest, TextLen), TextLen)
+      _utf16toascii(pointer(Text), FastSetString(Dest, TextLen), TextLen)
     else
       _utf16utf8(Text, TextLen, Dest) // complex UTF-16 to UTF-8 conversion
   else
@@ -7033,8 +7079,8 @@ begin // cut-down and fixed version of FPC rtl/objpas/sysutils/syscodepages.inc
     CP_UTF8: // = 65001
       Name := 'UTF8';
   else
-    begin  // 'MS####' is enough for most code pages
-      Name := 'MS';
+    begin  // 'WINDOWS-####' is enough for most code pages
+      Name := 'WINDOWS-';
       AppendShortCardinal(codepage, Name);
     end; // ICU expects 'CP####' for IBM codepages which are not Windows'
   end;
@@ -7612,6 +7658,12 @@ begin
   SetLength(result, length(FileName));
   for f := 0 to high(FileName) do
     result[f] := StringFromFile(FileName[f]);
+end;
+
+function StringFromFileCached(const FileName: TFileName;
+  var Cache: TCachedValue; TixShr: cardinal): RawByteString;
+begin
+  Cache.Cache(@StringFromFile, pointer(FileName), TixShr, result);
 end;
 
 function StringFromFolders(const Folders: array of TFileName;
@@ -8545,7 +8597,7 @@ begin
     result := 0;
 end;
 
-function GetSystemInfoText: RawUtf8;
+function _GetSystemInfoText(notused: pointer): RawUtf8;
 var
   avail, free, total: QWord;
 begin
@@ -8561,6 +8613,12 @@ end;
 
 var
   _Shell: RawUtf8;
+  _SystemInfoText: TCachedValue;
+
+function GetSystemInfoText: RawUtf8;
+begin
+  _SystemInfoText.Cache(@_GetSystemInfoText, nil, 0, result); // 1 second cache
+end;
 
 function GetSystemShell: RawUtf8;
 begin
@@ -8571,10 +8629,10 @@ end;
 
 procedure RetrieveSysInfoText(var text: ShortString);
 var
-  si: TSysInfo;  // Linuxism, but properly emulated in thit unit on Mac/BSD
+  si: TSysInfo;  // Linuxism, but properly emulated in thit unit on Win/Mac/BSD
 begin
   text[0] := #0;
-  AppendShortCardinal(SystemInfo.dwNumberOfProcessors, text);
+  AppendShortCardinal(CpuThreads, text);
   if not RetrieveSysInfo(si) then // single syscall on Linux/Android
     exit;
   AppendShortChar(' ', @text); // si.loads[0/1] = user kern on Windows
@@ -8922,9 +8980,12 @@ begin
   fUserAgent := '';
 end;
 
-function TFileVersion.BuildDateTimeString: string;
+function TFileVersion.BuildDateTimeString: RawUtf8;
 begin
-  result := DateTimeToIsoString(fBuildDateTime);
+  if (fBuildDateTimeString = '') and
+     (PInt64(@fBuildDateTime)^ <> 0) then
+    fBuildDateTimeString := DoDateTimeToText(fBuildDateTime);
+  result := fBuildDateTimeString;
 end;
 
 function TFileVersion.DetailedOrVoid: string;
@@ -10363,6 +10424,37 @@ begin
 end;
 
 
+{ TCachedValue }
+
+procedure TCachedValue.Reset;
+begin
+  Safe.Lock;
+  Tix32 := 0;
+  FastAssignNew(Value);
+  Safe.UnLock;
+end;
+
+procedure TCachedValue.Cache(Call: TCachedValueCall; CallParam: pointer;
+  TixShr: cardinal; var Dest; Flush: boolean);
+begin
+  TixShr := (GetTickSec shr TixShr) + 1; // big shr may get 0 just after boot
+  Safe.Lock;
+  if (TixShr = Tix32) and
+     not Flush then
+  begin
+    RawByteString(Dest) := Value;
+    Safe.UnLock;
+    exit;
+  end;
+  Safe.UnLock;
+  RawByteString(Dest) := Call(CallParam);
+  Safe.Lock;
+  Tix32 := TixShr;
+  Value := RawByteString(Dest);
+  Safe.UnLock;
+end;
+
+
 { TMultiLightLock }
 
 procedure TMultiLightLock.Init;
@@ -11640,7 +11732,7 @@ function SetCpuSet(var CpuSet: TCpuSet; CpuIndex: cardinal): boolean;
 begin
   result := false;
   if (CpuIndex >= SizeOf(CpuSet) shl 3) or
-     (CpuIndex >= SystemInfo.dwNumberOfProcessors) then
+     (CpuIndex >= CpuThreads) then
     exit;
   SetBitPtr(@CpuSet, CpuIndex);
   result := true;
@@ -11973,6 +12065,7 @@ procedure InitializeUnit;
 begin
   // early initialization needed for those functions
   DoWideCharToUtf8Temp  := _DoWideCharToUtf8Temp;  // mormot.core.unicode
+  DoDateTimeToText      := _DoDateTimeToText;      // mormot.core.datetime
   {$ifdef ISFPC27}
   // we force UTF-8 everywhere on FPC for consistency with Lazarus
   SetMultiByteConversionCodePage(CP_UTF8);
@@ -11983,9 +12076,9 @@ begin
   InitializeSpecificUnit; // in mormot.core.os.posix/windows.inc files
   InitializeProcessInfo;  // cross-platform info - e.g. User/Host + Executable
   // setup some constants
-  JSON_CONTENT_TYPE_VAR := JSON_CONTENT_TYPE;
+  JSON_CONTENT_TYPE_VAR        := JSON_CONTENT_TYPE;
   JSON_CONTENT_TYPE_HEADER_VAR := JSON_CONTENT_TYPE_HEADER;
-  NULL_STR_VAR := 'null';
+  NULL_STR_VAR     := 'null';
   BOOL_UTF8[false] := 'false';
   BOOL_UTF8[true]  := 'true';
   {$ifdef ASMINTEL}

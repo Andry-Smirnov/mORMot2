@@ -304,6 +304,7 @@
     {$define FPCPOSIX}
     {$ifdef BSD}
       // conditionals for Darwin and BSD family like OpenBSD/FreeBSD
+      {$define SOCK_HAS_SINLEN}
       {$ifdef DARWIN}
         {$define OSDARWIN}
         {$define FPCDARWIN}
@@ -314,7 +315,6 @@
         {$define DISABLE_SSE42} // circumvent clang asm bugs
       {$else}
         {$define OSBSD}         // OSX has some non-standard API calls
-        {$define SOCK_HAS_SINLEN}
         {$define FPCBSD}
         {$ifdef OPENBSD}
           {$define OSOPENBSD}   // OSBDS = OSOPENBSD + OSFREEBSD
@@ -511,9 +511,8 @@
     {$define OSPOSIX}
     {$define DELPHIPOSIX}
     {$ifdef MACOS}
-      {$define OSDARWIN}
+      {$define OSDARWIN} // but not OSBSD
       {$define DELPHIDARWIN}
-      {$define OSBSD}
       {$define SOCK_HAS_SINLEN}
     {$endif MACOS}
     {$ifdef ANDROID}
@@ -889,6 +888,8 @@
     {$undef FPC_CPUX64}
     {$undef FPC_PICX64}
     {$undef FPC_CPUAARCH64}
+    // the vmtAutoTable tricks seems to fail
+    {$define NOPATCHVMT}
     // no static linking
     {$define NOLIBCSTATIC}
     {$define NOSQLITE3STATIC}
@@ -1071,6 +1072,7 @@
   {$define USE_WINIOCP}     // I/O completion ports API is fine under Windows
   // (as used by mormot.core.threads and mormot.net.async)
   // (under Linux/POSIX, we fallback to a classical event-driven pool)
+  {$define USE_THREADWINIOCP} // IOCP is needed by the WebSocketsAPI thread pool
 
   {$ifndef NOSSPIAUTH}        // from mormot.lib.sspi
     {$define DOMAINRESTAUTH}  // enable SSPI in mormot.rest.client/server
@@ -1082,6 +1084,7 @@
 
   {$define ONLYUSEHTTPSOCKET} // efficient cross-platform Socket + OpenSSL API
   {$undef USE_WINIOCP}        // disable any Windows-specific code
+  {$undef USE_THREADWINIOCP}
 
   {$ifdef OSANDROID}
 

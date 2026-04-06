@@ -1988,7 +1988,8 @@ function StrLen(S: pointer): PtrInt;
         test    rcx, rcx
         {$else}
         mov     rax, rdi
-        mov     ecx, edi
+        mov     rcx, rdi
+        mov     r8,  rdi
         test    rdi, rdi
         {$endif ABIWINX64}
         jz      @null                // returns 0 if S=nil
@@ -1998,31 +1999,71 @@ function StrLen(S: pointer): PtrInt;
         and     rax, -16             // align pointer by 16
         // will never read outside a memory page boundary, so won't trigger GPF
         movaps  xmm1, [rax]          // read from nearest preceding boundary
-        pcmpeqb xmm1, xmm0           // compare 16 bytes with zero
+        pcmpeqb xmm1, xmm0           // compare 16 bytes with zero into 00/ff
         pmovmskb edx, xmm1           // get one bit for each byte result
         shr     edx, cl              // shift out false bits
         shl     edx, cl              // shift back again
         bsf     edx, edx             // find first 1-bit
-        jnz     @L2                  // found
+        jnz     @found
         // Main loop, search 16 bytes at a time
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@L1:    add     rax, 10H             // increment pointer by 16
+@by16:  add     rax, 16              // increment pointer by 16
         movaps  xmm1, [rax]          // read 16 bytes aligned
-        pcmpeqb xmm1, xmm0           // compare 16 bytes with zero
+        pcmpeqb xmm1, xmm0           // compare 16 bytes with zero into 00/ff
         pmovmskb edx, xmm1           // get one bit for each byte result
         bsf     edx, edx             // find first 1-bit
         // (moving the bsf out of the loop and using test here would be faster
         // for long strings on old processors, but we are assuming that most
         // strings are short, and newer processors have higher priority)
-        jz      @L1                  // loop if not found
-@L2:    // Zero-byte found. Compute string length
-        {$ifdef ABIWINX64}
+        jz      @by16                // loop if not found
+@found: // Zero-byte found. Compute string length
         sub     rax, r8              // subtract start address
-        {$else}
-        sub     rax, rdi
-        {$endif ABIWINX64}
         add     rax, rdx             // add byte index
 @null:
+end;
+
+function StrLenW(S: PWideChar): PtrInt;
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // PWideChar SSE2 version by AB
+        {$ifdef ABIWINX64}
+        mov     rax, rcx
+        mov     r8,  rcx
+        test    rcx, rcx
+        {$else}
+        mov     rax, rdi
+        mov     rcx, rdi
+        mov     r8,  rdi
+        test    rdi, rdi
+        {$endif}
+        jz      @null
+        test    al, 1
+        jnz     @unal          // unaligned input (paranoid)
+        pxor    xmm0, xmm0
+        and     ecx, 15        // align to 16 bytes
+        and     rax, -16
+        movaps  xmm1, [rax]    // read from nearest preceding boundary
+        pcmpeqw xmm1, xmm0     // compare 16 bytes with zero into 0000/ffff
+        pmovmskb edx, xmm1
+        shr     edx, cl        // mask out leading bytes before original pointer
+        shl     edx, cl
+        bsf     edx, edx       // first zero word index
+        jnz     @found
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
+@loop:  add     rax, 16
+        movaps  xmm1, [rax]
+        pcmpeqw xmm1, xmm0     // compare 16 bytes with zero into 0000/ffff
+        pmovmskb edx, xmm1
+        bsf     edx, edx
+        jz      @loop          // continue until zero found
+@found: sub     rax, r8        // byte distance from start
+        add     rax, rdx       // add byte index of match
+        shr     rax, 1         // convert bytes into WideChar count
+@null:  ret
+@unal:  xor     rdx, rdx       // unaligned search - almost never called
+@by1:   cmp     word ptr [rax], dx
+        jz      @found
+        add     rax, 2
+        jmp     @by1
 end;
 
 function PosChar(Str: PUtf8Char; Chr: AnsiChar): PUtf8Char;
@@ -2049,8 +2090,8 @@ function PosChar(Str: PUtf8Char; Chr: AnsiChar): PUtf8Char;
         // will never read outside a memory page boundary, so won't trigger GPF
         movaps  xmm2, [rax]          // read from nearest preceding boundary
         movaps  xmm3, xmm2
-        pcmpeqb xmm2, xmm0           // compare 16 bytes with zero
-        pcmpeqb xmm3, xmm1           // compare 16 bytes with Chr
+        pcmpeqb xmm2, xmm0           // compare 16 bytes with zero into 00/ff
+        pcmpeqb xmm3, xmm1           // compare 16 bytes with Chr  into 00/ff
         por     xmm2, xmm3
         pmovmskb edx, xmm2           // get one bit for each byte result
         shr     edx, cl              // shift out false bits
@@ -2059,11 +2100,11 @@ function PosChar(Str: PUtf8Char; Chr: AnsiChar): PUtf8Char;
         jnz     @L2                  // found
         // Main loop, search 16 bytes at a time
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@L1:    add     rax, 10H             // increment pointer by 16
+@L1:    add     rax, 16              // increment pointer by 16
         movaps  xmm2, [rax]          // read 16 bytes aligned
         movaps  xmm3, xmm2
-        pcmpeqb xmm2, xmm0           // compare 16 bytes with zero
-        pcmpeqb xmm3, xmm1           // compare 16 bytes with Chr
+        pcmpeqb xmm2, xmm0           // compare 16 bytes with zero into 00/ff
+        pcmpeqb xmm3, xmm1           // compare 16 bytes with Chr  into 00/ff
         por     xmm2, xmm3
         pmovmskb edx, xmm2           // get one bit for each byte result
         bsf     edx, edx             // find first 1-bit
@@ -2099,7 +2140,7 @@ function BufferLineLength(Text, TextEnd: PUtf8Char): PtrInt;
         movaps  xmm3, xmm2
         pcmpeqb xmm2, xmm0
         pcmpeqb xmm3, xmm1
-        por     xmm3, xmm2
+        por     xmm3, xmm2         // compare 16 bytes with #10/#13 into 00/ff
         pmovmskb eax, xmm3
         shr     eax, cl            // shift out unaligned bytes
         bsf     eax, eax

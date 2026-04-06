@@ -3979,7 +3979,7 @@ begin
     _GlobalInfo := RegisterGlobalShutdownRelease(TBinDictionary.Create);
   result := _GlobalInfo;
   for i := 0 to length(_GlobalInfoAdd) - 1 do
-    _GlobalInfoAdd[i](result); // may take some time
+    _GlobalInfoAdd[i](result); // may take some time (e.g. ldap:* info)
   _GlobalInfoPre := nil;
   _GlobalInfoAdd := nil;
   _GlobalInfoSafe.UnLock;
@@ -4015,7 +4015,7 @@ end;
 procedure _GlobalInfoCpu(Sender: TBinDictionary);
 begin
   Sender.UpdateText( 'cpu:name',         CpuInfoText);
-  Sender.UpdateText(['cpu:threads'],    [SystemInfo.dwNumberOfProcessors]);
+  Sender.UpdateText(['cpu:threads'],    [CpuThreads]);
   Sender.UpdateText(['cpu:cores'],      [CpuCores]);
   Sender.UpdateText(['cpu:sockets'],    [CpuSockets]);
   if HasHWAes then
@@ -4042,10 +4042,11 @@ begin
 end;
 
 procedure _GlobalInfoUser(Sender: TBinDictionary);
-{$ifndef OSPOSIX}
+{$ifdef OSWINDOWS}
 var
   u: RawUtf8;
-{$endif OSPOSIX}
+  x: TExtendedNameFormat;
+{$endif OSWINDOWS}
 begin
   Sender.UpdateText( 'user:name',    Executable.User);
   Sender.UpdateText(['user:home'],  [GetSystemPath(spUserDocuments)]);
@@ -4054,11 +4055,44 @@ begin
   {$ifdef OSPOSIX}
   Sender.UpdateText(['user:uid'],   [PosixUid]);
   Sender.UpdateText(['user:gid'],   [PosixGid]);
-  {$else}
+  {$endif OSPOSIX}
+  {$ifdef OSWINDOWS}
   Sender.UpdateTextNotVoid( 'user:uid', CurrentSid(wttProcess, nil, @u));
   Sender.UpdateTextNotVoid( 'user:domain', u);
-  {$endif OSPOSIX}
+  u := LookupName('', Join([u, '\', Executable.Host])); // try 'domain\host'
+  if u = '' then
+    u := LookupName('', Executable.Host); // fallback to isolated name
+  Sender.UpdateTextNotVoid( 'user:computerid', u);
+  if WinJoinStatus = jsDomain then
+    for x := low(x) to high(x) do
+      Sender.UpdateTextNotVoid(Join(['user:', GetEnumNameTrimed(
+        TypeInfo(TExtendedNameFormat), ord(x), scKebabCase)]), WinUserName(x));
+  {$endif OSWINDOWS}
 end;
+
+{$ifdef OSWINDOWS}
+procedure _GlobalInfoJoin(Sender: TBinDictionary);
+var
+  f: TComputerNameFormat;
+  x: TExtendedNameFormat;
+  u: RawUtf8;
+begin
+  for f := low(f) to high(f) do
+    Sender.UpdateTextNotVoid(Join(['join:', GetEnumNameTrimed(
+      TypeInfo(TComputerNameFormat), ord(f), scKebabCase)]), WinComputerName(f));
+  case WinJoinStatus('', @u) of
+    jsWorkgroup:
+      Sender.UpdateText('join:workgroup', u);
+    jsDomain:
+      begin
+        Sender.UpdateText('join:domain', u);
+        for x := low(x) to enfDnsDomain do
+          Sender.UpdateTextNotVoid(Join(['join:', GetEnumNameTrimed(
+            TypeInfo(TExtendedNameFormat), ord(x), scKebabCase)]), WinComputerName(x));
+      end;
+  end;
+end;
+{$endif OSWINDOWS}
 
 procedure _GlobalInfoBios(Sender: TBinDictionary);
 begin
@@ -10843,6 +10877,9 @@ begin
   GlobalInfoRegister('env:',  _GlobalInfoEnv);
   GlobalInfoRegister('user:', _GlobalInfoUser);
   GlobalInfoRegister('bios:', _GlobalInfoBios);
+  {$ifdef OSWINDOWS}
+  GlobalInfoRegister('join:', _GlobalInfoJoin);
+  {$endif OSWINDOWS}
   // in-memory hashing are seeded from random to avoid hash flooding
   HashSeed := SystemEntropy.Startup.c0;
 end;

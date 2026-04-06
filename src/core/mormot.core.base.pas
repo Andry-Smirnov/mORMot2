@@ -1181,10 +1181,6 @@ function FindPropName(Values: PRawUtf8Array; const Value: RawUtf8;
 // - here name search would use fast IdemPropNameU() function
 function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integer; overload;
 
-/// use the RTL to return a date/time as ISO-8601 text
-// - slow function, here to avoid linking mormot.core.datetime
-function DateTimeToIsoString(dt: TDateTime): string;
-
 /// parse a '0x#####' buffer context into a 32-bit binary
 // - jump trailing '0x', then ends at first non hexadecimal character
 // - internal function to avoid linking mormot.core.buffers.pas for a few bytes
@@ -2959,9 +2955,9 @@ var
   CpuManufacturer: TIntelCpuManufacturer;
   CpuFamily, CpuModel: byte;
 
-/// twelve-character ASCII vendor string returned by Intel/AMD cpuid
-// - typical values are 'AuthenticAMD' or 'GenuineIntel'
-function IntelManufacturer: RawUtf8;
+  /// twelve-character ASCII vendor string returned by Intel/AMD cpuid
+  // - typical values are 'AuthenticAMD' or 'GenuineIntel'
+  IntelManufacturer: RawUtf8;
 
 /// twelve-character ASCII hypervisor string returned by Intel/AMD cpuid
 // - returns '' if cfHYP is not part of CpuFeatures
@@ -3335,9 +3331,12 @@ function StrCompW(Str1, Str2: PWideChar): PtrInt;
 // preferred e.g. with valgrid
 // - SSE2 StrLen() versions would never read outside a memory page boundary,
 // so are safe to use in practice, but may read outside the string buffer
-// itself, so may not please paranoid tools like valgrid
+// itself, so may trigger paranoid tools like valgrid
 function StrLenSafe(S: pointer): PtrInt;
   {$ifdef CPU64}inline;{$endif}
+
+/// simple version of StrLenW(), but which will never read beyond the string
+function StrLenWSafe(S: PWideChar): PtrInt;
 
 /// our fast version of StrLen(), to be used with PUtf8Char/PAnsiChar
 // - under x86, will detect SSE2 and use it if available, reaching e.g.
@@ -3349,8 +3348,12 @@ function StrLen(S: pointer): PtrInt;
 var StrLen: function(S: pointer): PtrInt = StrLenSafe;
 {$endif ASMX64}
 
-/// our fast version of StrLen(), to be used with PWideChar
+/// our fast version of StrLen(), to be used with PWideChar - SSE2 on Intel/AMD
+{$ifdef ASMX64}
 function StrLenW(S: PWideChar): PtrInt;
+{$else}
+var StrLenW: function(S: PWideChar): PtrInt = StrLenWSafe;
+{$endif ASMINTEL}
 
 /// fast go to next text line, ended by #10 or #13#10
 // - source is expected to be not nil
@@ -4122,7 +4125,10 @@ procedure DynArrayHashTableAdjust16(P: PWordArray; deleted: cardinal; count: Ptr
 //  to obfuscate password or content - so it is not a real encryption
 // - fast, but not cryptographically secure, since naively xor data bytes with
 // crc32ctab[]: consider using mormot.crypt.core proven algorithms instead
-procedure SymmetricEncrypt(key: cardinal; var data: RawByteString);
+procedure SymmetricEncrypt(key: cardinal; var data: RawByteString); overload;
+
+/// simple symmetric obfuscation scheme using a 32-bit key and crc32c lookup tables
+procedure SymmetricEncrypt(key: PtrUInt; data: PCardinal; len: PtrInt); overload;
 
 
 { ************ Efficient Variant Values Conversion }
@@ -5837,12 +5843,6 @@ begin
   result := high(Names);
   if result >= 0 then
     result := FindPropName(@Names[0], Name, result + 1);
-end;
-
-function DateTimeToIsoString(dt: TDateTime): string;
-begin
-  // avoid to link mormot.core.datetime
-  DateTimeToString(result, 'yyyy-mm-dd hh:nn:ss', dt);
 end;
 
 function Hex2Dec(c: AnsiChar): ShortInt; {$ifdef HASINLINE} inline; {$endif}
@@ -10012,7 +10012,7 @@ begin
     FastSetString(result, @PByteArray(Str)[StartPos - 1], len - StartPos + 1);
 end;
 
-function StrLenW(S: PWideChar): PtrInt;
+function StrLenWSafe(S: PWideChar): PtrInt;
 begin
   result := 0;
   if S <> nil then
@@ -10305,7 +10305,7 @@ begin
   {$ifdef ASMINTEL}
   if cfTSC in CpuFeatures then      // may trigger GPF if CR4.TSD bit is set
     tmp.d0 := tmp.d0 xor Rdtsc;     // 64-bit CPU cycles
-  RdRand32(@tmp.l, 4);              // xor 128-bit HW CSPRNG: no-op if no cfSSE42
+  RdRand32(@tmp.l, 4);              // xor 128-bit HW CSPRNG: no-op if no SSE42
   if cfTSC in CpuFeatures then
     e.r[2].L := e.r[2].L xor Rdtsc; // has changed during slow RdRand32()
   {$else}
@@ -10653,19 +10653,6 @@ begin
     until n = 0;
 end;
 
-function IntelManufacturer: RawUtf8;
-var
-  regs: TIntelRegisters;
-  id: array[0..12] of AnsiChar;
-begin
-  GetCpuid(0, 0, regs); // EAX=0: Highest Function Parameter and Manufacturer ID
-  PCardinalArray(@id)[0] := regs.ebx; // 12-character ID in EBX,EDX,ECX
-  PCardinalArray(@id)[1] := regs.edx;
-  PCardinalArray(@id)[2] := regs.ecx;
-  id[12] := #0;
-  FastSetString(result, @id, StrLen(@id));
-end;
-
 function IntelHypervisor: RawUtf8;
 var
   regs: TIntelRegisters;
@@ -10696,6 +10683,7 @@ procedure TestCpuFeatures;
 var
   regs: TIntelRegisters;
   flags: PIntegerArray;
+  id: array[0..3] of cardinal;
 begin
   // retrieve CPUID raw flags
   GetCpuid({eax=}1, {ecx=}0, regs); // EAX=1: Processor Info and Feature Bits
@@ -10728,6 +10716,11 @@ begin
           (regs.edx = $69746e65) and
           (regs.ecx = $444d4163) then
     CpuManufacturer := icmAmd;   // 'AuthenticAMD'
+  id[0] := regs.ebx; // 12-character ID
+  id[1] := regs.edx;
+  id[2] := regs.ecx;
+  id[3] := 0;
+  FastSetString(IntelManufacturer, @id, StrLen(@id));
   // validate accuracy of most used HW opcodes against flags reported by CPUID
   if cfTSC in CpuFeatures then
     try
@@ -10809,7 +10802,10 @@ begin
   {$endif WITH_ERMS}
   {$endif HASNOSSE2}
   if cfSSE2 in CpuFeatures then
-    StrLen := @StrLenSSE2;
+  begin
+    StrLen  := @StrLenSSE2;
+    StrLenW := @StrLenWSSE2;
+  end;
   {$endif ASMX86NOTPIC}
 end;
 
@@ -11363,7 +11359,9 @@ begin
   caps[0] := 0;
   caps[1] := 0;
   try
-    p := pointer(system.envp); // PPAnsiChar
+    p := pointer(envp); // PPAnsiChar
+    if p = nil then
+      exit; // e.g. on Delphi POSIX
     while p^ <> 0 do
       inc(p);
     inc(p); // auxv is located after the last textual environment variable
@@ -12191,28 +12189,30 @@ begin
 end;
 
 procedure SymmetricEncrypt(key: cardinal; var data: RawByteString);
-var
-  i, len: integer;
-  d: PCardinal;
-  tab: PCrc32tab;
 begin
   if data = '' then
     exit; // nothing to cypher
   {$ifdef FPC}
   UniqueString(data); // @data[1] won't call UniqueString() under FPC :(
   {$endif FPC}
-  d := @data[1];
-  len := length(data);
-  key := key xor cardinal(len);
+  SymmetricEncrypt(key, @data[1], length(data));
+end;
+
+procedure SymmetricEncrypt(key: PtrUInt; data: PCardinal; len: PtrInt); overload;
+var
+  i: PtrInt;
+  tab: PCardinalArray;
+begin
+  key := key xor PtrUInt(len);
   tab := @crc32ctab; // use first 1KB of this 8KB table generated at startup
   for i := 0 to (len shr 2) - 1 do
   begin
-    key := key xor tab[0, (cardinal(i) xor key) and 1023];
-    d^ := d^ xor key; // 32-bit loop
-    inc(d);
+    key := key xor tab[(PtrUInt(i) xor key) and 1023];
+    data^ := data^ xor key; // 32-bit loop
+    inc(data);
   end;
-  for i := 0 to (len and 3) - 1 do // trailing 1..3 bytes from tab[0, 17..136]
-    PByteArray(d)^[i] := PByteArray(d)^[i] xor key xor tab[0, 17 shl i];
+  for i := 0 to (len and 3) - 1 do // trailing 1..3 bytes from tab[17..136]
+    PByteArray(data)^[i] := PByteArray(data)^[i] xor key xor tab[17 shl i];
 end;
 
 
@@ -14009,14 +14009,16 @@ begin
   SortDynArrayVariantComp  := @_SortDynArrayVariantComp;
   _Fill256FromOs           := @__Fill256FromOs;
   ClassUnit                := @_ClassUnit;
-  // initialize CPU-specific asm
-  TestCpuFeatures;
-  {$ifndef ASMINTEL}
+  {$ifndef ASMINTELNOTPIC}
   MoveFast := @Move;
   FillCharFast := @_FillChar;
+  {$endif ASMINTELNOTPIC}
+  // initialize CPU-specific asm
+  TestCpuFeatures;
+  {$ifndef ASMINTELNOTPIC}
   if BaseEntropy.i0 = 0 then // BSD or MAC arm/aarch64
     XorEntropy(BaseEntropy); // ensure not void
-  {$endif ASMINTEL}
+  {$endif ASMINTELNOTPIC}
 end;
 
 

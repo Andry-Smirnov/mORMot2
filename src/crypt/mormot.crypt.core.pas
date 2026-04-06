@@ -5623,10 +5623,8 @@ class function TAesAbstract.MacEncrypt(const Data: RawByteString;
 var
   aes: TAesAbstract;
 begin
-  aes := Create(Key);
+  aes := Create(Key, 256, IV);
   try
-    if IV <> nil then
-      aes.IV := IV^;
     result := aes.MacAndCrypt(Data, Encrypt, IV = nil, Associated);
   finally
     aes.Free;
@@ -5639,10 +5637,8 @@ class function TAesAbstract.MacEncrypt(const Data: RawByteString;
 var
   aes: TAesAbstract;
 begin
-  aes := Create(Key);
+  aes := Create(Key, 128, IV);
   try
-    if IV <> nil then
-      aes.IV := IV^;
     result := aes.MacAndCrypt(Data, Encrypt, IV = nil, Associated);
   finally
     aes.Free;
@@ -7879,7 +7875,7 @@ end;
 var
   _h: record
     safe: TLightLock;
-    k: THash256;      // decoded local private key file
+    k: THash256;      // decoded local private key file (sensitive)
     mac: THmacSha256; // initialized from CryptProtectDataEntropy salt
   end;
 

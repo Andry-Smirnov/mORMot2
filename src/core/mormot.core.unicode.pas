@@ -368,7 +368,7 @@ function CodePageToCharSet(CodePage: cardinal): integer;
 function IsFixedWidthCodePage(aCodePage: cardinal): boolean;
 
 /// return a code page number into human-friendly text
-// - e.g. 'shift_jis' for aCodePage = 932, or 'ms1252' for 1252
+// - e.g. 'shift_jis' for aCodePage = 932, or 'windows-1252' for 1252
 // - returns the lowercased Unicode_CodePageName(aCodePage) value
 function CodePageToText(aCodePage: cardinal): RawUtf8;
 
@@ -11095,7 +11095,7 @@ begin
   try
     i := FastFindPUtf8CharSorted( // efficient O(log(n)) binary search
       pointer(fFiles), high(fFiles), pointer(fn), @StrIComp);
-    if i >= 0 then
+    if i >= 0 then                       // return result = '' if not found
       Utf8ToFileName(fFiles[i], result); // use exact file name case from OS
   finally
     fSafe.ReadUnLock;

@@ -12,6 +12,9 @@
 
 function PosExtString(Str: PChar): PChar; forward;
 
+function _utf16toascii(s: PWordArray; d: PByteArray; l: PtrInt): pointer; forward;
+procedure _utf16fromascii(s: PByteArray; d: PWordArray; l: PtrInt); forward;
+
 function IsExtendedPathNameW(Name: PWideChar): boolean; // in '\\?\...' format
 begin
   result := (Name <> nil) and
@@ -92,16 +95,10 @@ begin
 end;
 
 procedure SetStringFromAnsi7Buffer(var d: string; s: PByteArray; l: PtrInt);
-var
-  dst: PWordArray;
 begin
   SetString(d, nil, l);
-  dst := pointer(d);
-  if dst <> nil then
-    repeat
-      dec(l);
-      dst[l] := cardinal(s[l]); // fast direct 7-bit conversion
-    until l = 0;
+  if pointer(d) <> nil then
+    _utf16fromascii(s, pointer(d), l);
 end;
 
 {$else}
@@ -123,7 +120,7 @@ end;
 
 function W32(const FileName: TFileName; var Temp: TW32Temp; DoCopy: boolean): PWideChar;
 var
-  i, len: PtrInt;
+  len: PtrInt;
 begin
   result := nil;
   if FileName = '' then
@@ -134,8 +131,7 @@ begin
        IsExtendedPathName(FileName))) and
      IsAnsiCompatible(pointer(FileName), len) then
     // most common cases do not need any Unicode conversion
-    for i := 0 to len do // includes #0 terminator
-      PWordArray(@Temp)[i] := cardinal(PByteArray(FileName)[i])
+    _utf16fromascii(pointer(FileName), @Temp, len)
   else
     // use a temporary SynUnicode variable for complex UTF-16 conversion
     // or if MAX_PATH is reached and \\?\ prefix is needed for extended-length
@@ -144,8 +140,6 @@ begin
 end;
 
 procedure Win32PWideCharToString(P: PWideChar; l: PtrInt; var s: string);
-var
-  i: PtrInt;
 
   procedure DoSynUnicodeConv;
   var
@@ -159,8 +153,8 @@ begin
   if IsAnsiCompatibleW(P, l) then // most common case
   begin
     SetString(s, nil, l);
-    for i := 0 to l - 1 do
-      PByteArray(s)[i] := PWordArray(P)[i]; // fast direct conversion
+    if pointer(s) <> nil then
+      _utf16toascii(pointer(P), pointer(s), l); // fast direct conversion
   end
   {$ifdef FPC}
   else if DefaultRTLFileSystemCodePage = CP_UTF8 then // happens with Lazarus
@@ -226,7 +220,7 @@ end;
 function Win32Utf8ToAnsi(P: pointer; L, CP: integer; var A: RawByteString): boolean;
 var
   tmpW, tmpA: TSynTempBuffer;
-begin
+begin // fast enough: used internally only by Utf8ToConsole() if CP <> CP_UTF8
   result := false;
   tmpW.Init(L * 2);
   L := Utf8ToUnicode(tmpW.Buf, L + 8, P, L); // convert to UTF-16 with the RTL
@@ -601,14 +595,14 @@ begin
   if len = 0 then
     // typically ERROR_RESOURCE_LANG_NOT_FOUND or ERROR_MUI_FILE_NOT_FOUND
     len := FormatMessageW(flags, pointer(lib), err, 0, @tmp, SizeOf(tmp), nil);
-  SetLastError(errbak);
   while (len <> 0) and
         (ord(tmp[len - 1]) in [0..32, ord('.')]) do
     dec(len); // trim right
   if s <> nil then
     Win32PWideCharToString(@tmp, len, s^)
-  else if len <> 0 then
-    ss^[0] := AnsiChar(UnicodeToUtf8(@ss^[1], 255, @tmp, len)); // use RTL
+  else
+    Unicode_WideToShort(@tmp, len, CP_UTF8, ss^);
+  SetLastError(errbak);
   result := len <> 0;
 end;
 
@@ -626,7 +620,7 @@ begin
     WinError(Code, 0, nil, @result); // fallback to FormatMessageW()
 end;
 
-function WinApiErrorShort(Code: cardinal; Lib: HMODULE): shortstring;
+function WinApiErrorShort(Code: cardinal; Lib: HMODULE): ShortString;
 begin
   if (Lib = 0) or
      not WinError(Code, Lib, @result, nil) then // try from library name
@@ -1811,7 +1805,7 @@ begin
         continue;
       if dest[0] = #0 then
         dest := ' [.NET/CLR unhandled'
-      else if ord(dest[0]) + ps^[0] > 240 then
+      else if PtrUInt(dest[0]) + ps^[0] >= PtrUInt(high(dest)) then
         break; // paranoid
       p := @dest[ord(dest[0]) + 1];
       p^ := ' '; // replace leading '_' by ' '
@@ -2777,7 +2771,7 @@ var
     u: TSynTempBuffer;
   begin
     sz := 0;
-    if VerQueryValueW(pt, Utf8ToWin32PWideChar(lngnfo + From, u), str, sz) and
+    if VerQueryValueW(pt, Utf8ToWin32PWideChar(Join([lngnfo, From]), u), str, sz) and
        (sz > 0) then
       Win32PWideCharToUtf8(str, Res);
     u.Done;
@@ -2809,8 +2803,8 @@ begin
               ft.dwLowDateTime := dwFileDateLS; // built date from version nfo
               ft.dwHighDateTime := dwFileDateMS;
               FileTimeToSystemTime(ft, st);
-              fBuildDateTime := EncodeDate(
-                st.wYear, st.wMonth, st.wDay);
+              fBuildDateTime := EncodeDate(st.wYear, st.wMonth, st.wDay);
+              fBuildDateTimeString := '';
             end;
           end;
         if VerQueryValueW(pt, '\VarFileInfo\Translation', pointer(trans), siz2) and
@@ -5084,7 +5078,8 @@ begin
         RelationProcessorCore:
           inc(CpuCores);
         RelationProcessorPackage: // physical processor socket
-          AddPtrUInt(TPtrUIntDynArray(CpuSocketsMask), CpuSockets, pi^.ProcessorMask);
+          AddPtrUInt(TPtrUIntDynArray(CpuSocketsMask), integer(CpuSockets),
+            pi^.ProcessorMask);
         RelationCache:            // raw cache information
           if pi^.Cache.CacheType in [CacheUnified, CacheData] then
             if (pi^.Cache.Level >= low(CpuCache)) and
@@ -5121,12 +5116,12 @@ begin
               _fmt('%s L%d=%d*%s ', [CpuCacheText, i, Count, KBNoSpace(Size)]);
     TrimSelf(CpuCacheText);
   until true;
+  CpuThreads := SystemInfo.dwNumberOfProcessors;
   if CpuSockets = 0 then
     CpuSockets := 1; // e.g. on XP prior to SP3
   if CpuCores = 0 then
-    CpuCores := SystemInfo.dwNumberOfProcessors;
-  _fmt('%d x %s (' + CPU_ARCH_TEXT + ')',
-    [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
+    CpuCores := CpuThreads;
+  _fmt('%d x %s (' + CPU_ARCH_TEXT + ')', [CpuThreads, cpu], CpuInfoText);
   // 5. compute some minimal entropy using the just retrieved info
   rnd := @SystemEntropy.Startup;
   CoCreateGuid(rnd^); // very fast and unique (but not strong)

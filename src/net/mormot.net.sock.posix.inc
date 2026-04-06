@@ -80,6 +80,8 @@ const
     {$ifndef OSOPENBSD}
     {$ifdef OSDARWIN}
     SO_NOSIGPIPE = $1022;
+    SO_REUSEPORT = $0200;
+    AF_LINK      = 18;
     {$else}
     SO_NOSIGPIPE = $800;
     {$endif OSDARWIN}
@@ -1025,7 +1027,7 @@ begin
                 m^.Kind := makTunnel;
               ARPHRD_PPP:
                 m^.Kind := makPpp;
-          {$endif OSBSDDARWIN}
+            {$endif OSBSDDARWIN}
             else
               // https://systemd.io/PREDICTABLE_INTERFACE_NAMES
               if m^.Name <> '' then
@@ -1299,6 +1301,9 @@ begin
     end;
 end;
 
+var
+  EtcResolve, EtcResolveEnv: TCachedValue; // 64 seconds thread-safe cache
+
 function _GetDnsAddresses(usePosixEnv, getAD: boolean): TRawUtf8DynArray;
 var
   resolv, one: RawUtf8;
@@ -1307,11 +1312,11 @@ var
 begin
   result := nil;
   if usePosixEnv then
-    resolv := StringFromFile(GetSystemEnvString('ETC'));
+    resolv := StringFromFileCached(GetSystemEnvString('ETC'), EtcResolveEnv);
   if resolv = '' then
     // all systems are likely to have or generate this file
     // - even the libc seems to read it when implementing gethostname()
-    resolv := StringFromFile('/etc/resolv.conf');
+    resolv := StringFromFileCached('/etc/resolv.conf', EtcResolve);
   p := pointer(resolv);
   if p = nil then
     exit;
