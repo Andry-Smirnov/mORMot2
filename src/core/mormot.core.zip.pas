@@ -1862,7 +1862,7 @@ begin
   result := false;
   for i := 0 to length(fOnCreateFromFilesIgnore) - 1 do
     // case-insensitive even on POSIX (no AnsiCompareFileName)
-    if CompareText(Entry.zipName, fOnCreateFromFilesIgnore[i]) = 0 then
+    if SameTextS(Entry.zipName, fOnCreateFromFilesIgnore[i]) then
       exit;
   result := true;
 end;
@@ -2865,7 +2865,7 @@ begin
     // TZipRead did ensure ZipNamePathDelim was stored in Entry[].zipName
     normalized := NormalizeZipName(aName);
     for result := 0 to Count - 1 do
-      if SameText(Entry[result].zipName, normalized) then
+      if SameTextS(Entry[result].zipName, normalized) then
         exit;
   end;
   result := -1;

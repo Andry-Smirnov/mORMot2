@@ -852,7 +852,7 @@ function GetLocalIpAddress(const Remote: RawUtf8 = '8.8.8.8'): RawUtf8;
 /// retrieve all DNS (Domain Name Servers) addresses known by the Operating System
 // - on POSIX, return "nameserver" from /etc/resolv.conf unless usePosixEnv is set
 // - on Windows, calls GetNetworkParams API from iphlpapi
-// - an internal cache of the result will be refreshed every 8 seconds
+// - an internal cache of the result will be refreshed every 64 seconds
 function GetDnsAddresses(usePosixEnv: boolean = false): TRawUtf8DynArray;
 
 /// append a custom resolver address for GetDnsAddresses() in addition to the OS
@@ -867,7 +867,7 @@ var
 /// retrieve the AD Domain Name addresses known by the Operating System
 // - on POSIX, return all "search" from /etc/resolv.conf unless usePosixEnv is set
 // - on Windows, calls GetNetworkParams API from iphlpapi to retrieve a single item
-// - no cache is used for this function
+// - a 64 seconds cache is used for this function on POSIX
 // - you can force for a given value using ForcedDomainName, e.g. if the
 // machine is not actually registered for / part of the domain, but has access
 // to the domain controller
@@ -981,6 +981,12 @@ type
     // - clients that are willing to connect to servers that don't implement RFC
     // 5746 secure renegotiation are subject to attacks such as CVE-2009-3555
     ClientAllowUnsafeRenegotation: boolean;
+    /// input: release internal read/write TLS buffers on idle connection
+    // - may be useful with high number of concurrent connections to save around
+    // 34KB per idle TLS connection - false (disabled) by default
+    // - on OpenSSL client or server, set the SSL_MODE_RELEASE_BUFFERS option
+    // - not used on SChannel
+    ReleaseBuffers: boolean;
     /// input: PEM/PFX file name containing a certificate to be loaded
     // - (Delphi) warning: encoded as UTF-8 not UnicodeString/TFileName
     // - on OpenSSL client or server, calls SSL_CTX_use_certificate_file() API
@@ -1159,7 +1165,7 @@ function GetTlsContext(TlsEnabled, IgnoreTlsCertError: boolean;
   var Context: TNetTlsContext; Forced: PNetTlsContext = nil): PNetTlsContext;
 
 /// compare the main fields of twoTNetTlsContext instances
-// - won't compare the callbacks
+// - won't compare the callbacks, just the certificates/privatekey/hostcsv fields
 function SameNetTlsContext(const tls1, tls2: TNetTlsContext): boolean;
 
 var
@@ -1983,6 +1989,7 @@ type
     fOpenUriFull: RawUtf8; // set by OpenUri()
     fBytesIn: Int64;
     fBytesOut: Int64;
+    fRetryCount: cardinal;
     procedure DoRaise(const msg: string; const args: array of const;
       error: TNetResult = nrOK; errnumber: PNetErrorInt = nil;
       exc: ENetSockClass = nil); overload;
@@ -2333,6 +2340,10 @@ type
     /// total bytes sent
     property BytesOut: Int64
       read fBytesOut write fBytesOut;
+    /// counter incremented on nrRetry within TrySockRecv/TrySndLow methods
+    // - may be used to control the data flow at application level
+    property RetryCount: cardinal
+      read fRetryCount write fRetryCount;
   end;
   {$M-}
 
@@ -4334,47 +4345,39 @@ begin
 end;
 
 var
-  DnsCache: record
-    Safe: TLightLock;
-    Tix: cardinal;
-    Value, Custom: TRawUtf8DynArray;
-  end;
+  DnsCacheSafe: TLightLock;
+  DnsCacheTix: cardinal;
+  DnsCacheValue, DnsCacheCustom: TRawUtf8DynArray;
 
 function GetDnsAddresses(usePosixEnv: boolean): TRawUtf8DynArray;
 var
   tix32: cardinal;
   i: PtrInt;
 begin
-  tix32 := mormot.core.os.GetTickSec shr 3 + 1; // refresh every 8s
-  with DnsCache do
-  begin
-    Safe.Lock;
-    try
-      if tix32 <> Tix then
-      begin
-        Value := _GetDnsAddresses(usePosixEnv, false); // from OS
-        for i := 0 to length(Custom) - 1 do
-          _addutf8(Value, Custom[i]);          // from RegisterDnsAddress()
-        Tix := tix32;
-      end;
-      result := Value;
-    finally
-      Safe.UnLock;
+  tix32 := mormot.core.os.GetTickSec shr 6 + 1; // TCachedValue resolution
+  DnsCacheSafe.Lock;
+  try
+    if tix32 <> DnsCacheTix then
+    begin
+      _GetDnsAddresses(usePosixEnv, false, DnsCacheValue); // from OS
+      for i := 0 to length(DnsCacheCustom) - 1 do
+        _addutf8(DnsCacheValue, DnsCacheCustom[i]); // from RegisterDnsAddress
+      DnsCacheTix := tix32;
     end;
+    result := DnsCacheValue;
+  finally
+    DnsCacheSafe.UnLock;
   end;
 end;
 
 procedure RegisterDnsAddress(const DnsResolver: RawUtf8);
 begin
-  with DnsCache do
-  begin
-    Safe.Lock;
-    try
-      _addutf8(Custom, DnsResolver);
-      Tix := 0; // flush cache
-    finally
-      Safe.UnLock;
-    end;
+  DnsCacheSafe.Lock;
+  try
+    _addutf8(DnsCacheCustom, DnsResolver);
+    DnsCacheTix := 0; // flush cache
+  finally
+    DnsCacheSafe.UnLock;
   end;
 end;
 
@@ -4386,7 +4389,7 @@ begin
     result[0] := ForcedDomainName;
   end
   else
-    result := _GetDnsAddresses(usePosixEnv, {getAD=}true);
+    _GetDnsAddresses(usePosixEnv, {getAD=}true, result);
 end;
 
 var
@@ -7338,6 +7341,7 @@ begin
           end;
         nrRetry:
           begin
+            inc(fRetryCount);
             res := nrOk; // make RecvPending + WaitFor below and retry Recv
             read := 0;
           end;
@@ -7455,6 +7459,7 @@ begin
       if GetAborted or
          not (res in [nrOk, nrRetry]) then
         break;
+      inc(fRetryCount);
       events := fSock.WaitFor(TimeOut, [neWrite, neError]); // select() or poll()
       res := nrUnknownError;
       if neError in events then

@@ -259,10 +259,10 @@ const
 type
   /// maintain one partial download for THttpPartials
   THttpPartial = record
-    /// genuine 31-bit positive identifier, 0 if empty/recyclable
+    /// genuine 31-bit positive number, 0 if empty/recyclable after ReleaseSlot
     ID: THttpPartialID;
-    /// the state of this partial download
-    Flags: set of (pFinished);
+    /// the internal state of this partial download
+    Flags: set of (pFinished, pHash);
     /// the expected full size of this download
     FullSize: Int64;
     /// the timestamp to be affected to the file, when it is fully downloaded
@@ -337,91 +337,6 @@ type
     // - this method is one of the two called from THttpServerSocketGeneric,
     // when the request is finished
     procedure Remove(Sender: PHttpRequestContext);
-  end;
-
-  /// exception raised by THttpCacheFiles process
-  EHttpCacheFiles = class(ESynException);
-
-  /// compute the truncated THttpCached 128-bit hash from a local filename
-  TOnComputeHashFromFileName = function(const LocalFile: TFileName;
-    out Hash: THash128): boolean of object;
-
-  /// store the metadata of one cached file, from its hash, as 32 bytes
-  // - used by THttpCacheFiles to delete deprecated cache entries
-  THttpCached = packed record
-    /// file hash, truncated to 128-bit, i.e. 16 bytes
-    // - 128-bit truncation of a cryptographic hash (SHA-256 or SHA-3) is enough
-    // to ensure no collision, as it is the case from HttpRequestHashBase32()
-    // or THttpProxyServer.OnGetHeadRemoteUri()
-    // - may be e.g. from the real file content hash (for PeerCache), or 128-bit
-    // of the SHA-256 hashed URI (for THttpProxyServer)
-    Hash: THash128;
-    /// the last time this file was accessed - used to delete deprecated files
-    LastAccess: TUnixTimeMinimal;
-  end;
-  /// point to one cached file metadata
-  PHttpCached = ^THttpCached;
-  /// store several cached file metadata
-  THttpCachedArray = array of THttpCached;
-
-  /// efficient in-memory storage of some file metadata
-  // - files are identified and searched by their binary hash
-  // - hashes are store in memory, associated with their expiration timestamps
-  THttpCacheFiles = class(TObjectOSLightLock)
-  protected
-    fCount: integer;
-    fModified, fSubFolderScan: boolean;
-    fItem: THttpCachedArray;
-    fItems: TDynArrayHashed;
-    fFileName: TFileName;
-    fFolder: TFileName;
-    fOnFileToHash: TOnComputeHashFromFileName;
-    fLog: TSynLogProc;
-    procedure ValidateSubFolder(valid: pointer; subfolder: AnsiChar);
-    function ValidateSubFolders: boolean;
-  public
-    /// initialize this instance
-    // - will open the file on disk for real-time efficient update
-    // - if aFileName = '', all process will be done in memory
-    // - will read all fields in aFolderName (+aSubFolderScan) to validate the
-    // internal list using aFileToHash callback for file lookup
-    constructor Create(const aFileName, aFolderName: TFileName;
-      const aLog: TSynLogProc; aSubFolderScan: boolean;
-      const aFileToHash: TOnComputeHashFromFileName); reintroduce;
-    /// finalize this instance, writing the file to disk
-    destructor Destroy; override;
-    /// reload the persisted file on disk
-    function LoadFromFile: boolean;
-    /// persist the whole in-memory list on disk - all will be written at once
-    // - is expected to be called e.g. once a few seconds
-    function SaveToFile: boolean;
-    /// update (or add) a file entry LastAccess, identified from its hash
-    // - to be called when a cached file is accessed and served
-    procedure Touch(const hash: THashDigest; len: PtrInt); overload;
-    /// update (or add) a file entry LastAccess, identified from its 160-bit hash
-    procedure Touch(const hash: THash128); overload;
-    /// update (or add) a file entry LastAccess, identified from its file name
-    procedure Touch(const fn: TFileName); overload;
-    /// explictly remove a file entry, identified from its hash
-    // - to be called e.g. after FileDelete()
-    function Remove(const hash: THashDigest; len: PtrInt): boolean; overload;
-    /// explictly remove a file entry, identified from its hash
-    function Remove(const hash: THash128): boolean; overload;
-    /// explictly remove a file entry, identified from its hash
-    function Remove(const fn: TFileName): boolean; overload;
-    /// the file name of the actual storage on disk
-    property FileName: TFileName
-      read fFileName;
-    /// the local folder where the cached files are stored
-    // - may be with one sub-folder level
-    property FolderName: TFileName
-      read fFolder;
-    /// raw access to the internal metadata storage, in range Items[0..Count-1]
-    property Item: THttpCachedArray
-      read fItem;
-    /// how many entries are currently stored in Items[]
-    property Count: integer
-      read fCount;
   end;
 
 type
@@ -2313,9 +2228,9 @@ var
   i: PtrInt;
 begin
   result := pointer(fDownload);
-  if cardinal(aID) <= fLastID then
+  if cardinal(aID) <= fLastID then // aID may be 0 to search for empty slog
     for i := 1 to length(fDownload) do
-      if result^.ID = aID then // fast enough with a few slots
+      if result^.ID = aID then     // fast enough with a few slots
         exit
       else
         inc(result);
@@ -2329,6 +2244,7 @@ begin
   result := pointer(fDownload);
   for i := 1 to length(fDownload) do
     if (result^.ID <> 0) and // not a recycled slot
+       (pHash in result^.Flags) and
        HashDigestEqual(result^.Digest, Hash) then
       exit
     else
@@ -2360,8 +2276,6 @@ procedure THttpPartials.DoLog(const Fmt: RawUtf8; const Args: array of const);
 var
   txt: ShortString;
 begin
-  if not Assigned(OnLog) then
-    exit;
   FormatShort(Fmt, Args, txt);
   OnLog(sllTrace, '% used=%/%', [txt, fUsed, length(fDownload)], self);
 end;
@@ -2396,25 +2310,24 @@ begin
     if p = nil then
     begin
       n := length(fDownload);
-      SetLength(fDownload, n + 1); // need a new slot (seldom called)
+      SetLength(fDownload, NextGrow(n)); // need new slots (seldom called)
       p := @fDownload[n];
-    end
-    else
-    begin
-      p^.HttpContext := nil; // force reset
-      FillCharFast(p^.Digest, SizeOf(p^.Digest), 0); // clean but not mandatory
     end;
     p^.ID := result;
     p^.FullSize := ExpectedFullSize;
     p^.EventualTime := EventualTime;
     p^.PartFile := Partial;
     if Hash <> nil then
+    begin
       MoveFast(Hash^, p^.Digest, HASH_SIZE[Hash^.Algo] + 1);
+      include(p^.Flags, pHash);
+    end;
     n := RawAssociate(Http, p);
   finally
     Safe.WriteUnLock;
   end;
-  DoLog('Add(%,size=%)=% n=%', [Partial, ExpectedFullSize, result, n]);
+  if Assigned(OnLog) then
+    DoLog('Add(%,size=%)=% n=%', [Partial, ExpectedFullSize, result, n]);
 end;
 
 function THttpPartials.Find(const Hash: THashDigest; out Size: Int64;
@@ -2422,7 +2335,7 @@ function THttpPartials.Find(const Hash: THashDigest; out Size: Int64;
 var
   p: PHttpPartial;
   n: integer;
-  id: THttpPartialID;
+  id: THttpPartialID; // local copy for logging
 begin
   Size := 0;
   result := '';
@@ -2444,7 +2357,8 @@ begin
   finally
     Safe.ReadUnLock;
   end;
-  if n <> 0 then
+  if (n <> 0) and
+     Assigned(OnLog) then
     DoLog('Find(%)=% added n=%', [result, id, n]);
 end;
 
@@ -2453,7 +2367,8 @@ var
   p: PHttpPartial;
 begin
   result := '';
-  if IsVoid then
+  if IsVoid or
+     (ID = 0) then
     exit;
   Safe.ReadLock;
   try
@@ -2493,7 +2408,8 @@ begin
   finally
     Safe.ReadUnLock; // keep ReadLock if a file name was found
   end;
-  if n <> 0 then
+  if (n <> 0) and
+     Assigned(OnLog) then
     DoLog('HasFile(%)=% added n=%', [FileName, id, n]);
 end;
 
@@ -2520,7 +2436,8 @@ begin
   finally
     Safe.WriteUnLock;
   end;
-  DoLog('Associate(%)=% n=%', [fn, id, n]);
+  if Assigned(OnLog) then
+    DoLog('Associate(%)=% n=%', [fn, id, n]);
 end;
 
 function THttpPartials.ProcessBody(var Ctxt: THttpRequestContext;
@@ -2579,11 +2496,7 @@ end;
 
 procedure THttpPartials.ReleaseSlot(p: PHttpPartial);
 begin
-  p^.ID := 0; // reuse this slot at next Add()
-  byte(p^.Flags) := 0;
-  p^.PartFile := '';
-  p^.HttpContext := nil;
-  p^.EventualTime := 0;
+  RecordZero(p, TypeInfo(THttpPartial));
   dec(fUsed);
   if (fUsed = 0) and
      (length(fDownload) > 16) then
@@ -2612,7 +2525,8 @@ begin
       n := length(p^.HttpContext);
     end;
   end;
-  DoLog('Done(%,%)=% n=%', [OldFile, NewFile, result, n]);
+  if Assigned(OnLog) then
+    DoLog('Done(%,%)=% n=%', [OldFile, NewFile, result, n]);
 end;
 
 function THttpPartials.DoneLocked(ID: THttpPartialID): boolean;
@@ -2636,7 +2550,8 @@ begin
       // keep p^.PartFile which may still be available
       n := length(p^.HttpContext);
   end;
-  DoLog('Done(%)=% n=%', [ID, result, n]);
+  if Assigned(OnLog) then
+    DoLog('Done(%)=% n=%', [ID, result, n]);
 end;
 
 function THttpPartials.Abort(ID: THttpPartialID): integer;
@@ -2673,7 +2588,8 @@ begin
   finally
     Safe.WriteUnLock;
   end;
-  DoLog('Abort(%)=%', [ID, result]);
+  if Assigned(OnLog) then
+    DoLog('Abort(%)=%', [ID, result]);
 end;
 
 procedure THttpPartials.Remove(Sender: PHttpRequestContext);
@@ -2696,8 +2612,8 @@ begin
     begin
       if not (pFinished in p^.Flags) then // file has just been fully downloaded
       begin
-        include(p^.Flags, pFinished);  // mark file as fully available
-        if p^.EventualTime <> 0 then   // e.g. for THttpProxyServer
+        include(p^.Flags, pFinished);     // mark file as fully available
+        if p^.EventualTime <> 0 then      // not used yet by proxy/peer servers
           if FileSetDateFromUnixUtc(p^.PartFile, p^.EventualTime) then
             err := ' FileSetDate'
           else
@@ -2712,207 +2628,9 @@ begin
   finally
     Safe.WriteUnLock;
   end;
-  DoLog('Remove(%)=% n=%%', [Sender.ProgressiveID, BOOL_STR[p <> nil], n, err]);
+  if Assigned(OnLog) then
+    DoLog('Remove(%)=% n=%%', [Sender.ProgressiveID, BOOL_STR[p <> nil], n, err]);
 end;
-
-
-{ THttpCacheFiles }
-
-constructor THttpCacheFiles.Create(const aFileName, aFolderName: TFileName;
-  const aLog: TSynLogProc; aSubFolderScan: boolean;
-  const aFileToHash: TOnComputeHashFromFileName);
-begin
-  inherited Create; // TOSLightLock.Init
-  fItems.InitSpecific(TypeInfo(THttpRequestCacheDynArray), fItem, ptHash128, @fCount);
-  fLog := aLog;
-  fFileName := aFileName;
-  fFolder := aFolderName;
-  fSubFolderScan := aSubFolderScan;
-  if (fFileName <> '') and
-     not LoadFromFile then
-    EHttpCacheFiles.RaiseUtf8('%.Create: unexpected % file', [self, fFileName]);
-  if not ValidateSubFolders then
-    fItems.ForceReHash; // should always be done at least once at startup
-end;
-
-destructor THttpCacheFiles.Destroy;
-begin
-  if fModified then
-    SaveToFile;
-  inherited Destroy;
-end;
-
-function THttpCacheFiles.LoadFromFile: boolean;
-var
-  size, start: Int64;
-begin
-  if Assigned(fLog) then
-    QueryPerformanceMicroSeconds(start);
-  result := false;
-  size := FileSize(fFileName);
-  if size > 0 then
-  begin
-    fCount := size div SizeOf(THttpCached);
-    result := (Int64(fCount) * SizeOf(THttpCached) = size);
-    if result then
-    begin
-      SetLength(fItem, fCount);
-      result := BufferFromFile(fFileName, pointer(fItem), size);
-    end;
-  end;
-  if Assigned(fLog) then
-    fLog(sllTrace, 'LoadFromFile(%)=% (count=%) in %',
-      [fFileName, BOOL_STR[result], fCount, MicroSecFrom(start{%H-})], self);
-end;
-
-function THttpCacheFiles.ValidateSubFolders: boolean;
-var
-  s, d: PHttpCached;
-  valid: TBytesDynArray;
-  c: AnsiChar;
-  i, n: PtrInt;
-  start: Int64;
-begin
-  if Assigned(fLog) then
-    QueryPerformanceMicroSeconds(start);
-  SetLength(valid, (fCount shr 3) + 1); // all filled with 0/false
-  ValidateSubFolder(pointer(valid), #0);
-  if fSubFolderScan then
-  begin // include subfolders per base-32 char hash partitioning
-    for c := 'a' to 'z' do
-      ValidateSubFolder(pointer(valid), c);
-    for c := '2' to '7' do
-      ValidateSubFolder(pointer(valid), c);
-  end;
-  s := pointer(fItem);
-  d := s;
-  for i := 0 to fCount - 1 do
-  begin
-    if GetBitPtr(pointer(valid), i) then
-    begin
-      if d <> s then
-      begin
-        d^ := s^;
-        fModified := true; // would be persisted on next Idle pass
-      end;
-      inc(d);
-    end;
-    inc(s);
-  end;
-  n := (PtrUInt(d) - PtrUInt(fItem)) div SizeOf(fItem[0]);
-  result := n <> fCount;
-  if Assigned(fLog) then
-    fLog(sllTrace, 'ValidateSubFolders=% (count=%) in %',
-      [BOOL_STR[result], fCount, MicroSecFrom(start{%H-})], self);
-  if not result then
-    exit;
-  fCount := n;
-  fItems.ForceReHash;
-end;
-
-procedure THttpCacheFiles.ValidateSubFolder(valid: pointer; subfolder: AnsiChar);
-var
- // files: TFileNameDynArray;
-  fn: TFileName;
-begin
-  fn := fFolder;
-  if subfolder <> #0 then
-    fn := MakeString([fn, subfolder]);
-  if not DirectoryExists(fn) then
-    exit;
-//  PosixFileNames();
-end;
-
-function THttpCacheFiles.SaveToFile: boolean;
-begin
-  result := false;
-  if (self = nil) or
-     (fFileName = '') or
-     not fModified then
-    exit;
-  fSafe.Lock;
-  try
-    result := FileFromBuffer(pointer(fItem), fCount * SizeOf(THttpCached), fFileName);
-    fModified := false;
-  finally
-    fSafe.UnLock;
-  end;
-end;
-
-procedure HashNormalize(const hash: THashDigest; len: PtrInt; var norm: THash128);
-var
-  pad: PtrInt;
-begin
-  if len = 0 then
-    len := HASH_SIZE[hash.Algo];
-  len := MinPtrInt(SizeOf(norm), len); // e.g. from THttpPeerCache
-  MoveFast(hash.Bin, norm, len); // assume crypto hash -> truncation is fine
-  pad := SizeOf(norm) - len;
-  if pad <> 0 then
-    FillCharFast(norm[len], pad, len); // normalized padding (unlikely)
-end;
-
-procedure THttpCacheFiles.Touch(const hash: THashDigest; len: PtrInt);
-var
-  h: THash128;
-begin
-  HashNormalize(hash, len, h);
-  Touch(h);
-end;
-
-procedure THttpCacheFiles.Touch(const hash: THash128);
-var
-  new: THttpCached;
-begin
-  new.Hash := hash;
-  new.LastAccess := UnixTimeMinimalUtc; // outside of the lock
-  fSafe.Lock;
-  try
-    fItems.FindHashedAndUpdate(new, {addifnotexist=}true);
-    fModified := true;
-  finally
-    fSafe.UnLock;
-  end;
-end;
-
-procedure THttpCacheFiles.Touch(const fn: TFileName);
-var
-  h: THash128;
-begin
-  if Assigned(fOnFileToHash) and
-     fOnFileToHash(fn, h) then
-    Touch(h);
-end;
-
-function THttpCacheFiles.Remove(const hash: THash128): boolean;
-begin
-  fSafe.Lock;
-  try
-    result := fItems.FindHashedAndDelete(hash) >= 0;
-    if result then
-      fModified := true;
-  finally
-    fSafe.UnLock;
-  end;
-end;
-
-function THttpCacheFiles.Remove(const fn: TFileName): boolean;
-var
-  h: THash128;
-begin
-  result := Assigned(fOnFileToHash) and
-            fOnFileToHash(fn, h) and
-            Remove(h);
-end;
-
-function THttpCacheFiles.Remove(const hash: THashDigest; len: PtrInt): boolean;
-var
-  h: THash128;
-begin
-  HashNormalize(hash, len, h);
-  result := Remove(h);
-end;
-
 
 
 { THttpClientSocketWGet }
@@ -3310,21 +3028,13 @@ begin
             end;
           end;
         cspNoData:
-          if SockConnected then // getpeername()=nrOK
+          // timeout may happen not because the server took its time, but
+          // because the network is down: sadly, the socket is still reported
+          // as OK - SockConnected=true - by the OS (on both Windows and POSIX)
           begin
-            // timeout may happen not because the server took its time, but
-            // because the network is down: sadly, the socket is still reported
-            // as OK by the OS (on both Windows and POSIX)
-            AppendLine(fRequestContext, ['NoData ms=', Timeout]);
-            // -> no need to retry
-            ctxt.Status := HTTP_TIMEOUT;
-            // -> close the socket, since this HTTP request is clearly aborted
             include(Http.HeaderFlags, hfConnectionClose);
-            exit;
-          end
-          else
-          begin
-            DoRetry('NoData waiting %ms for headers', [TimeOut]);
+            DoRetry('NoData waiting %ms for headers with peer=%',
+              [TimeOut, SockConnected]); // always retry
             exit;
           end;
       else // cspSocketError, cspSocketClosed

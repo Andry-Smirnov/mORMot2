@@ -67,6 +67,11 @@ function GetNextItemMultiple(var P: PUtf8Char; const Sep: RawUtf8;
 procedure GetNextItemTrimed(var P: PUtf8Char; Sep: AnsiChar;
   var result: RawUtf8);
 
+/// return trimmed next CSV string buffer and length from P
+// - P=nil after call when end of text is reached
+function GetNextItemTrimedBuffer(var P: PUtf8Char; Sep: AnsiChar;
+  out Item: PUtf8Char): PtrInt;
+
 /// return trimmed next CSV string from P, ending value at #0 .. #13
 // - typically usage is to parse HTTP headers
 // - P=nil after call when P^ = #0 end of text is reached, or return P^ = #10
@@ -75,8 +80,8 @@ procedure GetNextItemTrimedLine(var P: PUtf8Char; Sep: AnsiChar;
 
 /// return trimmed next CSV string from P, ending value at #0 .. #13
 // - as used internally by GetNextItemTrimedLine()
-procedure GetNextItemTrimedLineBuffer(var P: PUtf8Char; Sep: AnsiChar;
-  out Item: PUtf8Char; out Len: integer);
+function GetNextItemTrimedLineBuffer(var P: PUtf8Char; Sep: AnsiChar;
+  out Item: PUtf8Char): PtrInt;
 
 /// return trimmed next CSV string from P, ignoring any Escaped char
 // - P=nil after call when end of text is reached
@@ -100,6 +105,7 @@ function GetNextItemString(var P: PChar; Sep: Char = ','): string;
 // - will return -1 if no file extension match
 // - will return any matching extension, starting count at 0
 // - extension match is case-insensitive
+// - see also SameExt() from mormot.core.os.pas
 function GetFileNameExtIndex(const FileName, CsvExt: TFileName): integer;
 
 /// return next CSV string from P, nil if no more
@@ -132,8 +138,8 @@ function GetBitCsv(const Bits; BitsCount: integer): RawUtf8;
 /// decode next CSV hexadecimal string from P, nil if no more or not matching BinBytes
 // - Bin is filled with 0 if the supplied CSV content is invalid
 // - if Sep is #0, it will read the hexadecimal chars until a whitespace is reached
-function GetNextItemHexDisplayToBin(var P: PUtf8Char; Bin: PByte; BinBytes: PtrInt;
-  Sep: AnsiChar = ','): boolean;
+function GetNextItemHexDisplayToBin(var P: PUtf8Char; Bin: PByte;
+  BinBytes: PtrInt; Sep: AnsiChar = ','): boolean;
 
 type
   /// some stack-allocated zero-terminated character buffer
@@ -1358,9 +1364,7 @@ type
 var
   /// naive but efficient cache to avoid string memory allocation for
   // 0..999 small numbers by Int32ToUtf8/UInt32ToUtf8
-  // - use around 16KB of heap (since each item consumes 16 bytes), but increase
-  // overall performance and reduce memory allocation (and fragmentation),
-  // especially during multi-threaded execution
+  // - filled with statically allocated constant RawUtf8 values at startup
   // - noticeable when RawUtf8 strings are used as array indexes (e.g.
   // in mormot.db.nosql.bson)
   // - less noticeable without any allocation: StrInt32() is faster on a buffer
@@ -2024,12 +2028,12 @@ function StringToConsole(const S: string): RawByteString;
 /// write some text to the console using a given color
 // - redirect to mormot.core.os ConsoleWrite() with proper thread safety
 procedure ConsoleWrite(const Fmt: RawUtf8; const Args: array of const;
-  Color: TConsoleColor = ccLightGray; NoLineFeed: boolean = false); overload;
+  Color: TConsoleColor = ccDefault; NoLineFeed: boolean = false); overload;
 
 /// write some text to the console using a given color
 // - redirect to mormot.core.os ConsoleWrite() with proper thread safety
 procedure ConsoleWrite(const Args: array of const;
-  Color: TConsoleColor = ccLightGray; NoLineFeed: boolean = false); overload;
+  Color: TConsoleColor = ccDefault; NoLineFeed: boolean = false); overload;
 
 /// write some text to the console using the current color
 // - similar to writeln() but redirect to ConsoleWrite() with proper thread safety
@@ -2260,7 +2264,7 @@ type
 // - returns the length of the found Value, or 0 if Name did not match
 // - could be directly applied e.g. to TBinaryCookieGenerator.Validate()
 function CookieFromHeaders(Headers: PUtf8Char; const Name: RawUtf8;
-  out Value: PUtf8Char): integer; overload;
+  out Value: PUtf8Char): PtrInt; overload;
 
 /// quickly return Value from 'Cookie: Name=Value' within HTTP headers
 function CookieFromHeaders(Headers: PUtf8Char; const Name: RawUtf8): RawUtf8; overload;
@@ -2728,16 +2732,7 @@ begin
     result := ''
   else
   begin
-    S := P;
-    {$ifdef ASMINTEL}
-    S := PosChar(S, Sep); // SSE2 asm on i386 and x86_64
-    if S = nil then
-      S := P + mormot.core.base.StrLen(P);
-    {$else}
-    while (S^ <> #0) and
-          (S^ <> Sep) do
-      inc(S);
-    {$endif ASMINTEL}
+    S := PosChar0(P, Sep); // SSE2 asm on i386 and x86_64
     FastSetString(result, P, S - P);
     if S^ <> #0 then
       P := S + 1
@@ -2787,52 +2782,60 @@ begin
     GetNextItem(P, Sep, result);
 end;
 
+function GetNextItemTrimedBuffer(var P: PUtf8Char; Sep: AnsiChar;
+  out Item: PUtf8Char): PtrInt;
+var
+  S: PUtf8Char;
+begin
+  S := P;
+  if (S = nil) or
+     (Sep <= ' ') then
+  begin
+    result := 0;
+    exit;
+  end;
+  while (S^ <= ' ') and
+        (S^ <> #0) do
+    inc(S); // trim left
+  Item := S;
+  result := PosChar0(S, Sep) - S; // use fast SSE2 asm on x86_64
+  while (result <> 0) and
+        (S[result] in [#1 .. ' ']) do
+    dec(result);
+  inc(S, result);
+  if S^ = #0 then
+    P := nil
+  else
+    P := S + 1;
+end;
+
 procedure GetNextItemTrimed(var P: PUtf8Char; Sep: AnsiChar; var result: RawUtf8);
 var
-  S, E: PUtf8Char;
+  S: PUtf8Char;
+  len: PtrInt;
 begin
-  if (P = nil) or
-     (Sep <= ' ') then
-    result := ''
-  else
-  begin
-    while (P^ <= ' ') and
-          (P^ <> #0) do
-      inc(P); // trim left
-    S := P;
-    while (S^ <> #0) and
-          (S^ <> Sep) do
-      inc(S); // go to end of value
-    E := S;
-    while (E > P) and
-          (E[-1] in [#1..' ']) do
-      dec(E); // trim right
-    FastSetString(result, P, E - P);
-    if S^ <> #0 then
-      P := S + 1
-    else
-      P := nil;
-  end;
+  len := GetNextItemTrimedBuffer(P, Sep, S);
+  FastSetString(result, S, len);
 end;
 
 procedure GetNextItemTrimedLine(var P: PUtf8Char; Sep: AnsiChar;
   var result: RawUtf8);
 var
   item: PUtf8Char;
-  len: integer;
+  len: PtrInt;
 begin
   if (P <> nil) and
      (Sep > ' ') then
   begin
-    GetNextItemTrimedLineBuffer(P, Sep, item, len);
+    len := GetNextItemTrimedLineBuffer(P, Sep, item);
     FastSetString(result, item, len);
   end
   else
     FastAssignNew(result);
 end;
 
-procedure GetNextItemTrimedLineBuffer(var P: PUtf8Char; Sep: AnsiChar;
-  out Item: PUtf8Char; out Len: integer);
+function GetNextItemTrimedLineBuffer(var P: PUtf8Char; Sep: AnsiChar;
+  out Item: PUtf8Char): PtrInt;
 var
   S, E: PUtf8Char;
 begin // caller should ensure that (P <> nil) and (Sep > ' ')
@@ -2847,7 +2850,7 @@ begin // caller should ensure that (P <> nil) and (Sep > ' ')
         (E[-1] in [#14 .. ' ']) do
     dec(E); // trim right
   Item := P;
-  Len := E - P;
+  result := E - P;
   if (cardinal(PWord(S)^) = EOLW) or
      (S^ = Sep) then
     P := S + 1
@@ -2935,20 +2938,18 @@ end;
 
 function GetFileNameExtIndex(const FileName, CsvExt: TFileName): integer;
 var
-  Ext: TFileName;
+  ext: TFileName;
   P: PChar;
 begin
   result := -1;
   P := pointer(CsvExt);
-  Ext := ExtractFileExt(FileName);
+  ext := ExtractExt(FileName, {withoutdot=}true);
   if (P = nil) or
-     (Ext = '') or
-     (Ext[1] <> '.') then
+     (ext = '') then
     exit;
-  delete(Ext, 1, 1);
   repeat
     inc(result);
-    if SameText(GetNextItemString(P), Ext) then
+    if SameTextS(GetNextItemString(P), ext) then
       exit;
   until P = nil;
   result := -1;
@@ -2990,48 +2991,22 @@ end;
 
 procedure GetNextItemShortString(var P: PUtf8Char; Dest: PShortString; Sep: AnsiChar);
 var
-  S, D: PUtf8Char;
-  c: AnsiChar;
+  S: PUtf8Char;
   len: PtrInt;
 begin
-  S := P;
-  D := pointer(Dest); // better FPC codegen with a dedicated variable
-  if S <> nil then
+  if P <> nil then
   begin
-    len := 0;
-    if S^ <= ' ' then
-      while (S^ <= ' ') and
-            (S^ <> #0) do
-        inc(S); // trim left space
-    repeat
-      c := S^;
-      inc(S);
-      if c = Sep then
-        break;
-      if c <> #0 then
-        if len < 254 then // avoid shortstring buffer overflow
-        begin
-          inc(len);
-          D[len] := c;
-          continue;
-        end
-        else
-          len := 0;
-      S := nil; // reached #0: end of input
-      break;
-    until false;
-    if len <> 0 then
-      repeat
-        if D[len] >= ' ' then
-          break;
-        dec(len); // trim right space
-      until len = 0;
-    D[0] := AnsiChar(len);
-    D[len + 1] := #0; // #0 terminator
-    P := S;
-  end
-  else
-    PCardinal(D)^ := 0 // Dest='' with #0 terminator
+    len := GetNextItemTrimedBuffer(P, Sep, S);
+    if (len <> 0) and
+       (len <= 254) then
+    begin
+      PByte(Dest)^ := len;
+      PByteArray(Dest)^[len + 1] := 0; // #0 terminator
+      MoveFast(S^, Dest^[1], len);
+      exit;
+    end;
+  end;
+  PCardinal(Dest)^ := 0 // Dest='' with #0 terminator
 end;
 
 function GetNextItemHexDisplayToBin(var P: PUtf8Char;
@@ -3052,9 +3027,7 @@ begin
     while S^ > ' ' do
       inc(S)
   else
-    while (S^ <> #0) and
-          (S^ <> Sep) do
-      inc(S);
+    S := PosChar0(S, Sep);
   len := S - P;
   while (P[len - 1] in [#1..' ']) and
         (len > 0) do
@@ -6504,7 +6477,7 @@ procedure Curr64ToStr(const Value: Int64; var result: RawUtf8);
 var
   tmp: array[0..31] of AnsiChar;
   P: PAnsiChar;
-  Decim, L: cardinal;
+  decim, L: cardinal;
 begin
   if Value = 0 then
     result := SmallUInt32Utf8[0]
@@ -6514,11 +6487,11 @@ begin
     L := @tmp[31] - P;
     if L > 4 then
     begin
-      Decim := PCardinal(P + L - SizeOf(cardinal))^; // 4 last digits = 4 decimals
-      if Decim = $30303030 then
+      decim := PCardinal(P + L - SizeOf(cardinal))^; // 4 last digits = 4 decimals
+      if decim = $30303030 then
         dec(L, 5)
       else // no decimal
-      if Decim and $ffff0000 = $30300000 then
+      if decim and $ffff0000 = $30300000 then
         dec(L, 2); // 2 decimals
     end;
     FastSetString(result, P, L);
@@ -6539,17 +6512,17 @@ function Curr64ToPChar(const Value: Int64; Dest: PUtf8Char): PtrInt;
 var
   tmp: array[0..31] of AnsiChar;
   P: PAnsiChar;
-  Decim: cardinal;
+  decim: cardinal;
 begin
   P := StrCurr64(@tmp[31], Value);
   result := @tmp[31] - P;
   if result > 4 then
   begin
-    // Decim = 4 last digits = 4 decimals
-    Decim := PCardinal(P + result - SizeOf(cardinal))^;
-    if Decim = $30303030 then // no decimal -> trunc trailing *.0000 chars
+    // decim = 4 last digits = 4 decimals
+    decim := PCardinal(P + result - SizeOf(cardinal))^;
+    if decim = $30303030 then // no decimal -> trunc trailing *.0000 chars
       dec(result, 5)
-    else if Decim and $ffff0000 = $30300000 then // 2 decimals -> trunc *.??00
+    else if decim and $ffff0000 = $30300000 then // 2 decimals -> trunc *.??00
       dec(result, 2);
   end;
   MoveFast(P^, Dest^, result);
@@ -6559,7 +6532,7 @@ function StrToCurr64(P: PUtf8Char; NoDecimal: PBoolean): Int64;
 var
   c: cardinal;
   minus: boolean;
-  Dec: cardinal;
+  decim: cardinal;
 begin
   result := 0;
   if P = nil then
@@ -6585,11 +6558,11 @@ begin
   if P^ = '.' then
   begin
     // '.5' -> 500
-    Dec := 2;
+    decim := 2;
     inc(P);
   end
   else
-    Dec := 0;
+    decim := 0;
   c := byte(P^) - 48;
   if c > 9 then
     exit;
@@ -6608,10 +6581,10 @@ begin
       {$endif HASSLOWMUL64}
       inc(result, c);
       inc(P);
-      if Dec <> 0 then
+      if decim <> 0 then
       begin
-        inc(Dec);
-        if Dec < 5 then
+        inc(decim);
+        if decim < 5 then
           continue
         else
           break;
@@ -6619,12 +6592,12 @@ begin
     end
     else
     begin
-      inc(Dec);
+      inc(decim);
       inc(P);
     end;
   until false;
   if NoDecimal <> nil then
-    if Dec = 0 then
+    if decim = 0 then
     begin
       NoDecimal^ := true;
       if minus then
@@ -6633,9 +6606,9 @@ begin
     end
     else
       NoDecimal^ := false;
-  if Dec <> 5 then
-    // Dec=5 most of the time
-    case Dec of
+  if decim <> 5 then
+    // decim=5 most of the time
+    case decim of
       0, 1:
         result := result * 10000;
       {$ifdef HASSLOWMUL64}
@@ -9518,6 +9491,7 @@ procedure _App2(var res: RawUtf8; const add1, add2: RawByteString; const cp: int
   {$ifdef HASINLINE} inline; {$endif}
 var
   l, a, a1, a2: PtrInt;
+  r: PAnsiChar;
 begin
   a1 := length(add1); // no automatic UTF-8 conversion involved
   a2 := length(add2);
@@ -9526,11 +9500,12 @@ begin
     exit;
   l := length(res);
   SetLength(res, l + a);
+  r := pointer(res);
   {$ifdef HASCODEPAGE}
-  PStrRec(PAnsiChar(PtrUInt(res)) - _STRRECSIZE)^.CodePage := cp;
+  PStrRec(r - _STRRECSIZE)^.CodePage := cp;
   {$endif HASCODEPAGE}
-  MoveFast(pointer(add1)^, PByteArray(res)[l], a1);
-  MoveFast(pointer(add2)^, PByteArray(res)[l + a1], a2);
+  MoveFast(pointer(add1)^, r[l], a1);
+  MoveFast(pointer(add2)^, r[l + a1], a2);
 end;
 
 procedure Append(var Text: RawUtf8; const Added: RawByteString);
@@ -9811,7 +9786,7 @@ begin
   if not HasConsole then
     exit;
   Make(Args, tmp);
-  ConsoleWrite(tmp, ccLightGray, NoLineFeed, {nocolor=}true);
+  ConsoleWrite(tmp, ccDefault, NoLineFeed, {nocolor=}true);
 end;
 
 procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean);
@@ -10270,8 +10245,8 @@ begin
     repeat
       if IdemPChar(p, '__SECURE-') then
         inc(p, 9); // e.g. if rsoCookieSecure is in Server.Options
-      GetNextItemTrimedLineBuffer(p, '=', new.NameStart,  new.NameLen);
-      GetNextItemTrimedLineBuffer(p, ';', new.ValueStart, new.ValueLen);
+      new.NameLen := GetNextItemTrimedLineBuffer(p, '=', new.NameStart);
+      new.ValueLen := GetNextItemTrimedLineBuffer(p, ';', new.ValueStart);
       if (new.NameLen = 0) or
          (new.ValueLen = 0) then
         continue;
@@ -10312,11 +10287,10 @@ begin
 end;
 
 function CookieFromHeaders(Headers: PUtf8Char; const Name: RawUtf8;
-  out Value: PUtf8Char): integer;
+  out Value: PUtf8Char): PtrInt;
 var
   p, n: PUtf8Char;
-  plen: PtrInt;
-  l: integer;
+  plen, l: PtrInt;
 begin // same logic than THttpCookies.ParseServer above
   if Name <> '' then
     while Headers <> nil do
@@ -10328,8 +10302,8 @@ begin // same logic than THttpCookies.ParseServer above
       repeat
         if IdemPChar(p, '__SECURE-') then
           inc(p, 9);
-        GetNextItemTrimedLineBuffer(p, '=', n, l);
-        GetNextItemTrimedLineBuffer(p, ';', Value, result);
+        l := GetNextItemTrimedLineBuffer(p, '=', n);
+        result := GetNextItemTrimedLineBuffer(p, ';', Value);
         if (l = length(Name)) and
            (result <> 0) and
            mormot.core.base.CompareMem(n, pointer(Name), l) then
@@ -11341,6 +11315,9 @@ begin
     end;
 end;
 
+var // pre-allocated SmallUInt32Utf8[] values as constant
+  _SmallUInt32Utf8: array[0..999] of TStrRecConst;
+
 procedure InitializeUnit;
 var
   i: PtrInt;
@@ -11381,7 +11358,7 @@ begin
   for i := 0 to high(SmallUInt32Utf8) do // 0..999 into '0'..'999'
   begin
     P := StrUInt32(@tmp[15], i);
-    FastSetString(SmallUInt32Utf8[i], P, @tmp[15] - P);
+    FastSetConst(SmallUInt32Utf8[i], _SmallUInt32Utf8[i], P, @tmp[15] - P);
   end;
   pc := @METHODNAME32;
   i := length(METHODNAME32);

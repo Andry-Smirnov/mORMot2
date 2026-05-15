@@ -1528,7 +1528,7 @@ end;
 function FileCreate(const aFileName: TFileName; aMode, aRights: integer): THandle;
 begin
   if aFileName = '' then
-    result := 0
+    result := INVALID_HANDLE_VALUE
   else if (aMode = 0) and
           (aRights = 0) then
     result := sysutils.FileCreate(aFileName) // direct call of the FPC RTL
@@ -2373,16 +2373,24 @@ begin
   result := (fStdOutIsTTY in _F0);
 end;
 
-procedure TextColorCmd(Color: TConsoleColor; var s: TShort7);
 const
+  TERM_DEFAULT: TShort7 = #27'[0m';
+  TERM_CMD:     TShort7 = #27'[0;3#m';
   TERM_CTRL: PUtf8Char = '04261537';
+
+procedure TextColorCmd(Color: TConsoleColor; var s: TShort7);
 begin
   s[0] := #0;
   if (ord(Color) = TextAttr) or
      not StdOutIsTTY then
     exit;
   TextAttr := ord(Color);
-  s := #27'[0;3#m';
+  if Color = ccLightGray then // handle ccLightGray = ccDefault
+  begin
+    PInt64(@s)^ := PInt64(@TERM_DEFAULT)^;
+    exit;
+  end;
+  PInt64(@s)^ := PInt64(@TERM_CMD)^;
   if ord(Color) >= 8 then
     s[3] := '1';
   s[6] := TERM_CTRL[(ord(Color) and 7)];
@@ -2428,7 +2436,7 @@ begin
       tmp.AddDirect(#10);
     if not NoColor then
     begin
-      TextColorCmd(ccLightGray, c);
+      TextColorCmd(ccDefault, c);
       tmp.AddShort(c);
     end;
     Text := tmp.Buffer;
