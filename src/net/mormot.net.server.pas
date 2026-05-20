@@ -392,6 +392,7 @@ type
     fHttpApiRequest: PHTTP_REQUEST;
     function GetFullUrl: SynUnicode;
     {$endif USEWININET}
+    procedure DoPurgeHeaders;
   public
     /// initialize the context, associated to a HTTP server instance
     constructor Create(aServer: THttpServerGeneric;
@@ -3306,6 +3307,11 @@ begin
   // inherited Destroy; is void
 end;
 
+procedure THttpServerRequest.DoPurgeHeaders;
+begin // sub-function to avoid implicit try..finally
+  fOutCustomHeaders := PurgeHeaders(fOutCustomHeaders);
+end;
+
 const
   _CMD_200: array[boolean, boolean] of TShort31 = (
    ('HTTP/1.1 200 OK'#13#10,
@@ -3362,7 +3368,8 @@ function THttpServerRequest.SetupResponse(var Context: THttpRequestContext;
   var
     txt: PRawUtf8;
   begin
-    FastAssignNew(fOutCustomHeaders);
+    if fOutCustomHeaders <> '' then // keep meaningful headers
+      DoPurgeHeaders;
     txt := fServer.StatusCodeToText(fRespStatus);
     if hsoTextError in fServer.Options then // fast and good enough
     begin
@@ -6679,7 +6686,7 @@ begin
   begin
     // create sub-folders using the first hash nibble (0..9/a..z), in a way
     // similar to git - aFileName[1..2] is the algorithm, so hash starts at [3]
-    result := MakePath([fPermFilesPath, aFileName[3]]);
+    MakePath([fPermFilesPath, aFileName[3]], result);
     if lfnEnsureDirectoryExists in aFlags then
       result := EnsureDirectoryExistsNoExpand(result);
     result := result + aFileName;
