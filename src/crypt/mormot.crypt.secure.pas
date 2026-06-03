@@ -1061,8 +1061,7 @@ function TextToHashAlgo(P: PUtf8Char; Len: PtrInt; out Algo: THashAlgo): boolean
 function HashDetect(const Hash: RawUtf8; out Digest: THashDigest): boolean;
 
 /// fast compare two hash digest and their associated algorithm
-function HashDigestEqual(const a, b: THashDigest): boolean;
-  {$ifdef HASINLINE} inline; {$endif}
+function HashDigestEqual(a, b: PPtrIntArray): boolean;
 
 /// anti-forensic method for a hash digest
 procedure FillZero(var Digest: THashDigest); overload;
@@ -5546,8 +5545,8 @@ procedure TSynSigner.Pbkdf2(aParamsJson: PUtf8Char; aParamsJsonLen: integer;
   out aDerivatedKey: THash512Rec; const aDefaultSalt: RawUtf8;
   aDefaultAlgo: TSignAlgo);
 var
-  tmp: TSynTempBuffer;
   k: TSynSignerParams;
+  tmp: TSynTempBuffer;
 
   procedure SetDefault;
   begin
@@ -5879,10 +5878,11 @@ begin
       end;
 end;
 
-function HashDigestEqual(const a, b: THashDigest): boolean;
+function HashDigestEqual(a, b: PPtrIntArray): boolean;
 begin
-  result := (a.Algo <= high(THashAlgo)) and // avoid buffer overflow
-            mormot.core.base.CompareMem(@a, @b, HASH_SIZE[a.Algo] + 1);
+  result := (a[0] = b[0]) and // compare first 4/8 bytes (much faster in loops)
+            (PHashAlgo(a)^ <= high(THashAlgo)) and // avoid buffer overflow
+     (MemCmp(@a[1], @b[1], HASH_SIZE[PHashAlgo(a)^] - (SizeOf(a[0]) - 1)) = 0);
 end;
 
 procedure FillZero(var Digest: THashDigest);
@@ -6167,6 +6167,8 @@ begin
   dp.DigestHa0;
   dp.DigestResponse(DigestMethod);
   result := dp.ClientResponse(DigestUriName);
+  FillZero(dp.HA0.b); // Ha0 is a sensitive value
+  FillZero(dp.HA1);
 end;
 
 procedure BasicClient(const UserName: RawUtf8; const Password: SpiUtf8;
@@ -7187,8 +7189,11 @@ begin
 end;
 
 function TSynUniqueIdentifierBits.CreateTimeLog: TTimeLog;
+var
+  bits: TTimeLogBits; // safer with an explicit local variable
 begin
-  PTimeLogBits(@result)^.From(UnixTimeToDateTime(Value shr 31));
+  bits.From(UnixTimeToDateTime(Value shr 31));
+  result := bits.Value;
 end;
 
 function TSynUniqueIdentifierBits.CreateDateTime: TDateTime;
@@ -7273,8 +7278,11 @@ begin
 end;
 
 function TSynUniqueIdentifierGenerator.ComputeNew: Int64;
+var
+  b: TSynUniqueIdentifierBits;
 begin
-  ComputeNew(PSynUniqueIdentifierBits(@result)^);
+  ComputeNew(b);
+  result := b.Value;
 end;
 
 procedure TSynUniqueIdentifierGenerator.ComputeFromDateTime(
@@ -7916,8 +7924,11 @@ begin
 end;
 
 function TCryptRandom.Get32: cardinal;
+var
+  n: cardinal; // safer with a local variable
 begin
-  Get(@result, 4);
+  Get(@n, 4);
+  result := n;
 end;
 
 function TCryptRandom.Get32(max: cardinal): cardinal;

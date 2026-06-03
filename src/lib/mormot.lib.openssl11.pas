@@ -2595,10 +2595,11 @@ function X509_print(bp: PBIO; x: PX509): integer; cdecl;
 
 procedure OpenSSL_Free(ptr: pointer);
 
-function OpenSSL_error_short(error: integer): ShortString;
+procedure OpenSSL_error_short(error: integer; var result: ShortString);
 procedure OpenSSL_error(error: integer; var result: RawUtf8); overload;
 function OpenSSL_error(error: integer): RawUtf8; overload;
   {$ifdef HASINLINE} inline; {$endif}
+function OpenSSL_error_eof(error: integer): boolean;
 
 function SSL_is_fatal_error(get_error: integer): boolean;
 procedure SSL_get_error_text(get_error: integer; var result: RawUtf8);
@@ -8031,8 +8032,8 @@ end;
 
 function X509_NAME.GetEntry(NID: integer): RawUtf8;
 var
+  L: PtrInt;
   tmp: TSynTempBuffer;
-  L: integer;
 begin
   result := '';
   if (@self = nil) or
@@ -10280,19 +10281,31 @@ var
   tmp: TBuffer1K;
 begin
   result := '';
-  if error = 0 then // no error in the queue
+  if error = SSL_ERROR_NONE then // no error in the queue
     exit;
   ERR_error_string_n(error, @tmp, SizeOf(tmp));
   FastSetString(result, @tmp, mormot.core.base.StrLen(@tmp));
 end;
 
-function OpenSSL_error_short(error: integer): ShortString;
+procedure OpenSSL_error_short(error: integer; var result: ShortString);
 begin
   result[0] := #0;
-  if error = 0 then // no error in the queue
+  if error = SSL_ERROR_NONE then // no error in the queue
     exit;
-  ERR_error_string_n(error, @result[1], 254);
+  ERR_error_string_n(error, @result[1], high(result) - 1);
   result[0] := AnsiChar(mormot.core.base.StrLen(@result[1]));
+end;
+
+const
+  // ERR_GET_REASON() is a version-specific macro with no public API :(
+  OPENSSL_EOF_TEXT: TShort15 = ' eof while';
+
+function OpenSSL_error_eof(error: integer): boolean;
+var
+  tmp: ShortString;
+begin
+  OpenSSL_error_short(error, tmp);
+  result := Pos(OPENSSL_EOF_TEXT, tmp) > 0;
 end;
 
 // see https://www.openssl.org/docs/man1.1.1/man3/SSL_get_error.html
@@ -10327,28 +10340,29 @@ const
     'WANT_CLIENT_HELLO_CB');
 
 procedure SSL_get_error_short(get_error: integer; var dest: shortstring);
+var
+  tmp: ShortString;
 begin
   dest := 'SSL_ERROR_';
   if get_error in [low(SSL_ERROR_TEXT) .. high(SSL_ERROR_TEXT)] then
   begin
     AppendShort(SSL_ERROR_TEXT[get_error], dest);
     case get_error of
-      SSL_ERROR_SSL:
-        // non-recoverable protocol error
+      SSL_ERROR_SSL: // non-recoverable protocol error
         begin
-          get_error := ERR_get_error;
-          if get_error <> 0 then
+          get_error := ERR_get_error; // unqueue earliest error code
+          if get_error <> SSL_ERROR_NONE then
           begin
             AppendShortTwoChars(ord(' ') + ord('(') shl 8, @dest);
-            AppendShort(OpenSSL_error_short(get_error), dest);
-            AppendShortChar(')', @dest)
+            OpenSSL_error_short(get_error, tmp);
+            AppendShort(tmp, dest);
+            AppendShortCharSafe(')', dest)
           end;
         end;
-      SSL_ERROR_SYSCALL:
+      SSL_ERROR_SYSCALL: // non-recoverable I/O error
         begin
-          // non-recoverable I/O error
           get_error := RawSocketErrNo; // try to get additional info from OS
-          if get_error <> NO_ERROR then
+          if get_error <> SSL_ERROR_NONE then
             OsErrorAppend(get_error, dest, ' ');
         end;
     end; // non-fatal SSL_ERROR_WANT_* codes are unexpected here
@@ -10498,10 +10512,13 @@ begin
 end;
 
 function BigNumFromDecimal(const Text: RawUtf8): PBIGNUM;
+var
+  bn: PBIGNUM; // safer with an explicit transient variable
 begin
-  result := nil;
-  if BN_dec2bn(@result, pointer(Text)) = 0 then
-    result := nil;
+  bn := nil;
+  if BN_dec2bn(@bn, pointer(Text)) = 0 then
+    bn := nil;
+  result := bn;
 end;
 
 function BigNumHexFromDecimal(const Text: RawUtf8): RawUtf8;
@@ -10574,40 +10591,39 @@ var
   pw: pointer;
   priv: PBIO;
   pkcs12: PPKCS12;
+  key: PEVP_PKEY;
 begin
-  if (PrivateKey = nil) or
-     (PrivateKeyLen = 0) then
-    result := nil
-  else
+  key := nil;
+  if (PrivateKey <> nil) and
+     (PrivateKeyLen <> 0) then
   begin
     pw := PassNotNil(Password);
     priv := BIO_new_mem_buf(PrivateKey, PrivateKeyLen);
     if NetIsPem(PrivateKey) then
-      result := PEM_read_bio_PrivateKey(priv, nil, nil, pw)
-    else
-      result := nil;
-    if result = nil then
+      key := PEM_read_bio_PrivateKey(priv, nil, nil, pw);
+    if key = nil then
     begin
       if Password = '' then
       begin
         priv.Reset;
-        result := d2i_PrivateKey_bio(priv, nil); // try raw binary format
+        key := d2i_PrivateKey_bio(priv, nil); // try raw binary format
       end;
-      if result = nil then
+      if key = nil then
       begin
         priv.Reset;
-        result := d2i_PKCS8PrivateKey_bio(priv, nil, nil, pw); // try PKCS#8
+        key := d2i_PKCS8PrivateKey_bio(priv, nil, nil, pw); // try PKCS#8
       end;
-      if result = nil then
+      if key = nil then
       begin
         priv.Reset;
         pkcs12 := d2i_PKCS12_bio(priv, nil); // try PKCS#12
-        pkcs12.Extract(Password, @result, Pkcs12Cert, nil); // ignore CA
+        pkcs12.Extract(Password, @key, Pkcs12Cert, nil); // ignore CA
         pkcs12.Free;
       end;
     end;
     priv.Free;
   end;
+  result := key;
 end;
 
 function LoadPrivateKey(const Saved: RawByteString;
@@ -11153,23 +11169,23 @@ var
   pk: PEVP_PKEY;
   c: PX509;
   ca: Pstack_st_X509;
+  cb: pointer;
 begin
   // setup the peer verification patterns
+  cb := nil;
   if Context.IgnoreCertificateErrors then
-    SSL_CTX_set_verify(fCtx, SSL_VERIFY_NONE, nil)
+    mode := SSL_VERIFY_NONE
   else
   begin
+    mode := SSL_VERIFY_PEER;
+    if Context.ClientCertificateAuthentication then
+      mode := mode or SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
     if Assigned(Context.OnEachPeerVerify) then
     begin
-      mode := SSL_VERIFY_PEER;
-      if Context.ClientCertificateAuthentication then
-        mode := mode or SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+      cb := @AfterConnectionPeerVerify;
       if Context.ClientVerifyOnce then
         mode := mode or SSL_VERIFY_CLIENT_ONCE;
-      SSL_CTX_set_verify(fCtx, mode, AfterConnectionPeerVerify);
-    end
-    else
-      SSL_CTX_set_verify(fCtx, SSL_VERIFY_PEER, nil);
+    end;
     if FileExists(TFileName(Context.CACertificatesFile)) then
       SSL_CTX_load_verify_locations(
         fCtx, pointer(Context.CACertificatesFile), nil)
@@ -11182,11 +11198,10 @@ begin
     else
       SSL_CTX_set_default_verify_paths(fCtx);
     if not Bind then
-    begin
       if Context.ClientAllowUnsafeRenegotation then
         SSL_CTX_set_options(fCtx, SSL_OP_LEGACY_SERVER_CONNECT);
-    end;
   end;
+  SSL_CTX_set_verify(fCtx, mode, cb);
   // load any certificate (and private key)
   pk := nil;
   cert := Context.CertificateBin;
@@ -11406,10 +11421,14 @@ end;
 // see https://www.openssl.org/docs/man1.1.1/man3/SSL_get_error.html
 function TOpenSslNetTls.CheckSsl(res: integer): TNetResult;
 var
-  err: integer;
+  err: integer; // not PtrInt
+  tmp: ShortString;
 begin
-  err := SSL_get_error(fSsl, res); // caller ensured res > 0
+  tmp[0] := #0;
+  err := SSL_get_error(fSsl, res); // caller ensured res <= 0
   case err of
+    SSL_ERROR_NONE:
+      result := nrOk; // paranoid
     SSL_ERROR_WANT_READ,
     SSL_ERROR_WANT_WRITE:
       // note that want_read may appear during recv, and want_write during send
@@ -11419,21 +11438,31 @@ begin
       result := nrClosed;
     SSL_ERROR_SYSCALL:
       begin
-        result := NetLastError; // try to get some additional context from OS
-        if result in [nrOK, nrRetry] then
-          result := nrFatalError;
+        // additional context from OS to return the socket state
+        result := NetLastError(NO_ERROR, @err);
+        if result <= nrRetry then
+          result := nrUnknownError; // ensure reported as an error
+        tmp := SSL_ERROR_TEXT[SSL_ERROR_SYSCALL];
+        if (err <> NO_ERROR) and
+           (fLastError <> nil) then
+          OsErrorAppend(err, tmp, ' ');
         fDoSslShutdown := false; // connection is likely to be broken
       end;
-    else
+    else // e.g. SSL_ERROR_SSL or out-of-context SSL_ERROR_WANT_*
       begin
+        SSL_get_error_short(err, tmp); // as human-readable text
         result := nrFatalError;
-        fDoSslShutdown := false;
+        if err = SSL_ERROR_SSL then // non-recoverable protocol error
+          if Pos(OPENSSL_EOF_TEXT, tmp) > 0 then // since OpenSSL 1.1.1e
+            result := nrClosed;
+        fDoSslShutdown := false; // connection is likely to be broken
       end;
   end;
-  if (result <> nrRetry) and
-     (fLastError <> nil) then
-    SSL_get_error_text(err, fLastError^); // retrieve as human-readable text
-end;
+  if (result > nrRetry) and
+     (fLastError <> nil) and
+     (tmp[0] <> #0) then
+    ShortStringToAnsi7String(tmp, fLastError^);
+ end;
 
 function TOpenSslNetTls.Receive(Buffer: pointer; var Length: integer): TNetResult;
 begin

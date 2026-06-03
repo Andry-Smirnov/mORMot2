@@ -195,6 +195,7 @@ type
     function QuickSelectGT(IndexA, IndexB: PtrInt): boolean;
     procedure intadd(const Sender; Value: integer);
     procedure intdel(const Sender; Value: integer);
+    // methods below are run in the background from _TDynArray startup
     /// test the TDynArrayHashed object and methods (dictionary features)
     // - this test will create an array of 200,000 items to test speed
     procedure TDynArrayHashedSlow(Context: TObject);
@@ -206,12 +207,14 @@ type
     procedure TimeZonesSlow(Context: TObject);
     /// test the TRawUtf8List class
     procedure TRawUtf8ListSlow(Context: TObject);
+    /// test the TPipeStream class
+    procedure TStreamSlow(Context: TObject);
   published
     /// test RecordCopy(), TRttiMap and TRttiFilter
     procedure _Records;
     /// test the TSynList class
     procedure _TSynList;
-    /// test the TDynArray object and methods
+    /// test the TDynArray object and methods - also launch background *Slow()
     procedure _TDynArray;
     /// validate the TSynQueue class
     procedure _TSynQueue;
@@ -1487,6 +1490,165 @@ begin
 end;
 
 type
+  TPipeThread = class(TLoggedThread)
+  protected
+    Pipe: TPipeStream;
+    WriteData: RawByteString;
+    Hash: cardinal;
+    Bytes, Expected: integer;
+    procedure DoExecute; override;
+  end;
+const
+  THREAD_ITER = 3; // stream 3 * 100K content between two TPipeThread
+{.$define PIPEDEBUG}
+
+procedure TPipeThread.DoExecute;
+var
+  tmp: TByteToAnsiChar; // very small 256 bytes buffer for stress reading
+  n: integer;
+begin
+  if WriteData <> '' then
+    // from W thread
+    repeat
+      {$ifdef PIPEDEBUG}ConsoleWrite('before Write');{$endif PIPEDEBUG}
+      n := Pipe.Write(pointer(WriteData)^, length(WriteData));
+      {$ifdef PIPEDEBUG}ConsoleWrite(['Write(', length(WriteData), ')=', n]);{$endif PIPEDEBUG}
+      if n <> length(WriteData) then
+        exit; // should block until Write() all data unless Pipe.Close was called
+      Hash := crc32c(Hash, pointer(WriteData), n);
+      inc(Bytes, n);
+      {$ifdef PIPEDEBUG}ConsoleWrite('Write Stop');{$endif PIPEDEBUG}
+      SleepHiRes(Random(50)); // simulate a blocking network connection
+    until Bytes = Expected // execute Write() three times (HTTP-like body)
+  else
+  begin
+    // from R thread
+    {$ifdef PIPEDEBUG}ConsoleWrite('Read Start');{$endif PIPEDEBUG}
+    repeat
+      {$ifdef PIPEDEBUG}ConsoleWrite('before Read');{$endif PIPEDEBUG}
+      n := Pipe.Read(tmp, SizeOf(tmp)); // n=256 until n=160 at end Write()
+      {$ifdef PIPEDEBUG}ConsoleWrite(['Read(', SizeOf(tmp), ')=', n]);{$endif PIPEDEBUG}
+      if n <= 0 then
+        break;
+      Hash := crc32c(Hash, @tmp, n);
+      inc(Bytes, n);
+      if Hash and 255 = 0 then
+        SleepHiRes(Random(30)); // wait a few times during the whole process
+      {$ifdef PIPEDEBUG}ConsoleWrite(['Read Bytes=', Bytes]);{$endif PIPEDEBUG}
+    until Bytes = Expected; // execute Read() per 256-bytes (TFTP-like) chunk
+    {$ifdef PIPEDEBUG}ConsoleWrite(['Read Stop, bytes=', Bytes]);{$endif PIPEDEBUG}
+  end;
+end;
+
+procedure TTestCoreBase.TStreamSlow(Context: TObject);
+var
+  P: TPipeStream;
+  R, W: TPipeThread;
+  S: RawByteString;
+  ps: PAnsiChar;
+  Tix: Int64;
+  i, n, c: integer;
+  crc: cardinal;
+  timer: TPrecisionTimer;
+  tmp: TBuffer1K; // small 1K buffer to stress (should be e.g. 64KB in practice)
+begin
+  S := RandomAnsi7(100000);
+  // basic integrity from two threads
+  P := TPipeStream.Create(512);
+  R := TPipeThread.Create({suspended=}true, nil, nil, TSynLog, 'rd');
+  W := TPipeThread.Create({suspended=}true, nil, nil, TSynLog, 'wr');
+  try
+    R.Pipe := P;
+    R.Expected := length(S) * THREAD_ITER;
+    R.Start;
+    CheckEqual(P.Size, 0);
+    CheckEqual(P.Position, 0);
+    CheckEqual(P.Seek(0, soFromCurrent), 0);
+    W.Pipe := P;
+    W.WriteData := S;
+    W.Expected := R.Expected;
+    W.Start;
+    W.WaitFor;
+    CheckEqual(W.Expected, R.Expected);
+    CheckEqual(W.Bytes, W.Expected, 'W.Bytes');
+    R.WaitFor;
+    CheckEqual(R.Bytes, R.Expected, 'R.Bytes');
+    CheckEqual(R.Hash, W.Hash, 'Hash');
+    CheckEqual(P.Size, R.Expected);
+    CheckEqual(P.Position, R.Expected);
+    CheckEqual(P.Seek(0, soFromCurrent), R.Expected);
+  finally
+    W.Free;
+    R.Free;
+    P.Free;
+  end;
+  // tiny ring buffer / wrap-around - no thread needed
+  timer.Start;
+  P := TPipeStream.Create(SizeOf(tmp));
+  try
+    ps := pointer(S);
+    n := SizeOf(tmp); // always try whole 1K buffer first
+    c := length(S) div SizeOf(tmp); // loop 97 times
+    for i := 1 to c do
+    begin
+      crc := crc32c(0, ps, n);
+      CheckEqual(P.Write(ps^, n), n, 'write all');
+      inc(ps, n);
+      FillCharFast(tmp, n, 0);
+      CheckEqual(P.Read(tmp, SizeOf(tmp)), n, 'read trunc');
+      CheckEqual(crc, crc32c(0, @tmp, n), 'crc');
+      n := Random32(SizeOf(tmp)) + 1; // variable Write+Read (1..1024 bytes)
+    end;
+    n := ps - pointer(S);
+    Check(n <= length(S), 'ps overflow');
+  finally
+    P.Free;
+  end;
+  NotifyTestSpeed('TPipeStream', c, n, @timer);
+  // read timeout
+  P := TPipeStream.Create(64);
+  try
+    P.ReadTimeout := 50;
+    Tix := GetTickCount64;
+    CheckEqual(P.Read(tmp, 64), 0);
+    Check(GetTickCount64 - Tix >= 30, 'rdto');
+  finally
+    P.Free;
+  end;
+  // write timeout
+  P := TPipeStream.Create(64);
+  try
+    P.WriteTimeout := 50;
+    CheckEqual(P.Write(tmp, 64), 64);
+    Tix := GetTickCount64;
+    n := P.Write(tmp, SizeOf(tmp));
+    Check(n < SizeOf(tmp));
+    Check(GetTickCount64 - Tix >= 30, 'wrto');
+  finally
+    P.Free;
+  end;
+  // close while blocked
+  P := TPipeStream.Create(64);
+  try
+    W := TPipeThread.Create({suspended=}true, nil, nil, TSynLog, 'wr2');
+    try
+      W.Pipe := P;
+      W.WriteData := S;
+      W.Expected := length(s);
+      W.Start;
+      SleepHiRes(50);
+      P.Close;
+      W.WaitFor;
+      CheckEqual(W.Bytes, 0, 'close');
+    finally
+      W.Free;
+    end;
+  finally
+    P.Free;
+  end;
+end;
+
+type
   TRec = packed record
     a: integer;
     b: byte;
@@ -1524,7 +1686,7 @@ type
 
 function FVSort(const A, B): integer;
 begin
-  // string/PChar compariosn of first "Detailed" field
+  // string/PChar comparison of first "Detailed" field
   result := SysUtils.StrComp(
     PChar(pointer(TFV(A).Detailed)), PChar(pointer(TFV(B).Detailed)));
 end;
@@ -1641,6 +1803,7 @@ begin
   Run(Utf8Slow, self, 'UTF-8', true, false);
   Run(TimeZonesSlow, self, 'TimeZones', true, false);
   Run(TRawUtf8ListSlow, self, 'TRawUtf8List', true, false);
+  Run(TStreamSlow, self, 'TPipeStream', true, false);
   { TODO : implement TypeInfoToHash() if really needed }
   {
   h := TypeInfoToHash(TypeInfo(TAmount));
@@ -5718,6 +5881,12 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
     CheckEqual(t, TrimRight(c));
   end;
 
+  procedure CheckCleanThreadName(s, exp: RawUtf8);
+  begin
+    CleanThreadName(s);
+    CheckEqual(s, exp);
+  end;
+
 var
   i, j, k, len, len120, lenup100, CP, L, lcid: integer;
   bak, bakj: AnsiChar;
@@ -6450,6 +6619,14 @@ begin
            (str[1] <> str[3]) then
           CheckEqual(PosExString(str[3], str), 3);
       end;
+      fn := str;
+      Check(pointer(fn) = pointer(str));
+      check(EqualFileNameNotNull(fn, str));
+      check(SortDynArrayFileName(fn, str) = 0);
+      UniqueString(string(fn));
+      Check(pointer(fn) <> pointer(str));
+      check(EqualFileNameNotNull(fn, str));
+      check(SortDynArrayFileName(fn, str) = 0);
       for j := 1 to lenup100 do
       begin
         CheckEqual(PosExString(#13, str, j), 0);
@@ -6460,6 +6637,15 @@ begin
         k := PosExString(str[j], str);
         check((k > 0) and
              (str[k] = str[j]));
+        inc(fn[j]);
+        check(not EqualFileNameNotNull(fn, str));
+        check(SortDynArrayFileName(fn, str) <> 0);
+        {$ifdef UNICODE}
+        Check(StrCompW(pointer(fn), pointer(str)) <> 0);
+        {$else}
+        Check(StrComp(pointer(fn), pointer(str)) <> 0);
+        {$endif UNICODE}
+        dec(fn[j]);
       end;
     end
     else
@@ -6955,6 +7141,9 @@ begin
   CheckEqual(StringReplaceAll('abcabcabc', 'c', 'C', true), 'abCabCabC');
   CheckEqual(StringReplaceAll('abcabcabc', 'c', '', true), 'ababab');
   CheckEqual(StringReplaceAll('abcabcabc', 'C', '', true), 'ababab');
+  CheckCleanThreadName('', '');
+  CheckCleanThreadName('toto', 'toto');
+  CheckCleanThreadName('TWebSockettotoTSqlRestServerTOrmRestmemory', 'WStotoSrvmem');
   CheckEqual(LogEscapeFull(''), '');
   CheckEqual(LogEscapeFull(' abc'), ' abc');
   CheckEqual(LogEscapeFull('abc'), 'abc');
@@ -8367,7 +8556,7 @@ end;
 
 const
   // some reference Security Descriptor self-relative buffers
-  SD_B64: array[0..8] of RawUtf8 = (
+  SD_B64: array[0..9] of RawUtf8 = (
     // 0 [MS-DTYP] 2.5.1.4 SDDL String to Binary Example
     'AQAUsJAAAACgAAAAFAAAADAAAAACABwAAQAAAAKAFAAAAACAAQEAAAAAAAEAAAAAAgBgAAQAAAAAAxgA' +
     'AAAAoAECAAAAAAAFIAAAACECAAAAAxgAAAAAEAECAAAAAAAFIAAAACACAAAAAxQAAAAAEAEBAAAAAAAF' +
@@ -8448,7 +8637,11 @@ const
     '3g/mve9RqC4nRgRbdx5AQEAAAAAAAUKAAAABRIoADABAAABAAAA3kfmkW/ZcEuVV9Y/9PPM2AEB' +
     'AAAAAAAFCgAAAAASJAD/AQ8AAQUAAAAAAAUVAAAAb66a5T9f7J/5hle4BwIAAAASGAAEAAAAAQI' +
     'AAAAAAAUgAAAAKgIAAAASGAC9AQ8AAQIAAAAAAAUgAAAAIAIAAAEFAAAAAAAFFQAAAG+umuU/X+' +
-    'yf+YZXuAACAAABBQAAAAAABRUAAABvrprlP1/sn/mGV7gAAgAA'
+    'yf+YZXuAACAAABBQAAAAAABRUAAABvrprlP1/sn/mGV7gAAgAA',
+    // 9 from a real Windows System
+    'AQAEgBQAAAAwAAAAAAAAAEwAAAABBQAAAAAABRUAAACBHhhytsTTB48bQEJPBAAAAQUAAAAAAAU' +
+    'VAAAAgR4YcrbE0wePG0BCAQIAAAIAWAADAAAAABAUAP8BHwABAQAAAAAABRIAAAAAEBgA/wEfAA' +
+    'ECAAAAAAAFIAAAACACAAAAECQA/wEfAAEFAAAAAAAFFQAAAIEeGHK2xNMHjxtAQk8EAAA='
     );
   // the expected SDDL export of those binary buffers
   SD_TXT: array[0..high(SD_B64)] of RawUtf8 = (
@@ -8534,14 +8727,19 @@ const
     '(A;CIID;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;S-1-5-21-3852119663-2683068223-3092743929-519)' +
     '(A;CIID;LC;;;RU)(A;CIID;CCLCSWRPWPLOCRSDRCWDWO;;;BA)' +
     'S:AI(OU;CIIOIDSA;WP;f30e3bbe-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)' +
-    '(OU;CIIOIDSA;WP;f30e3bbf-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)');
+    '(OU;CIIOIDSA;WP;f30e3bbf-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)',
+    // 9
+    'O:S-1-5-21-1914183297-131318966-1111497615-1103G:S-1-5-21-1914183297-131318966-1111497615-513D:' +
+    '(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-1914183297-131318966-1111497615-1103)'
+    );
   // the Domain SID to be used for RID recognition
   DOM_TXT: array[4..high(SD_B64)] of RawUtf8 = (
     'S-1-5-21-823746769-1624905683-418753922',    // 4
     'S-1-5-21-682003330-1677128483-1060284298',   // 5
     'S-1-5-21-823746769-1624905683-418753922',    // 6
     'S-1-5-21-2461620395-3297676348-3167859224',  // 7
-    'S-1-5-21-3852119663-2683068223-3092743929'); // 8
+    'S-1-5-21-3852119663-2683068223-3092743929',  // 8
+    'S-1-5-21-1914183297-131318966-1111497615');  // 9
   // the SDDL with proper RID recognition
   RID_TXT: array[4..high(SD_B64)] of RawUtf8 = (
     'O:DUG:DAD:(A;;FA;;;DA)',
@@ -8598,7 +8796,9 @@ const
       '(A;CIID;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;EA)(A;CIID;LC;;;RU)' +
       '(A;CIID;CCLCSWRPWPLOCRSDRCWDWO;;;BA)' +
       'S:AI(OU;CIIOIDSA;WP;f30e3bbe-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)' +
-      '(OU;CIIOIDSA;WP;f30e3bbf-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)');
+      '(OU;CIIOIDSA;WP;f30e3bbf-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)',
+      'O:S-1-5-21-1914183297-131318966-1111497615-1103G:DUD:(A;ID;FA;;;SY)(A;ID;FA;;;BA)' +
+      '(A;ID;FA;;;S-1-5-21-1914183297-131318966-1111497615-1103)');
   // [MS-DTYP] 2.4.4.17.9 Examples: Conditional Expression Binary Representation
   ARTX_HEX: array[0..2] of RawUtf8 = (
     '61727478f80a0000005400690074006c00650010040000005600500080000000',
@@ -8706,6 +8906,29 @@ begin
   dom := 'S-1-5-21-823746769-1624905683-418753922';
   CheckEqual(KnownSidToText(wkrUserAdmin, dom), dom + '-500');
   CheckEqual(KnownSidToText(wrkGroupRasServers, dom), dom + '-553');
+  Check(sd.FromText(RID_TXT[9]) = atpSuccess, 'guess domain from O:');
+  CheckEqual(sd.ToText, SD_TXT[9]);
+  bin := Base64ToBin('AQAEhBQAAAAkAAAAAAAAAEAAAAABAgAAAAAABSAAAAAgAgAAAQUAAAAAA' +
+    'AUVAAAA/ZxDLSkUVWPZmlbYAQIAAAMAoAAFAAAAABAUAP8BHwABAQAAAAAABRIAAAAAEBgA/' +
+    'wEfAAECAAAAAAAFIAAAACACAAAAECQAqQESAAEFAAAAAAAFFQAAAP2cQy0pFFVj2ZpW2EdYB' +
+    'AAAECQA/wESAAEFAAAAAAAFFQAAAP2cQy0pFFVj2ZpW2JIfBwAAECQA/wEfAAEFAAAAAAAFF' +
+    'QAAAKu8Fu9mK3SFkRuTS9XrAQA=');
+  Check(sd.FromBinary(bin), 'tolerate acl rev3');
+  u := sd.ToText('');
+  CheckEqual(u,
+    'O:BAG:S-1-5-21-759405821-1666520105-3629554393-513D:AI(A;ID;FA;;;SY)(A;ID;FA;;;B' +
+    'A)(A;ID;0x1201a9;;;S-1-5-21-759405821-1666520105-3629554393-284743)(A;ID;0x1201f' +
+    'f;;;S-1-5-21-759405821-1666520105-3629554393-466834)(A;ID;FA;;;S-1-5-21-40112447' +
+    '15-2238983014-1267932049-125909)');
+  {$ifdef OSWINDOWS}
+  Check(CryptoApi.SecurityDescriptorToText(pointer(bin), u2), 'winapi aclv3');
+  CheckEqual(u, u2);
+  {$endif OSWINDOWS}
+  u := sd.ToText('S-1-5-21-759405821-1666520105-3629554393'); // recognize G:DU
+  CheckEqual(u, 'O:BAG:DUD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1201a9;;;' +
+    'S-1-5-21-759405821-1666520105-3629554393-284743)(A;ID;0x1201ff;;;' +
+    'S-1-5-21-759405821-1666520105-3629554393-466834)(A;ID;FA;;;' +
+    'S-1-5-21-4011244715-2238983014-1267932049-125909)');
   // validate against some reference binary material
   for i := 0 to high(SD_B64) do
   begin
@@ -8726,7 +8949,7 @@ begin
     Check(sd.FromBinary(bin));
     Check(sd.Dacl <> nil, 'dacl');
     Check(scSelfRelative in sd.Flags);
-    Check((sd.Sacl = nil) = (i in [2 .. 7]) , 'sacl');
+    Check((sd.Sacl = nil) = (i in [2 .. 7, 9]) , 'sacl');
     CheckEqual(sd.ToText, SD_TXT[i], 'ToText');
     Check(sd.Dacl[0].Opaque = '');
     Check(sd.Dacl[0].ConditionalExpression = '');

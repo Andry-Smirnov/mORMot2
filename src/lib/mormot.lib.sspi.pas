@@ -2110,7 +2110,7 @@ begin
       for i := 0 to integer(dwEntriesRead) - 1 do
       begin
         Win32PWideCharToUtf8(g^.name, result[i]);
-        sid^[i] := SidToText(g^.group_sid);
+        SidToText(g^.group_sid, sid^[i]);
         inc(g);
       end;
       NetAPIBufferFree(v);
@@ -2147,7 +2147,7 @@ begin
       Win32PWideCharToUtf8(g^.name, Name);
       if PropNameEquals(Name, GroupName) then
       begin
-        result := SidToText(g^.group_sid);
+        SidToText(g^.group_sid, result);
         break;
       end;
       inc(g);
@@ -2211,8 +2211,8 @@ function MsiGetFileSignatureInformationW; external msidll;
 
 function MsiGetString(hRecord: TMsiHandle; index: integer; var str: RawUtf8): boolean;
 var
-  tmp: TSynTempBuffer;
   sz, res: cardinal;
+  tmp: TSynTempBuffer;
 begin
   result := false;
   sz := tmp.Init shr 1; // size in WideChar

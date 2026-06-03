@@ -324,6 +324,7 @@ function IsRowIDShort(const FieldName: ShortString): boolean;
 /// quickly recognize AS AT BY DO IF IN IS NO OF ON OR TO char pairs
 // - used e.g. by ReplaceParamsByNames() to generate valid :XX parameters
 function IsSqlReservedByTwo(TwoChars: PUtf8Char): boolean;
+  {$ifdef HASINLINE}inline;{$endif} overload;
 
 /// recognize most basic SQL keywords - rough estimate for table/field names
 function IsSqlReserved(const Text: RawUtf8): boolean;
@@ -2284,8 +2285,11 @@ begin
 end;
 
 function NullableTimeLogToValue(const V: TNullableTimeLog): TTimeLog;
+var
+  b: TTimeLogBits; // safer with a transient variable
 begin
-  VariantToInt64(PVariant(@V)^, PInt64(@result)^);
+  VariantToInt64(PVariant(@V)^, b.Value);
+  result := b.Value;
 end;
 
 // TNullableUtf8Text

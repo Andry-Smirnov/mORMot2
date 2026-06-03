@@ -2620,7 +2620,7 @@ type
     // initialize from fProps, with no associated RTTI - and calls DoRegister()
     // - creates a "fake" rkRecord/rkDynArray/rkArray PRttiInfo (TypeName may be '')
     procedure NoRttiSetAndRegister(ParserType: TRttiParserType;
-      const TypeName: RawUtf8; NoRegister: boolean = false);
+      TypeName: RawUtf8; NoRegister: boolean = false);
     // called by ValueFinalize() for dynamic array defined from text
     procedure NoRttiArrayFinalize(Data: PAnsiChar);
     /// initialize this Value process for Parser and Parser Complex kinds
@@ -3448,6 +3448,30 @@ type
   /// used to determine the exact class type of a TClonable
   TClonableClass = class of TClonable;
 
+  /// abstract parent for TSynMonitor as fully defined in mormot.core.perf.pas
+  // - contains only the bare minimum e.g. for mormot.core.threads integration
+  TSynMonitorAbstract = class(TObjectWithRttiMethods)
+  protected
+    fSafe: TLightLock; // our fast non-reentrant lock
+    fName: RawUtf8;
+  public
+    /// initialize the instance nested class properties
+    // - you can specify identifier associated to this monitored resource
+    // which would be used for TSynMonitorUsage persistence
+    constructor Create(const aName: RawUtf8); reintroduce; overload; virtual;
+    /// should be called when the process starts, and a task is processed
+    procedure ProcessStartTask; virtual; abstract;
+    /// should be called when the process stops, to pause the internal timer
+    procedure ProcessEnd; virtual; abstract;
+    /// should be called when an Exception occurred
+    // - just a wraper around overloaded ProcessError(), so a thread-safe method
+    procedure ProcessErrorRaised(E: Exception); virtual; abstract;
+    /// appends a JSON content with all published properties information
+    procedure ComputeDetailsTo(W: TTextWriter); virtual; abstract;
+  end;
+  /// class-reference type (metaclass) of a process statistic information
+  TSynMonitorClass = class of TSynMonitorAbstract;
+
   /// used for backward compatibility only with existing code
   TSynPersistentLock   = class(TSynLocked);
   TSynPersistentLocked = class(TSynLocked);
@@ -3465,6 +3489,9 @@ procedure RttiSetParserTObjectWithRttiMethods(
   O: TObjectWithRttiMethodsClass; Rtti: TRttiCustom);
 
 var
+  /// set to global TSystemUser.Timer field by mormot.core.perf.pas
+  ProcessSystemUseTimer: PObject;
+
   /// let TRttiCustom recognize the actual TClass of each TRttiValueClass
   // - mormot.core.data list classses are set by mormot.core.json
   CLASS_RTTI: array[TRttiValueClass] of TClass = (
@@ -7691,12 +7718,13 @@ const
     #7'RawUtf8'#5'array'#6'record'#5'TDate'#5'TGuid'#6'PtrInt'#7'PtrUInt' +
     {$ifdef FPC} #6'string'#7'integer'#8'cardinal' {$else}
                  #7'longint'#8'longword' {$endif} + #9'TFileName' +
-    #7'RawBlob'#7'SpiUtf8';
-  _TypeParser: array[0 .. 12 {$ifdef FPC} + 1 {$endif} ] of TRttiParserType = (
+    #7'RawBlob'#7'SpiUtf8' +
+    {$ifdef UNICODE} #13'UnicodeString' {$else} #10'AnsiString' {$endif};
+  _TypeParser: array[0 .. 13 {$ifdef FPC} + 1 {$endif} ] of TRttiParserType = (
     ptNone, ptRawUtf8, ptArray, ptRecord, ptDateTime, ptGuid,
     {$ifdef CPU64} ptInt64, ptQWord, {$else} ptInteger, ptCardinal, {$endif}
     {$ifdef FPC} ptString, {$endif} ptInteger, ptCardinal, ptString,
-    ptRawByteString, ptRawUtf8);
+    ptRawByteString, ptRawUtf8, ptString);
 
 function KnownTypeName(Name: PUtf8Char; NameLen: PtrInt): TRttiParserType;
   {$ifdef HASINLINE}inline;{$endif}
@@ -9176,11 +9204,16 @@ begin
   SetPropsFromText(P, eeNothing, {NoRegister=}true);
 end;
 
+var
+  _RttiCount: integer; // genuine internal type name
+
 procedure TRttiCustom.NoRttiSetAndRegister(ParserType: TRttiParserType;
-  const TypeName: RawUtf8; NoRegister: boolean);
+  TypeName: RawUtf8; NoRegister: boolean);
 var
   def: PTypeData;
 begin
+  if TypeName = '' then
+    Make(['#', InterlockedIncrement(_RttiCount)], TypeName); // not void
   if (fNoRttiInfo <> nil) or
      not (rcfWithoutRtti in fFlags) then
     ERttiException.RaiseUtf8('Unexpected %.NoRttiSetAndRegister(%)',
@@ -9235,10 +9268,7 @@ begin
   SetLength(fNoRttiInfo, length(TypeName) + 64); // all filled with zeros
   fCache.Info := pointer(fNoRttiInfo);
   fCache.Info.Kind := fCache.Kind;
-  if TypeName = '' then // we need some name to search for
-    fCache.Info.RawName := PointerToHexShort(self)
-  else
-    fCache.Info.RawName := TypeName;
+  fCache.Info.RawName := TypeName;
   def := GetTypeData(fCache.Info); // points after Info.Kind + Info.RawName
   case fCache.Kind of // cross-platform minimal RTTI field(s)
     rkRecord:
@@ -9690,9 +9720,6 @@ begin
   result := self;
 end;
 
-var
-  RttiArrayCount: integer;
-
 function TRttiCustom.SetBinaryType(BinSize: integer): TRttiCustom;
 begin
   if self <> nil then
@@ -9723,6 +9750,7 @@ procedure TRttiCustom.SetPropsFromText(var P: PUtf8Char;
 var
   prop: TIntegerDynArray;
   propcount: integer;
+  noreg: boolean;
   propname, typname, atypname: RawUtf8;
   aname: PUtf8Char;
   ee: TRttiCustomFromTextExpectedEnd;
@@ -9748,8 +9776,7 @@ begin
         break;
     end
     else if not GetNextFieldProp(P, propname) then
-      // expect regular Object Pascal identifier (i.e. 0..9,a..z,A..Z,_)
-      break;
+      break; // expect regular Object Pascal identifier (i.e. 0..9,a..z,A..Z,_)
     if P^ = ',' then
     begin
       // a,'b,b',c: integer
@@ -9794,25 +9821,26 @@ begin
       c := Rtti.RegisterTypeFromName(typname, @pt);
       if c = nil then
       case pt of
-        ptArray:
-          // array of ...
+        ptArray: // array of ...
           begin
-            if IdemPChar(P, 'OF') then
+            if PCardinal(P)^ and $ffdfdf = ord('O') + ord('F') shl 8 + 32 shl 16 then
             begin
               // array of ....   or   array of record ... end
-              P := GotoNextNotSpace(P + 2);
-              if not GetNextFieldProp(P, atypname) or
-                 (P = nil) then
-                ERttiException.RaiseUtf8('Missing % array field type', [typname]);
-              FormatUtf8('[%%]', [atypname, RttiArrayCount], typname);
-              LockedInc32(@RttiArrayCount); // ensure genuine type name
-              ac := Rtti.RegisterTypeFromName(atypname, @apt);
-              if ac = nil then
-                if apt = ptRecord then
-                  // array of record ... end
-                  ee := eeEndKeyWord
+              typname := '';
+              P := GotoNextNotSpace(P + 3);
+              if not GetNextFieldProp(P, atypname) then
+                P := nil;
+              if P <> nil then
+              begin
+                ac := Rtti.RegisterTypeFromName(atypname, @apt);
+                if ac = nil then
+                  if apt = ptRecord then
+                    ee := eeEndKeyWord // array of record ... end
+                  else
+                    P := nil
                 else
-                  P := nil;
+                  Join(['[', ac.Name, ']'], typname); // normalize for reuse
+              end;
             end
             else
               P := nil;
@@ -9821,8 +9849,7 @@ begin
                 '"array of record" or "array of KnownType" for %', [propname]);
             pt := ptDynArray;
           end;
-        ptRecord:
-          // record ... end
+        ptRecord: // record ... end
           ee := eeEndKeyWord;
         ptNone:
           // unknown type name -> try from TArray<*>/T*DynArray/T*s patterns
@@ -9832,12 +9859,15 @@ begin
             begin
               // try generic syntax TArray<##>
               inc(P);
-              if GetNextFieldProp(P, typname) and
+              if GetNextFieldProp(P, atypname) and
                  (P^ = '>') then
               begin
+                // normalize as array of KnownType
                 inc(P);
-                ac := Rtti.RegisterTypeFromName(typname);
-                typname := Join(['TArray<', typname, '>']); // normalize
+                ac := Rtti.RegisterTypeFromName(atypname);
+                if ac = nil then
+                  ERttiException.RaiseUtf8('Unknown %: TArray<%>', [propname, atypname]);
+               Join(['[', ac.Name, ']'], typname);
               end;
             end
             else
@@ -9850,7 +9880,7 @@ begin
                   IdemPropName('ObjArray', aname + alen - 8, 8)) then
                 dec(alen, 8)
               else if (alen > 3) and
-                      (aname[aLen] in ['s', 'S']) then // e.g. TBytes
+                      (aname[aLen - 1] in ['s', 'S']) then // e.g. TBytes
                 dec(alen)
               else
                 alen := 0;
@@ -9883,23 +9913,29 @@ begin
       if NoRegister then
         PtrArrayAdd(Rtti.fOwnedRtti, nested);
       if pt = ptRecord then
-        // rec: record .. end  or  rec: { ... }
-        c := nested
+        c := nested   // rec: record .. end  or  rec: { ... }
       else
-        // arr: [ ... ]   or  arr: array of record .. end
-        ac := nested;
+        ac := nested; // arr: [ ... ]   or  arr: array of record .. end
     end;
     if ac <> nil then
     begin
+      // manual "array of" type registration
       if (c <> nil) or
          (pt <> ptDynArray) then // paranoid
         ERttiException.RaiseUtf8('Unexpected array % %', [c, ToText(pt)^]);
-      c := Rtti.GlobalClass.Create;
-      c.FromRtti(nil);
-      c.fArrayRtti := ac; // before NoRttiSetAndRegister()
-      c.NoRttiSetAndRegister(ptDynArray, typname, NoRegister);
-      if NoRegister then
-        PtrArrayAdd(Rtti.fOwnedRtti, c);
+      if (typname <> '') and
+         (typname[1] = '[') then
+        c := Rtti.RegisterTypeFromName(typname); // e.g. [RawUtf8] [integer]
+      if c = nil then
+      begin
+        c := Rtti.GlobalClass.Create;
+        c.FromRtti(nil);
+        c.fArrayRtti := ac; // before NoRttiSetAndRegister()
+        noreg := NoRegister or (typname = ''); // transient type definition
+        c.NoRttiSetAndRegister(ptDynArray, typname, noreg);
+        if noreg then
+          PtrArrayAdd(Rtti.fOwnedRtti, c);
+      end;
     end;
     // set type for all prop[]
     for i := 0 to propcount - 1 do
@@ -11066,6 +11102,12 @@ end;
 procedure CopyTClonable(Dest, Source: TObject);
 begin
   TClonable(Source).AssignTo(TClonable(Dest)); // AssignTo is a protected method
+end;
+
+constructor TSynMonitorAbstract.Create(const aName: RawUtf8);
+begin
+  Create;
+  fName := aName;
 end;
 
 

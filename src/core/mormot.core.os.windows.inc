@@ -749,7 +749,7 @@ function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 var
   len: DWord;
   u: TSynTempBuffer;
-  fn: array[0..MAX_PATH] of WideChar;
+  fn: array[0 .. MAX_PATH] of WideChar;
 begin
   result := '';
   Utf8ToWin32PWideChar(Uri, u);
@@ -1482,19 +1482,13 @@ end;
 
 procedure TSynEvent.SetEvent;
 begin
-  fNotified := true;
+  fNotified := true; // should be set before notification
   Windows.SetEvent(THandle(fHandle));
 end;
 
-function TSynEvent.WaitFor(TimeoutMS: integer): boolean;
+function TSynEvent.WaitFor(TimeoutMS: cardinal): boolean;
 begin
   WaitForSingleObject(THandle(fHandle), TimeoutMS);
-  result := fNotified;
-end;
-
-function TSynEvent.WaitForEver: boolean;
-begin
-  WaitForSingleObject(THandle(fHandle), INFINITE);
   result := fNotified;
 end;
 
@@ -2272,8 +2266,7 @@ begin
   if not DelayedGetProcessMemoryInfo then
     exit;
   h := OpenProcess(OpenProcessAccess, false, PID);
-  if h = 0 then
-    exit;
+  if h <> 0 then
   try
     if GetProcessTimes(h, ftp, fte, ftkrn, ftusr) then
     begin
@@ -2756,10 +2749,14 @@ begin
 end;
 
 function ConsoleStdInputLen: integer;
+var
+  n: cardinal; // safer with an explicit local variable
 begin
   if StdInputHandle = 0 then
     StdInputHandle := GetStdHandle(STD_INPUT_HANDLE);
-  if not PeekNamedPipe(StdInputHandle, nil, 0, nil, @result, nil) then
+  if PeekNamedPipe(StdInputHandle, nil, 0, nil, @n, nil) then
+    result := n
+  else
     result := 0;
 end;
 
@@ -3127,14 +3124,22 @@ begin
 end;
 
 function TWinRegistry.ReadDword(const entry: SynUnicode): cardinal;
+var
+  n: cardinal; // safer with an explicit local variable
 begin
-  if not ReadBuffer(entry, @result, SizeOf(result)) then
+  if ReadBuffer(entry, @n, SizeOf(n)) then
+    result := n
+  else
     result := 0;
 end;
 
 function TWinRegistry.ReadQword(const entry: SynUnicode): QWord;
+var
+  q: QWord; // safer with an explicit local variable
 begin
-  if not ReadBuffer(entry, @result, SizeOf(result)) then
+  if ReadBuffer(entry, @q, SizeOf(q)) then
+    result := q
+  else
     result := 0;
 end;
 
@@ -3159,8 +3164,12 @@ begin
 end;
 
 function TWinRegistry.ReadSize(const entry: SynUnicode): integer;
+var
+  n: cardinal; // safer with an explicit local variable
 begin
-  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @result) <> NO_ERROR then
+  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @n) = NO_ERROR then
+    result := n
+  else
     result := -1;
 end;
 

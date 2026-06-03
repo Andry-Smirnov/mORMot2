@@ -2857,6 +2857,13 @@ begin
   if Directory <> '' then
     insert(Directory, Name, 1);
   Attr := F.Attr;
+  {$ifdef POSIXDELPHI}
+  // Delphi's POSIX FindFirst() (InternalPosixFileGetAttr) does not set faArchive,
+  // unlike FPC's LinuxToWinAttr() and our StatFileAttr() which set it on the base
+  // result for every entry (files AND directories) - so normalize it here, to
+  // keep FindFilesRtl() consistent with FindFiles() on Delphi POSIX
+  Attr := Attr or faArchive;
+  {$endif POSIXDELPHI}
   if Attr and faDirectory <> 0 then // may happen with ffoIncludeFolder option
     Size := -1
   else
@@ -4425,8 +4432,8 @@ end;
 function TMatch.MatchString(const aText: string): boolean;
 var
   local: TMatch; // thread-safe with no lock!
+  len: PtrInt;
   temp: TSynTempBuffer;
-  len: integer;
 begin
   if aText = '' then
   begin
@@ -6470,7 +6477,7 @@ begin
     if srclen <> 0 then
     begin
       if PtrUInt(upd - src) < srclen then
-        MoveByOne(src, upd, srclen)
+        MoveByOne(src, upd, srclen) // overlapping single-byte expansion
       else
         MoveFast(src^, upd^, srclen);
       inc(upd, srclen);

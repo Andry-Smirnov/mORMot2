@@ -115,6 +115,10 @@ function GetFileNameExtIndex(const FileName, CsvExt: TFileName): integer;
 procedure GetNextItemShortString(var P: PUtf8Char; Dest: PShortString;
   Sep: AnsiChar = ',');
 
+/// fast version of several cascaded StringReplaceAll() as old=new,... parameters
+function StringReplaceCsv(const S: RawUtf8; OldNewPatternPairs: PUtf8Char;
+  CaseInsensitive: boolean = false): RawUtf8;
+
 /// append some text lines with the supplied Values[]
 // - if any Values[] item is '', no line is added
 // - otherwise, appends 'Caption: Value', with Caption taken from CSV
@@ -2754,6 +2758,20 @@ begin
   end;
 end;
 
+function StringReplaceCsv(const S: RawUtf8; OldNewPatternPairs: PUtf8Char;
+  CaseInsensitive: boolean): RawUtf8;
+var
+  old, new: RawUtf8;
+begin
+  result := S;
+  while OldNewPatternPairs <> nil do
+  begin
+    GetNextItem(OldNewPatternPairs, '=', old);
+    GetNextItem(OldNewPatternPairs, ',', new);
+    result := StringReplaceAll(result, old, new, CaseInsensitive);
+  end;
+end;
+
 function GetNextItemMultiple(var P: PUtf8Char; const Sep: RawUtf8;
   var Next: RawUtf8): AnsiChar;
 var
@@ -3430,13 +3448,15 @@ function GetNextItemHexa(var P: PUtf8Char; Sep: AnsiChar): QWord;
 var
   tmp: TChar64;
   L: integer;
+  q: QWord; // safer with a transient variable
 begin
-  result := 0;
+  q := 0;
   L := GetNextTChar64(P, Sep, tmp);
   if (L > 0) and
      (L and 1 = 0) then
-    if not HexDisplayToBin(@tmp, @result, L shr 1) then
-      result := 0;
+    if not HexDisplayToBin(@tmp, @q, L shr 1) then
+      q := 0;
+  result := q;
 end;
 
 function GetNextItemDouble(var P: PUtf8Char; Sep: AnsiChar): double;
@@ -6644,7 +6664,7 @@ begin
   c := byte(P^) - 48;
   if c > 9 then
     exit;
-  PCardinal(@result)^ := c;
+  result := c;
   inc(P);
   repeat
     if P^ <> '.' then
@@ -6710,8 +6730,11 @@ begin
 end;
 
 function StrToCurrency(P: PUtf8Char): currency;
+var
+  curr: currency; // safer with a transient local value
 begin
-  PInt64(@result)^ := StrToCurr64(P, nil);
+  PInt64(@curr)^ := StrToCurr64(P, nil);
+  result := curr;
 end;
 
 {$ifdef UNICODE}

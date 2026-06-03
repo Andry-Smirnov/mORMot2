@@ -14,7 +14,7 @@ unit mormot.core.buffers;
    - URI-Encoded Text Buffer Process
    - Basic MIME Content Types Support
    - Text Memory Buffers and Files
-   - TStreamRedirect and other Hash process
+   - TStreamRedirect and other TStream/Hash process
    - RawByteString Buffers Aggregation via TRawByteStringGroup
 
   *****************************************************************************
@@ -2082,7 +2082,6 @@ function AppendUInt32ToBuffer(Buffer: PUtf8Char; Value: PtrUInt): PUtf8Char;
 
 /// fast add text conversion of 0-999 integer value into a given buffer
 // - warning: it won't check that Value is in 0-999 range
-// - up to 4 bytes may be written to the buffer (including #0 terminator)
 function Append999ToBuffer(Buffer: PUtf8Char; Value: PtrUInt): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -2157,7 +2156,7 @@ procedure BinToHumanHex(W: TTextWriter; Data: PByte; Len: integer;
   PerLine: integer = 16; LeftTab: integer = 0; SepChar: AnsiChar = ':'); overload;
 
 
-{ *************************** TStreamRedirect and other Hash process }
+{ *************************** TStreamRedirect and other TStream/Hash process }
 
 /// compute the 32-bit default hash of a file content
 // - you can specify your own hashing function if DefaultHasher is not what you expect
@@ -2434,6 +2433,7 @@ type
   end;
 
   /// TStream allowing to read from some nested TStream instances
+  // - e.g. parent of THttpMultiPartStream as defined in mormot.net.client
   TNestedStreamReader = class(TStreamWithPositionAndSize)
   protected
     fNested: array of TNestedStream;
@@ -2483,7 +2483,6 @@ type
     /// will read up to Count bytes from the internal buffer or source TStream
     function Read(var Buffer; Count: Longint): Longint; override;
   end;
-
 
 /// compute the crc32c checksum of a given file
 // - this function maps the THashFile signature
@@ -5971,8 +5970,8 @@ end;
 function TAlgoRleLZ.RawProcess(src, dst: pointer; srcLen, dstLen, dstMax: integer;
   process: TAlgoCompressWithNoDestLenProcess): integer;
 var
-  tmp: TSynTempBuffer;
   rle: integer;
+  tmp: TSynTempBuffer;
 begin
   case process of
     doCompress:
@@ -7156,8 +7155,8 @@ end;
 
 function BinToBase58(Bin: PAnsiChar; BinLen: integer): RawUtf8;
 var
+  len: PtrInt;
   temp: TSynTempBuffer;
-  len: integer;
 begin
   len := BinToBase58(Bin, BinLen, temp);
   FastSetString(result{%H-}, temp.buf, len);
@@ -7229,8 +7228,8 @@ end;
 
 function Base58ToBin(B58: PAnsiChar; B58Len: integer): RawByteString;
 var
+  len: PtrInt;
   temp: TSynTempBuffer;
-  len: integer;
 begin
   len := Base58ToBin(B58, B58Len, temp);
   FastSetRawByteString(result{%H-}, temp.buf, len);
@@ -9386,13 +9385,11 @@ end;
 
 function Append999ToBuffer(Buffer: PUtf8Char; Value: PtrUInt): PUtf8Char;
 var
-  L: PtrInt;
   P: PAnsiChar;
 begin
   P := pointer(SmallUInt32Utf8[Value]);
-  L := PStrLen(P - _STRLEN)^;
-  MoveByOne(P, Buffer, L);
-  result := Buffer + L;
+  PCardinal(Buffer)^ := PCardinal(P)^;
+  result := Buffer + PStrLen(P - _STRLEN)^;
 end;
 
 function AppendBufferToBuffer(Buffer: PUtf8Char; Text: pointer; Len: PtrInt): PUtf8Char;
@@ -9604,7 +9601,7 @@ begin
 end;
 
 
-{ *************************** TStreamRedirect and other Hash process }
+{ *************************** TStreamRedirect and other TStream/Hash process }
 
 { TProgressInfo }
 

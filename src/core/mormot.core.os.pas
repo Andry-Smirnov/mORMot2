@@ -2393,10 +2393,10 @@ var
 // - returns a file descriptor handle on success, to be eventually closed
 function LinuxEventFD(nonblocking, semaphore: boolean): integer;
 
-/// wrapper to read from a eventfd() file
+/// wrapper to read from a eventfd() file depending on LinuxEventFD() parameters
+// - may be blocking or not blocking
 // - return 1 and decrement the counter by 1 in semaphore mode
-// - return the current counter value and set it to 0 in non-semaphor mode
-// - may be blocking or not blocking, depending on how LinuxEventFD() was called
+// - return the current counter and set it to 0 in non-semaphore/TSynEvent mode
 // - return -1 on error
 function LinuxEventFDRead(fd: integer): Int64;
 
@@ -4498,6 +4498,8 @@ type
     // - if returned true, caller should eventually call UnLock()
     function TryLock: boolean;
       {$ifdef FPC} inline; {$endif} { Delphi can't inline TryEnterCriticalSection }
+    /// enter an OS lock, initializing it if it was currently filled with zeros
+    procedure LockAndInitIfNeeded;
     /// leave an OS lock
     procedure UnLock;
       {$ifdef FPC} inline; {$endif} { Delphi can't inline LeaveCriticalSection }
@@ -4864,9 +4866,10 @@ type
   // - on Windows, calls directly the CreateEvent/ResetEvent/SetEvent API
   // - on Linux, will use eventfd() in blocking and non-semaphore mode
   // - on other POSIX, will use PRTLEvent which is lighter than TEvent BasicEvent
+  // - WARNING: you should wait from a single thread at once
   TSynEvent = class(TSynPersistent)
   protected
-    fHandle: pointer; // Windows THandle or FPC PRTLEvent
+    fHandle: pointer; // Windows THandle, FPC PRTLEvent or Delphi-POSIX TEvent
     {$ifdef OSLINUX}
     fFD: integer;     // for eventfd()
     {$endif OSLINUX}
@@ -4878,27 +4881,27 @@ type
     destructor Destroy; override;
     /// ignore any pending events, so that WaitFor will be set on next SetEvent
     procedure ResetEvent;
-      {$ifdef FPCPOSIX} inline; {$endif}
     /// trigger any pending event, releasing the WaitFor/WaitForEver methods
     procedure SetEvent;
-      {$ifdef FPCPOSIX} inline; {$endif}
     /// wait until SetEvent is called from another thread, with a maximum time
     // - returns true if was signaled by SetEvent, or false on timeout
-    // - WARNING: you should wait from a single thread at once
-    function WaitFor(TimeoutMS: integer): boolean;
-      {$ifdef FPCPOSIX} inline; {$endif}
+    // - WaitFor(INFINITE) is the same as WaitForEver
+    function WaitFor(TimeoutMS: cardinal): boolean;
     /// wait until SetEvent is called from another thread, with no maximum time
     // - returns true if was signaled by SetEvent, or false if aborted/destroyed
     function WaitForEver: boolean;
-      {$ifdef FPCPOSIX} inline; {$endif}
+      {$ifdef HASINLINE} inline; {$endif}
     /// wait until SetEvent is called, calling CheckSynchronize() on main thread
     // - returns true if was signaled by SetEvent, or false on timeout
-    function WaitForSafe(TimeoutMS: integer): boolean;
+    function WaitForSafe(TimeoutMS: cardinal; DisableSafe: boolean = false): boolean;
     /// calls SleepHiRes() in steps while checking terminated flag and this event
     function SleepStep(var start: Int64; terminated: PBoolean): Int64;
     /// could be used to tune your algorithm if the eventfd() API is used
     function IsEventFD: boolean;
       {$ifdef HASINLINE} inline; {$endif}
+    /// low-level read-only access to the internal SetEvent flag
+    property Notified: boolean
+      read fNotified;
   end;
 
   /// a thread-safe class with a virtual constructor and properties persistence
@@ -10573,7 +10576,7 @@ function TMultiLightLock.TryLock: boolean;
 var
   tid: pointer;
 begin
-  tid := pointer(GetCurrentThreadId);
+  tid := pointer(PtrUInt(GetCurrentThreadId));
   if Flags = 0 then    // is not locked
     if LockedExc(Flags, {to=}1, {from=}0) then // try atomic acquisition
     begin
@@ -10594,7 +10597,7 @@ end;
 procedure TMultiLightLock.ForceLock;
 begin
   Flags := MaxInt; // forced acquisition, whatever the current state is
-  ThreadID := pointer(GetCurrentThreadId);
+  ThreadID := pointer(PtrUInt(GetCurrentThreadId));
 end;
 
 function TMultiLightLock.IsLocked: boolean;
@@ -10891,6 +10894,18 @@ end;
 function TOSLock.TryLock: boolean;
 begin
   result := mormot.core.os.TryEnterCriticalSection(CS) <> 0;
+end;
+
+procedure TOSLock.LockAndInitIfNeeded;
+begin
+  if not IsInitializedCriticalSection(CS) then
+  begin
+    OSSafe.Lock;
+    if not IsInitializedCriticalSection(CS) then // thread-safe initialization
+      Init;
+    OSSafe.UnLock;
+  end;
+  Lock;
 end;
 
 procedure TOSLock.UnLock;
@@ -11499,21 +11514,30 @@ begin
     until result >= endtix;
 end;
 
-function TSynEvent.WaitForSafe(TimeoutMS: integer): boolean;
+function TSynEvent.WaitForEver: boolean;
+begin
+  result := WaitFor(INFINITE);
+end;
+
+function TSynEvent.WaitForSafe(TimeoutMS: cardinal; DisableSafe: boolean): boolean;
 var
   endtix: Int64;
 begin
-  if GetCurrentThreadID = MainThreadID then
+  if DisableSafe or  // DisableSafe=true to skip main Thread recognition
+     (GetCurrentThreadID <> MainThreadID) then
   begin
-    endtix := GetTickCount64 + TimeoutMS;
-    repeat
-      CheckSynchronize(1); // make UI responsive enough
-    until WaitFor(10) or
-          (GetTickCount64 > endtix);
-    result := fNotified;
-  end
-  else
     result := WaitFor(TimeoutMS);
+    exit;
+  end;
+  endtix := 0;
+  if TimeoutMS <> INFINITE then
+    endtix := GetTickCount64 + TimeoutMS;
+  repeat
+    CheckSynchronize(1); // make UI responsive enough
+  until WaitFor(10) or
+        ((endtix <> 0) and
+         (GetTickCount64 > endtix));
+  result := fNotified;
 end;
 
 

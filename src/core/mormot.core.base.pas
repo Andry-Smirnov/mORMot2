@@ -605,6 +605,7 @@ type
 
   /// used to serialize up to 128-bit binary as hexadecimal
   TShort32 = string[32];
+  PShort32 = ^TShort32;
 
   /// 32-bytes aligned shortstring - e.g. for SetThreadName
   TShort31 = string[31];
@@ -1785,6 +1786,9 @@ function QWordScanIndex(P: PQWordArray; Count: PtrInt; const Value: QWord): PtrI
 // - returns true if P^=Value within Count entries
 // - returns false if Value was not found
 function Int64ScanExists(P: PInt64Array; Count: PtrInt; const Value: Int64): boolean;
+
+/// allocate and copy a dest[] array of byte if all i64[] are <= 255
+procedure Int64ArrayShrink(i64: PInt64Array; n: PtrInt; out dest: TByteDynArray);
 
 /// fast search of a pointer-sized unsigned integer position
 // in an pointer-sized integer array
@@ -3546,6 +3550,10 @@ function bswap16(a: cardinal): cardinal;
 function bswap32(a: cardinal): cardinal;
   {$ifndef ASMINTEL}inline;{$endif}
 
+/// convert the endianness of a given unsigned integer from 0..4 bytes input
+function bswapN(b: PByte; len: cardinal): cardinal;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// in-place convert the endianness of several unsigned 32-bit integers
 // - n is required to be > 0
 procedure bswap32array(a: PCardinalArray; n: PtrInt);
@@ -3700,7 +3708,7 @@ type
     function InitIncreasing(Count: PtrInt; Start: PtrInt = 0): PIntegerArray;
     /// initialize a new temporary buffer of a given number of zero bytes
     // - if ZeroLen=0, will initialize the whole tmp[] stack buffer to 0
-    function InitZero(ZeroLen: PtrInt): pointer;
+    function InitZero(ZeroLen: PtrInt = 0): pointer;
     /// inlined wrapper around buf + len
     function BufEnd: pointer;
       {$ifdef HASINLINE}inline;{$endif}
@@ -3721,7 +3729,7 @@ type
   TSynTempAdder = object
   {$endif USERECORDWITHMETHODS}
   private
-    procedure AddRealloc(new: PtrInt);
+    procedure AddRealloc(new: integer);
   public
     /// direct access to the internal 4KB temporary buffer
     Store: TSynTempBuffer;
@@ -3731,7 +3739,7 @@ type
     procedure Init(StartupCapacity: PtrInt); overload;
     /// prepare to append some bytes to the internal buffer
     // - returns the destination buffer where l bytes should be written
-    function Add(l: PtrInt): pointer; overload;
+    function Add(l: integer): pointer; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// append some bytes to the internal buffer
     // - making a buffer reallocation if needed
@@ -3740,6 +3748,9 @@ type
     /// append some bytes to the internal buffer
     // - making a buffer reallocation if needed
     procedure Add(const s: RawByteString); overload;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// add one AnsiChar to the internal buffer
+    procedure Add(c: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// append some bytes to the internal buffer
     // - making a buffer reallocation if needed
@@ -4896,8 +4907,11 @@ begin
 end;
 
 function DoubleToCurrency(const d: double): currency;
+var
+  curr: currency; // safer with an explicit local variable
 begin
-  PInt64(@result)^ := trunc(d * CURR_RES);
+  PInt64(@curr)^ := trunc(d * CURR_RES);
+  result := curr;
 end;
 
 {$endif CPUX86}
@@ -4914,9 +4928,12 @@ begin
 end;
 
 function SimpleRoundTo2Digits(const Value: Currency): Currency;
+var
+  curr: currency; // safer with an explicit local variable
 begin
-  result := Value;
-  SimpleRoundTo2DigitsCurr64(PInt64(@result)^);
+  curr := Value;
+  SimpleRoundTo2DigitsCurr64(PInt64(@curr)^);
+  result := curr;
 end;
 
 procedure SimpleRoundTo2DigitsCurr64(var Value: Int64);
@@ -7277,6 +7294,18 @@ end;
 function QWordScanIndex(P: PQWordArray; Count: PtrInt; const Value: QWord): PtrInt;
 begin
   result := Int64ScanIndex(pointer(P), Count, Value); // this is the very same code
+end;
+
+procedure Int64ArrayShrink(i64: PInt64Array; n: PtrInt; out dest: TByteDynArray);
+var
+  i: PtrInt;
+begin
+  for i := 0 to n - 1 do
+    if i64[i] > 255 then
+      exit;
+  SetLength(dest, n);
+  for i := 0 to n - 1 do
+    dest[i] := i64[i];
 end;
 
 {$ifdef CPU64}
@@ -10324,6 +10353,20 @@ begin
   result := ((a and 255) shl 8) or (a shr 8);
 end;
 
+function bswapN(b: PByte; len: cardinal): cardinal;
+begin
+  result := 0;
+  if len > 0 then
+    repeat
+      inc(result, b^);
+      dec(len);
+      if len = 0 then
+        break;
+      inc(b);
+      result := result shl 8;
+    until false;
+end;
+
 procedure MoveSwap(dst, src: PByte; n: PtrInt);
 begin
   if n <= 0 then
@@ -10477,9 +10520,12 @@ begin
 end;
 
 function TLecuyer.NextQWord: QWord;
+var
+  q: TQWordRec;
 begin
-  PQWordRec(@result)^.L := Next;
-  PQWordRec(@result)^.H := Next;
+  q.L := Next;
+  q.H := RawNext;
+  result := q.V;
 end;
 
 function TLecuyer.NextDouble: double;
@@ -12323,12 +12369,20 @@ begin
   end;
 end;
 
+function TSynTempBuffer.Init: integer;
+begin
+  added := 0;
+  buf := @tmp;
+  result := SizeOf(tmp) - SYNTEMPTRAIL; // set to 4080 bytes = maximum safe size
+  len := result;
+end;
+
 function TSynTempBuffer.InitOnStack: pointer;
 begin
   len := SizeOf(tmp) - SYNTEMPTRAIL;
   added := 0;
-  result := @tmp;
-  buf := result;
+  buf := @tmp; 
+  result := buf;
 end;
 
 procedure TSynTempBuffer.Init(const Source: RawByteString);
@@ -12357,14 +12411,6 @@ begin
     PPtrInt(PAnsiChar(buf) + SourceLen)^ := 0; // init last 4/8 bytes
   end;
   result := buf;
-end;
-
-function TSynTempBuffer.Init: integer;
-begin
-  added := 0;
-  buf := @tmp;
-  result := SizeOf(tmp) - SYNTEMPTRAIL; // set to 4080 bytes = maximum safe size
-  len := result;
 end;
 
 function TSynTempBuffer.InitIncreasing(Count, Start: PtrInt): PIntegerArray;
@@ -12410,7 +12456,7 @@ end;
 
 procedure TSynTempAdder.Init;
 begin
-  Store.InitOnStack;
+  Store.Init;
 end;
 
 procedure TSynTempAdder.Init(StartupCapacity: PtrInt);
@@ -12418,9 +12464,9 @@ begin
   Store.Init(StartupCapacity);
 end;
 
-procedure TSynTempAdder.AddRealloc(new: PtrInt);
+procedure TSynTempAdder.AddRealloc(new: integer);
 begin
-  Store.len := NextGrow(new);
+  Store.len := NextGrow(new); // len is capacity here
   if Store.buf = @Store.tmp then
   begin
     GetMem(Store.buf, Store.len + SYNTEMPTRAIL);
@@ -12430,7 +12476,7 @@ begin
     ReallocMem(Store.buf, Store.len + SYNTEMPTRAIL);
 end;
 
-function TSynTempAdder.Add(l: PtrInt): pointer;
+function TSynTempAdder.Add(l: integer): pointer;
 var
   new: integer;
 begin
@@ -12445,6 +12491,14 @@ procedure TSynTempAdder.Add(p: pointer; l: PtrInt);
 begin
   if l > 0 then
     MoveFast(p^, Add(l)^, l);
+end;
+
+procedure TSynTempAdder.Add(c: AnsiChar);
+begin
+  if Store.added >= Store.len then
+    AddRealloc(Store.added);
+  PUtf8Char(Store.buf)[Store.added] := c;
+  inc(Store.added);
 end;
 
 procedure TSynTempAdder.Add(const s: RawByteString);
@@ -12677,21 +12731,30 @@ end;
 {$endif HASINLINE}
 
 function crc64c(buf: PAnsiChar; len: cardinal): Int64;
+var
+  q: TQWordRec;
 begin
-  PQWordRec(@result)^.L := crc32c(0, buf, len);
-  PQWordRec(@result)^.H := crc32c(PQWordRec(@result)^.L, buf, len);
+  q.L := crc32c(0, buf, len);
+  q.H := crc32c(q.L, buf, len);
+  result := q.V;
 end;
 
 function crc32cTwice(seed: QWord; buf: PAnsiChar; len: cardinal): QWord;
+var
+  q: TQWordRec;
 begin
-  PQWordRec(@result)^.L := crc32c(PQWordRec(@seed)^.L, buf, len);
-  PQWordRec(@result)^.H := crc32c(PQWordRec(@seed)^.H, buf, len);
+  q.L := crc32c(PQWordRec(@seed)^.L, buf, len);
+  q.H := crc32c(PQWordRec(@seed)^.H, buf, len);
+  result := q.V;
 end;
 
 function crc63c(buf: PAnsiChar; len: cardinal): Int64;
+var
+  q: TQWordRec;
 begin
-  PQWordRec(@result)^.L := crc32c(0, buf, len);
-  PQWordRec(@result)^.H := crc32c(PQWordRec(@result)^.L, buf, len) and $7fffffff;
+  q.L := crc32c(0, buf, len);
+  q.H := crc32c(q.L, buf, len) and $7fffffff;
+  result := q.V;
 end;
 
 procedure crc128c(buf: PAnsiChar; len: cardinal; out crc: THash128);

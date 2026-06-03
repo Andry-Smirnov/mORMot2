@@ -2259,7 +2259,7 @@ function StringReplaceAll(const S, OldPattern, NewPattern: RawUtf8;
   CaseInsensitive: boolean): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// fast version of several cascaded StringReplaceAll()
+/// fast version of several cascaded StringReplaceAll() as array parameter
 function StringReplaceAll(const S: RawUtf8;
   const OldNewPatternPairs: array of RawUtf8;
   CaseInsensitive: boolean = false): RawUtf8; overload;
@@ -4049,9 +4049,9 @@ end;
 function TSynAnsiConvert.AnsiBufferToUtf8(Dest: PUtf8Char; Source: PAnsiChar;
   SourceChars: cardinal; NoTrailingZero: boolean): PUtf8Char;
 var
-  tmp: TSynTempBuffer;
   c: cardinal;
   u: PWideChar;
+  tmp: TSynTempBuffer;
 begin
   if not fAnsiCharMbcs then
   begin
@@ -4122,8 +4122,8 @@ end;
 procedure TSynAnsiConvert.AnsiToUnicodeStringVar(Source: PAnsiChar;
   SourceChars: cardinal; var Result: SynUnicode);
 var
-  tmp: TSynTempBuffer;
   u: PWideChar;
+  tmp: TSynTempBuffer;
 begin
   if SourceChars = 0 then
     Result := ''
@@ -4148,8 +4148,8 @@ end;
 procedure TSynAnsiConvert.AnsiBufferToRawUtf8(Source: PAnsiChar;
   SourceChars: cardinal; out Value: RawUtf8);
 var
-  tmp: TSynTempBuffer;
   p: PUtf8Char;
+  tmp: TSynTempBuffer;
 begin
   if (Source = nil) or
      (SourceChars = 0) then
@@ -4372,8 +4372,8 @@ end;
 procedure TSynAnsiConvert.UnicodeBufferToAnsiVar(Source: PWideChar;
   SourceChars: cardinal; var Result: RawByteString);
 var
-  tmp: TSynTempBuffer;
   l: PtrInt;
+  tmp: TSynTempBuffer;
 begin
   if (Source = nil) or
      (SourceChars = 0) then
@@ -4411,8 +4411,8 @@ end;
 function TSynAnsiConvert.AnsiToAnsi(From: TSynAnsiConvert;
   Source: PAnsiChar; SourceChars: cardinal): RawByteString;
 var
-  tmp: TSynTempBuffer;
   u: PWideChar;
+  tmp: TSynTempBuffer;
 begin
   if From.fCodePage = fCodePage then
     FastSetStringCP(result, Source, SourceChars, fCodePage)
@@ -6109,8 +6109,8 @@ end;
 
 procedure Utf8ToSynUnicode(Text: PUtf8Char; Len: PtrInt; var result: SynUnicode);
 var
-  tmp: TSynTempBuffer;
   n: PtrInt;
+  tmp: TSynTempBuffer;
 begin
   n := Utf8DecodeToUnicode(Text, Len, tmp);
   FastSynUnicode(result, tmp.buf, n);
@@ -7493,7 +7493,7 @@ begin
       s := P - 1;
       inc(P, extra);
       inc(extra);
-      MoveByOne(s, D + result, extra);
+      MoveByOne(s, D + result, extra); // properly inlined by FPC
       inc(result, extra);
     end;
   until false;
@@ -8178,8 +8178,8 @@ end;
 
 function UpperCaseUnicode(const S: RawUtf8): RawUtf8;
 var
+  len: PtrInt;
   tmp: TSynTempBuffer;
-  len: integer;
 begin
   if S = '' then
   begin
@@ -8220,8 +8220,8 @@ end;
 
 function LowerCaseUnicode(const S: RawUtf8): RawUtf8;
 var
-  tmp: TSynTempBuffer;
   len: PtrInt;
+  tmp: TSynTempBuffer;
 begin
   if S = '' then
   begin
@@ -8885,11 +8885,10 @@ begin
   for i := first + 1 to len do
   begin
     c := text[i];
-    if c <> exclude then
-    begin
-      p^ := c;
-      inc(p);
-    end;
+    if c = exclude then
+      continue;
+    p^ := c;
+    inc(p);
   end;
   FakeSetLength(result, p - pointer(result));
 end;
@@ -8899,7 +8898,7 @@ var
   i: PtrInt;
   exclude: array[0..(SizeOf(only) shr POINTERSHR) - 1] of PtrInt;
 begin // reverse bits in local stack copy before calling TrimChar()
-  for i := 0 to (SizeOf(only) shr POINTERSHR) - 1 do
+  for i := 0 to high(exclude) do
     exclude[i] := not PPtrIntArray(@only)[i];
   result := TrimChar(text, TSynAnsicharSet(exclude));
 end;
@@ -8997,7 +8996,7 @@ begin
     inc(dst, sharedlen);
     if newlen > 0 then
     begin
-      MoveByOne(pointer(NewPattern), dst, newlen);
+      MoveFast(pointer(NewPattern)^, dst^, newlen);
       inc(dst, newlen);
     end;
     last := pos[i] + oldlen;
@@ -9785,7 +9784,7 @@ begin
   if textlen + len >= high(result) then
     exit;
   if len > 0 then
-    MoveByOne(text, @res[textlen + 1], len);
+    MoveByOne(text, @res[textlen + 1], len); // properly inlined on FPC
   inc(res[0], len + 1);
   res[res[0]] := ord(',');
 end;
@@ -9892,8 +9891,8 @@ end;
 
 procedure UnCamelCase(var Dest: RawUtf8; P: PUtf8Char; Len: PtrInt);
 var
-  tmp: TSynTempBuffer; // 4KB means no temporary memalloc from RTTI identifiers
   destlen: PtrInt;
+  tmp: TSynTempBuffer; // 4KB means no temporary memalloc from RTTI identifiers
 begin
   if P = nil then
   begin
@@ -11279,8 +11278,10 @@ end;
 // freely inspired by Bero's PUCU library, released under zlib license
 //  https://github.com/BeRo1985/pucu  (C)2016-2020 Benjamin Rosseaux
 
-{$define UU_COMPRESSED}
 // 1KB compressed static table in the exe renders into our 20KB UU[] array :)
+{$ifndef NOCOMPRESSEDTABLE}
+  {$define UU_COMPRESSED}
+{$endif NOCOMPRESSEDTABLE}
 
 const
   UU_BLOCK_HI = 7;
@@ -11836,7 +11837,7 @@ end;
 
 function UpperCaseReference(const S: RawUtf8): RawUtf8;
 var
-  len: integer;
+  len: PtrInt;
   tmp: TSynTempBuffer;
 begin
   len := length(S);
