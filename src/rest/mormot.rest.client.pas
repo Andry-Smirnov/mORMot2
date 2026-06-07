@@ -1319,7 +1319,7 @@ begin
      (JsonDecode(pointer({%H-}resp), @AUTH_N, length(AUTH_N), @values, true) = nil) then
   begin
     Sender.fSession.Data := ''; // reset temporary 'data' field
-    result := ''; // error
+    FastAssignNew(result); // error
     exit;
   end;
   result := values[0].ToUtf8; // not ToUtf8(result) to please Delphi 2007
@@ -1413,7 +1413,7 @@ var
   rnd: THash128 absolute clientsign;
   values: array[0..1] of TValuePUtf8Char;
 begin
-  result := ''; // error
+  FastAssignNew(result); // error
   if User.LogonName = '' then
     exit;
   // compute the 160-bit client nonce (needed by ScramClientProof)
@@ -1470,7 +1470,7 @@ begin
       // success: fSession.PrivateKey computed without the server DB key
       User.PasswordHashHexa := '#'
     else
-      result := ''; // error
+      FastAssignNew(result); // error
 end;
 
 
@@ -1711,14 +1711,15 @@ var
   sec: TSecContext;
   bin: RawByteString;
 begin
-  result := '';
+  FastAssignNew(result);
   if not InitializeDomainAuth then
     exit;
   Sender.fSession.Data := '';
   InvalidateSecContext(sec);
   try
     repeat
-      if User.LogonName <> '' then // will use ClientForceSpn() value
+      if (User.LogonName <> '') or
+         ClientSspiPasswordIsFile(User.PasswordHashHexa) then // FILE:keytab
         ClientSspiAuthWithPassword(sec, Sender.fSession.Data,
           User.LogonName, User.PasswordHashHexa, {spn=}'', bin)
       else
@@ -2145,19 +2146,25 @@ const
 
 constructor TRestClientUri.RegisteredClassCreateFrom(aModel: TOrmModel;
   aDefinition: TSynConnectionDefinition; aServerHandleAuthentication: boolean);
+var
+  pwd: SpiUtf8;
 begin
   if fModel = nil then // if not already created with a reintroduced constructor
     Create(aModel);
   if fModel <> nil then
     fOnIdle := fModel.OnClientIdle; // allow UI interactivity during SetUser()
-  if aDefinition.User <> '' then
-  begin
+  if aDefinition.User = '' then
+    exit;
+  aDefinition.GetPasswordSafe(pwd);
+  try
     {$ifdef DOMAINRESTAUTH}
     if aDefinition.User = SSPI_DEFINITION_USERNAME then
-      SetUser('', aDefinition.PasswordPlain)
+      SetUser('', pwd)
     else
     {$endif DOMAINRESTAUTH}
-      SetUser(aDefinition.User, aDefinition.PasswordPlain, true);
+      SetUser(aDefinition.User, pwd, true);
+  finally
+    FillZero(pwd); // anti-forensic
   end;
 end;
 
@@ -2192,7 +2199,7 @@ var
   resp: RawUtf8;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     if fSession.Version = '' then
@@ -2216,7 +2223,8 @@ begin
   begin
     fSession.IDHexa8 := CardinalToHexLower(fSession.ID);
     fSession.PrivateKey := crc32(0, pointer(aSessionKey), length(aSessionKey));
-    if aUser.PasswordHashHexa <> '#' then // ignore the SCRAM DB value
+    if (aUser.PasswordHashHexa <> '') and      // e.g. Kerberos
+       (aUser.PasswordHashHexa[1] <> '#') then // e.g. SCRAM DB value
       fSession.PrivateKey := crc32(fSession.PrivateKey,
         pointer(aUser.PasswordHashHexa), length(aUser.PasswordHashHexa));
   end;
@@ -2758,7 +2766,7 @@ begin
       aMethodName, aNameValueParameters, resp, aTable, aID) = HTTP_SUCCESS then
     result := JsonDecode(resp)
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TRestClientUri.CallBackPut(const aMethodName, aSentData: RawUtf8;

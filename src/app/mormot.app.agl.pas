@@ -28,9 +28,10 @@ uses
   mormot.core.buffers,
   mormot.core.datetime,
   mormot.core.threads,
+  mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
-  mormot.core.data,
+  mormot.core.fmt,
   mormot.core.log,
   mormot.core.zip,
   mormot.net.http,
@@ -78,7 +79,8 @@ type
     fRedirect: TFileStreamEx;
     fRedirectSize, fNotifyStableTix: Int64;
     // copy of fService properties
-    fCmd, fEnv, fWrkDir, fRedirectFileName: TFileName;
+    fCmd, fEnv: TRunArg;
+    fWrkDir, fRedirectFileName: TFileName;
     fAbortRequested: boolean;
     fRunOptions: TRunOptions;
     procedure Execute; override;
@@ -550,8 +552,8 @@ begin
   fService.fRunnerExitCode := -777;
   fService.fRunner := self;
   // fService may be set to nil: make a local copy of all RunRedirect() params
-  fCmd := aCmd;
-  fEnv := aEnv;
+  fCmd := TRunArg(aCmd);
+  fEnv := TRunArg(aEnv);
   fWrkDir := aWrkDir;
   // fRunOptions=[] without roWinNoProcessDetach to detach from main console
   if soWinJobCloseChildren in aService.StartOptions then
@@ -973,9 +975,9 @@ begin
     begin
       Utf8ToFileName(ExtractExecutableName(n), fn);
       if fn = '' then
-        res := -1 // this parametr seems invalid
+        res := -1 // this parameter seems invalid
       else if FileIsExecutable(fn) then
-        res := RunCommand(Utf8ToString(n), {waitfor=}true)
+        res := RunCommand(TRunArg(n), {waitfor=}true)
       else
       begin // append to text log file
         GetMemoryInfo(mem, false);
@@ -1109,7 +1111,7 @@ constructor TSynAngelizeSettings.Create;
 begin
   inherited Create;
   fHttpTimeoutMS := 200;
-  fFolder := MakePath([Executable.ProgramFilePath, 'services'], true);
+  fFolder := MakePath([Executable.ProgramFilePath, 'services'], {enddelim=}true);
   fExt := '.service';
   fCommandFile := 'cmd';
 end;
@@ -1253,7 +1255,8 @@ begin
     with fSet.Service[i] do
       if not Disabled then
         html := FormatUtf8('%<tr><td>%</td><td>%</td><td>%</td></tr>',
-          [html, HtmlEscape(Name), ToText(State)^, HtmlEscape(StateMessage)]);
+          [html, HtmlEscapeShort(Name), ToText(State)^,
+           HtmlEscapeShort(StateMessage)]);
   html := html + '</tbody></table></body></html>';
   FileFromString(html, fSas.StateFile + '.html');
 end;
@@ -1526,7 +1529,7 @@ begin
     aaExec,
     aaWait:
       begin
-        status := RunCommand(fn{%H-}, Action = aaWait);
+        status := RunCommand(TRunArg(fn{%H-}), Action = aaWait);
         if status <> expectedstatus then
           StatusFailed;
       end;
@@ -1675,14 +1678,17 @@ begin
 end;
 
 function TSynAngelize.DoHttpGet(const aUri: RawUtf8): integer;
+var
+  status: integer; // not PtrInt
 begin
-  result := 0;
+  status := 0;
   try
-    HttpGet(aUri, nil, false, @result, fSas.HttpTimeoutMS,
+    HttpGet(aUri, nil, false, @status, fSas.HttpTimeoutMS,
       {forcesocket:}true, {ignoretlserror:}true);
   except
-    result := -500; // e.g. on TCP or TLS connection error
+    status := -500; // e.g. on TCP or TLS connection error
   end;
+  result := status; // safer with an explicit variable
 end;
 
 function TSynAngelize.DoNotifyByEmail(const aService: TSynAngelizeService;
@@ -1822,7 +1828,7 @@ begin
     ESynAngelize.RaiseUtf8('/new: duplicated servicename "%"', [sn]);
   exe := sysutils.Trim(paramstr(3));
   {$ifdef OSWINDOWS}
-  if ExtractFileExt(exe) = '' then
+  if not HasExt(exe) then
     exe := exe + '.exe';
   {$endif OSWINDOWS}
   if exe <> '' then

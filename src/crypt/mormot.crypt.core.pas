@@ -55,17 +55,17 @@ type
   /// class of Exceptions raised by this unit
   ESynCrypto = class(ESynException);
 
-{$ifdef ASMX64}
-  {$ifdef HASAESNI}          // compiler supports asm with aesenc/aesdec opcodes
+{$ifdef ASMX64NOTPIC}
+  {$ifdef ASMAESNI}          // compiler supports asm with aesenc/aesdec opcodes
     {$define USEAESNI}
     {$define USEAESNI64}
     {$define USEAESNICTR}    // 8x interleaved aesni
-    {$ifdef CPUX64ASM}       // Delphi x86_64 SSE asm is buggy before XE7
+    {$ifdef ASMX64AVX0}      // Delphi x86_64 SSE asm is buggy before XE7
       {$define USECLMUL}     // pclmulqdq opcodes
       {$define USEGCMAVX}    // 8x interleaved aesni + pclmulqdq asm for AES-GCM
       {$define USEAESNIHASH} // aesni+sse4.1 32-64-128 aeshash
-    {$endif CPUX64ASM}
-  {$endif HASAESNI}
+    {$endif ASMX64AVX0}
+  {$endif ASMAESNI}
   {$ifdef OSWINDOWS}
     {$define CRC32C_X64}     // external crc32_iscsi_01 for win64/lin64
     {$define SHA512_X64}     // external sha512_sse4 for win64/lin64
@@ -74,23 +74,23 @@ type
     {$define CRC32C_X64}     // external crc32_iscsi_01.o for win64/lin64
     {$define SHA512_X64}     // external sha512_sse4.o for win64/lin64
   {$endif OSLINUX}
-{$endif ASMX64}
+{$endif ASMX64NOTPIC}
 
-{$ifdef ASMX86}
+{$ifdef ASMX86NOTPIC}        // our x86 asm requires global variables access
   {$define USEAESNI}
   {$define USEAESNI32}
-  {$ifdef HASAESNI}          // compiler supports asm with aesenc/aesdec opcodes
+  {$ifdef ASMAESNI}          // compiler supports asm with aesenc/aesdec opcodes
     {$define USECLMUL}       // pclmulqdq opcodes
     {$define USEAESNIHASH}   // aesni+sse4.1 32-64-128 aeshash
     {$define USEAESNICTR}    // 4x interleaved aesni
-  {$endif HASAESNI}
+  {$endif ASMAESNI}
   {$ifdef OSWINDOWS}
     {$define SHA512_X86}     // external sha512-x86.o for win32/lin32
   {$endif OSWINDOWS}
   {$ifdef OSLINUX}
     {$define SHA512_X86}     // external sha512-x86.o for win32/lin32
   {$endif OSLINUX}
-{$endif ASMX86}
+{$endif ASMX86NOTPIC}
 
 {$ifdef CPUAARCH64}
   {$ifdef OSLINUXANDROID}
@@ -122,11 +122,11 @@ procedure Xor256(dst, src: PPtrIntArray);
 
 /// logical "dst := dst XOR src" of 512-bit = 64 bytes - use SSE2 on Intel/AMD
 procedure Xor512(dst, src: PPtrIntArray);
-  {$ifndef CPUINTEL} inline;{$endif}
+  {$ifndef ASMINTEL} inline;{$endif}
 
 /// efficient "dst := src" Move of 512-bit = 64 bytes - use SSE2 on Intel/AMD
 procedure Move512(dst, src: PPtrIntArray);
-  {$ifndef CPUINTEL} inline;{$endif}
+  {$ifndef ASMINTEL} inline;{$endif}
 
 // little endian fast conversion of 160 bits = 5 integers values
 // - use fast bswap asm in x86/x64 mode
@@ -218,39 +218,39 @@ var
 
 /// optimized 256-bit addition (with Intel/AMD asm) - used by ecc256r1
 function _add256(out Output: THash256Rec; const Left, Right: THash256Rec): PtrUInt;
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// optimized 256-bit substraction (with Intel/AMD asm) - used by ecc256r1
 function _sub256(out Output: THash256Rec; const Left, Right: THash256Rec): PtrUInt;
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// optimized 256-bit addition (with Intel/AMD asm) - used by ecc256r1
 function _inc256(var Value: THash256Rec; const Added: THash256Rec): PtrUInt;
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// optimized 256-bit substraction (with Intel/AMD asm) - used by ecc256r1
 function _dec256(var Value: THash256Rec; const Subs: THash256Rec): PtrUInt;
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// optimized 128-bit addition (with Intel/AMD asm) - used by ecc256r1
 procedure _inc128(var Value: THash256Rec; var Added: THash128Rec);
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// optimized 64-bit addition (with Intel/AMD asm) - used by ecc256r1
 procedure _inc64(var Value: THash128Rec; var Added: QWord);
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// 128-to-256-bit multiplication (with Intel/AMD asm) - used by ecc256r1
 procedure _mult128({$ifdef FPC}constref{$else}const{$endif} l, r: THash128Rec;
   out product: THash256Rec);
-  {$ifndef CPUINTEL} inline; {$endif}
+  {$ifndef ASMINTEL} inline; {$endif}
 
 /// 256-to-512-bit multiplication (with x86_64 asm) - used by ecc256r1
 procedure _mult256(out Output: THash512Rec; const Left, Right: THash256Rec);
 
 /// 256-to-512-bit ^2 computation - used by ecc256r1
 procedure _square256(out Output: THash512Rec; const Left: THash256Rec);
-  {$ifdef CPUX64}inline;{$endif}
+  {$ifdef ASMX64}inline;{$endif}
 
 /// returns sign of 256-bit Left - Right comparison - used by ecc256r1
 function _cmp256(const Left, Right: THash256Rec): integer;
@@ -262,7 +262,7 @@ procedure _bswap256(dest, source: PQWordArray);
 
 /// right shift of 1 bit of a 256-bit value - used by ecc256r1
 procedure _rshift1(var V: THash256Rec);
-  {$ifdef HASINLINE}{$ifndef CPUX64}inline;{$endif}{$endif}
+  {$ifdef HASINLINE}{$ifndef ASMX64}inline;{$endif}{$endif}
 
 /// left shift of 1 bit of a 256-bit value - used by ecc256r1
 function _lshift1(var V: THash256Rec): PtrUInt;
@@ -276,7 +276,7 @@ function _lshift(var Output: THash256Rec; const Input: THash256Rec; Shift: integ
 function _numbits256(const V: THash256Rec): integer;
   {$ifdef FPC}inline;{$endif}
 
-{$ifdef CPUINTEL} { x86_64/i386 asm sub-routines for mormot.crypt.rsa }
+{$ifdef ASMINTEL} { x86_64/i386 asm sub-routines for mormot.crypt.rsa }
 
 /// add of two TBigInt 512/1024-bit buffers - as used by mormot.crypt.rsa
 function _xasmadd(Value, Adds: pointer; Carry: PtrUInt): PtrUInt;
@@ -304,7 +304,7 @@ const
   _xasmdivn    = SizeOf(pointer) * 16; // 512/1024 bits per call
   _xasmmodn    = SizeOf(pointer) * 16; // 512/1024 bits per call
 
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
 
 { *************** AES Encoding/Decoding with optimized asm and AES-NI support }
@@ -1460,7 +1460,7 @@ type
       read fStream;
   end;
 
-  /// multi-mode PKCS7 buffered AES encryption stream
+  /// multi-mode PKCS7-padded buffered AES encryption stream
   // - output will follow standard PKCS7 padding, with a trailing IV if needed,
   // i.e. TAesAbstract.DecryptPkcs7 and TAesPkcs7Reader encoding
   TAesPkcs7Writer = class(TAesPkcs7Abstract)
@@ -1484,7 +1484,7 @@ type
     procedure Finish;
   end;
 
-  /// multi-mode PKCS7 buffered AES decryption stream
+  /// multi-mode PKCS7-padded buffered AES decryption stream
   // - input should follow standard PKCS7 padding, with a trailing IV if needed,
   // i.e. TAesAbstract.EncryptPkcs7 and TAesPkcs7Writer encoding
   TAesPkcs7Reader = class(TAesPkcs7Abstract)
@@ -1493,7 +1493,7 @@ type
   public
     /// initialize the AES decryption stream from an intput stream and a key
     // - inStream is typically a TMemoryStream or a TFileStreamEx
-    // - inStream size will be checked for proper PKCS7 padding
+    // - inStream.Size will be checked for proper PKCS7 padding
     // - aesMode should be one of the supported AES_PKCS7WRITER chaining mode
     // - by default, a trailing random IV is read, unless IV is supplied
     // - see also Create() overload with PBKDF2 password derivation
@@ -2858,13 +2858,13 @@ var
   Td0, Td1, Td2, Td3, Te0, Te1, Te2, Te3: array[byte] of cardinal;
   SBox, InvSBox: TByteToByte;
 
-{$ifdef CPUX64}
+{$ifdef ASMX64}
   {$include mormot.crypt.core.asmx64.inc}
-{$endif}
+{$endif ASMX64}
 
-{$ifdef CPUX86}
+{$ifdef ASMX86}
   {$include mormot.crypt.core.asmx86.inc}
-{$endif}
+{$endif ASMX86}
 
 // AARCH64 hardware acceleration is done via linked .o files of C intrinsics
 // - see USEARMCRYPTO conditional and armv8.o / sha256armv8.o statics
@@ -2929,7 +2929,7 @@ begin
   {$endif CPU32}
 end;
 
-{$ifndef CPUSSE2}
+{$ifndef ASMSSE2}
 {$ifdef CPU32}
 procedure Xor512(dst, src: PPtrIntArray); {$ifdef HASINLINE} inline; {$endif}
 var
@@ -2971,7 +2971,7 @@ begin
   dst[7] := src[7];
 end;
 {$endif CPU32}
-{$endif CPUSSE2}
+{$endif ASMSSE2}
 
 function Hash128ToExt(P: PHash128Rec): TSynExtended;
 const
@@ -3003,7 +3003,7 @@ end;
 
 { *************** 256-bit BigInt Low-Level Computation for ECC }
 
-{$ifndef CPUINTEL}
+{$ifndef ASMINTEL}
 
 procedure bswap256(s, d: PIntegerArray);
 begin
@@ -3340,9 +3340,9 @@ end;
 
 {$endif ECC_ORIGINALMULT}
 
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
-{$ifdef CPUX64}
+{$ifdef ASMX64}
 
 procedure _square256(out Output: THash512Rec; const Left: THash256Rec);
 begin
@@ -3428,7 +3428,7 @@ end;
 
 {$endif ECC_ORIGINALMULT}
 
-{$endif CPUX64}
+{$endif ASMX64}
 
 {$ifdef CPU32}
 
@@ -3559,7 +3559,7 @@ begin
   result := ord(l > r) - ord(l < r);
 end;
 
-{$ifndef CPUX64} // mormot.crypt.core.asmx64.inc has its own shrd-based version
+{$ifndef ASMX64} // mormot.crypt.core.asmx64.inc has its own shrd-based version
 procedure _rshift1(var V: THash256Rec);
 var
   carry, temp: PtrUInt;
@@ -3576,7 +3576,7 @@ begin
   temp := V.Q[0];
   V.Q[0] := (temp shr 1) or carry;
 end;
-{$endif CPUX64}
+{$endif ASMX64}
 
 function _lshift1(var V: THash256Rec): PtrUInt;
 var
@@ -3693,7 +3693,7 @@ procedure Random128(iv, iv2: PAesBlock);
 var
   aes: PAesContext;
 begin
-  rnd128safe.Lock; // ensure thread safe with minimal contention
+  rnd128safe.Lock;                  // thread safe with minimal contention
   aes := @rnd128gen;
   if PPtrUInt(aes)^ = 0 then
     PAes(aes)^.EncryptInitRandom;   // initialize AES-128 (or AES-256 if HW AES)
@@ -3785,8 +3785,7 @@ begin
   result := (bits = 128) or (bits = 192) or (bits = 256);
 end;
 
-{$ifndef ASMINTEL}
-
+{$ifndef ASMINTELNOTPIC}
 procedure aesencryptpas(const ctxt: TAesContext; bi, bo: PBlock128);
 { AES_PASCAL version (c) Wolfgang Ehrhardt under zlib license:
  Permission is granted to anyone to use this software for any purpose,
@@ -3840,10 +3839,9 @@ begin
   bo[3] := ((sb[s3 and $ff]) xor (sb[s0 shr 8 and $ff]) shl 8 xor
      (sb[s1 shr 16 and $ff]) shl 16 xor (sb[s2 shr 24]) shl 24) xor pk[3];
 end;
+{$endif ASMINTELNOTPIC}
 
-{$endif ASMINTEL}
-
-{$ifndef ASMX86} // fallback for the PIC-incompatible i386 asm
+{$ifndef ASMX86NOTPIC} // fallback for the PIC-incompatible i386 asm
 
 procedure aesdecryptpas(const ctxt: TAesContext; bi, bo: PBlock128);
 var
@@ -3909,7 +3907,7 @@ begin
             pk[3];
 end;
 
-{$endif ASMX86}
+{$endif ASMX86NOTPIC}
 
 const
   // used by AES
@@ -4077,7 +4075,7 @@ begin
   include(ctx.Flags, aesInitialized);
   Nk := KeySize div 32;
   MoveFast(Key, ctx.RK, 4 * Nk);
-  {$ifdef ASMINTEL}
+  {$ifdef ASMINTELNOTPIC}
   ctx.DoBlock := @AesEncryptAsm;
   {$ifdef USEAESNI}
   if cfAESNI in CpuFeatures then
@@ -4119,7 +4117,7 @@ begin
         ctx.DoBlock := @aesencryptarm256;
     end;
   {$endif USEARMCRYPTO}
-  {$endif ASMINTEL}
+  {$endif ASMINTELNOTPIC}
   ctx.Rounds := 6 + Nk;
   ctx.KeyBits := KeySize;
   // Calculate encryption round keys
@@ -4170,7 +4168,7 @@ begin
   result := aesInitialized in ctx.Flags;
   if not result then
     exit; // e.g. invalid KeySize
-  {$ifdef ASMX86} // PIC-incompatible i386 asm
+  {$ifdef ASMX86NOTPIC} // PIC-incompatible i386 asm
   ctx.DoBlock := @aesdecrypt386;
   {$else}
   ctx.DoBlock := @aesdecryptpas;
@@ -4185,7 +4183,7 @@ begin
         ctx.DoBlock := @aesdecryptarm256;
     end;
   {$endif USEARMCRYPTO}
-  {$endif ASMX86}
+  {$endif ASMX86NOTPIC}
   {$ifdef USEAESNI}
   if aesNi in ctx.Flags then
   begin
@@ -5572,7 +5570,7 @@ var
   nonce: THash256;
   P: PByteArray;
 begin
-  result := ''; // e.g. MacSetNonce not supported
+  FastAssignNew(result); // e.g. MacSetNonce not supported
   // our non-standard mCfc/mOfc/mCtc modes with 256-bit crc32c
   if Encrypt then
   begin
@@ -5592,7 +5590,7 @@ begin
       rcd.crc := crc32c(VERSION, @rcd.nonce, CRCSIZ);
     end
     else
-      result := ''
+      FastAssignNew(result)
   end
   else
   begin
@@ -5614,7 +5612,7 @@ begin
       if not MacDecryptCheckTag(pcd^.mac) then
       begin
         FillZero(result);
-        result := '';
+        FastAssignNew(result);
       end;
   end;
 end;
@@ -5625,10 +5623,8 @@ class function TAesAbstract.MacEncrypt(const Data: RawByteString;
 var
   aes: TAesAbstract;
 begin
-  aes := Create(Key);
+  aes := Create(Key, 256, IV);
   try
-    if IV <> nil then
-      aes.IV := IV^;
     result := aes.MacAndCrypt(Data, Encrypt, IV = nil, Associated);
   finally
     aes.Free;
@@ -5641,10 +5637,8 @@ class function TAesAbstract.MacEncrypt(const Data: RawByteString;
 var
   aes: TAesAbstract;
 begin
-  aes := Create(Key);
+  aes := Create(Key, 128, IV);
   try
-    if IV <> nil then
-      aes.IV := IV^;
     result := aes.MacAndCrypt(Data, Encrypt, IV = nil, Associated);
   finally
     aes.Free;
@@ -5948,7 +5942,7 @@ var
   len: PtrInt;
   p: PAesBlock;
 begin
-  result := '';
+  FastAssignNew(result);
   if (self = nil) or
      (Input = '') then
     exit;
@@ -5972,7 +5966,7 @@ var
   len: PtrInt;
   p: PAesBlock;
 begin
-  result := '';
+  FastAssignNew(result);
   if (self = nil) or
      (Input = '') then
     exit;
@@ -7084,7 +7078,7 @@ var
   aes: TAesAbstract;
 begin
   if src = '' then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     aes := TAesFast[aesMode].Create(key, keySizeBits);
@@ -7210,8 +7204,8 @@ begin
     Result[0] := #11;
     PCardinal(@Result[1])^ :=
       ord('a') + ord('e') shl 8 + ord('s') shl 16 + ord('-') shl 24;
-    PCardinal(@Result[5])^ := PCardinal(SmallUInt32Utf8[KeyBits])^;
-    Result[8] := '-'; // SmallUInt32Utf8 put a #0 there
+    PCardinal(@Result[5])^ := UINT_999[KeyBits].TextLo;
+    Result[8] := '-'; // UINT_999[] put a #0 there
     PCardinal(@Result[9])^ := PCardinal(@AESMODE_TXT[Mode])^;
   end
   else
@@ -7305,7 +7299,7 @@ begin
         Data := DecryptPkcs7(Data, {ivatbeg=}true, {raiseexc=}true);
         if CompressSynLZ(Data, false) = '' then
         begin
-          result := '';
+          FastAssignNew(result);
           exit; // invalid content
         end;
       end;
@@ -7316,7 +7310,7 @@ begin
     on Exception do
     begin
       // e.g. ESynCrypto in DecryptPkcs7(Data)
-      result := '';
+      FastAssignNew(result);
       exit; // invalid content
     end;
   end;
@@ -7529,7 +7523,7 @@ var
   tmp: TByteDynArray;
   i: integer;
 begin
-  result := '';
+  FastAssignNew(result);
   if (self = nil) or
      (BufferBytes <= 0) then
     exit;
@@ -7579,7 +7573,7 @@ class function TAesPrngAbstract.AFUnsplit(const Split: RawByteString;
 var
   len, unsplit: cardinal;
 begin
-  result := '';
+  FastAssignNew(result);
   len := length(Split);
   inc(StripesCount);
   unsplit := len div cardinal(StripesCount);
@@ -7588,7 +7582,7 @@ begin
     exit;
   pointer(result) := FastNewString(unsplit);
   if not AFUnsplit(Split, pointer(result)^, unsplit) then
-    result := '';
+    FastAssignNew(result);
 end;
 
 class procedure TAesPrngAbstract.Fill(Buffer: pointer; Len: integer);
@@ -7665,7 +7659,7 @@ var
   data: THash512Rec;
   sha3: TSha3;
 begin
-  result := '';
+  FastAssignNew(result);
   if Len <= 0 then
     exit;
   // retrieve official "system" entropy (not for gesUserOnly)
@@ -7881,7 +7875,7 @@ end;
 var
   _h: record
     safe: TLightLock;
-    k: THash256;      // decoded local private key file
+    k: THash256;      // decoded local private key file (sensitive)
     mac: THmacSha256; // initialized from CryptProtectDataEntropy salt
   end;
 
@@ -7981,7 +7975,7 @@ var
   hmac: THmacSha256;
   secret: THash256;
 begin
-  result := '';
+  FastAssignNew(result);
   if Data = '' then
     exit;
   if IsZero(_h.k) then
@@ -8019,7 +8013,7 @@ end;
 // under Win32, with a Core i7 CPU: pure pascal: 152ms - x86: 112ms
 // under Win64, with a Core i7 CPU: pure pascal: 202ms - SSE4: 78ms
 
-{$ifdef ASMX86} // PIC-incompatible i386 asm
+{$ifdef ASMX86NOTPIC} // PIC-incompatible i386 asm
 
 procedure Sha256CompressPas(var Hash: TShaHash; Data: pointer);
 var
@@ -8144,18 +8138,18 @@ begin
   Sha256ProcessBlock(@W, Hash);
 end;
 
-{$endif CPUX86}
+{$endif ASMX86NOTPIC}
 
 procedure RawSha256Compress(var Hash; Data: pointer);
 begin
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   if K256Aligned <> nil then
     if cfSHA in CpuFeatures then
       Sha256ni(Data^, Hash, 1)   // Intel SHA HW opcodes
     else
       Sha256Sse4(Data^, Hash, 1) // Intel SSE4.2 asm
   else
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
   {$ifdef USEARMCRYPTO}
   if ShaArmAvailable then
     sha256_block_data_order(@Hash, Data, 1) // from sha256armv8.o
@@ -8212,7 +8206,7 @@ begin
         Data.Index := 0;
       end
       else
-        {$ifdef ASMX64} // try optimized Intel x86_64 asm over whole blocks
+        {$ifdef ASMX64NOTPIC} // try optimized Intel x86_64 asm over whole blocks
         if K256Aligned <> nil then
         begin
           if cfSHA in CpuFeatures then
@@ -8225,7 +8219,7 @@ begin
           Sha256CompressPas(Data.Hash, Buffer); // process on old CPU
         {$else}
         RawSha256Compress(Data.Hash, Buffer); // may be AARCH64 version
-        {$endif ASMX64}
+        {$endif ASMX64NOTPIC}
       dec(Len, bytes);
       inc(PByte(Buffer), bytes);
     end
@@ -8690,7 +8684,7 @@ const
     QWord($000000000000800A), QWord($800000008000000A), QWord($8000000080008081),
     QWord($8000000000008080), QWord($0000000080000001), QWord($8000000080008008));
 
-{$ifdef ASMINTEL}
+{$ifdef ASMINTELNOTPIC}
 
 procedure KeccakPermutation(A: PQWordArray);
 var
@@ -8698,7 +8692,7 @@ var
   C: array[0..4] of QWord;
   i: PtrInt;
 begin
-  {$ifdef ASMX64AVXNOCONST}
+  {$ifdef ASMX64AVX1}
   if (cpuAVX2 in X64CpuFeatures) and
      not (daKeccakAvx2 in DisabledAsm) then
   begin
@@ -8755,18 +8749,18 @@ begin
     A[24] := B[24];
   end
   else
-  {$endif ASMX64AVXNOCONST}
+  {$endif ASMX64AVX1}
     // regular pascal/IntelAsm code
     for i := 0 to high(cRoundConstants) do
     begin
       KeccakPermutationKernel(@B, A, @C);
       A[00] := A[00] xor cRoundConstants[i];
     end;
-  {$ifdef CPUX86}
+  {$ifdef ASMX86}
   asm
      emms // reset MMX state after use
   end;
-  {$endif CPUX86}
+  {$endif ASMX86}
 end;
 
 {$else}
@@ -8871,7 +8865,7 @@ begin
   end;
 end;
 
-{$endif ASMINTEL}
+{$endif ASMINTELNOTPIC}
 
 { TSha3Context }
 
@@ -9402,7 +9396,7 @@ var
   tmp: TSha256Digest;
   mac, first: THmacSha256; // re-use SHA context for best performance
 begin
-  result := '';
+  FastAssignNew(result);
   if (count = 0) or
      (count > 16 shl 20) or
      (destlen = 0) or
@@ -9505,7 +9499,7 @@ end;
 
 { ****************** Deprecated MD5 SHA-1 Algorithms }
 
-{$ifndef CPUINTEL}
+{$ifndef ASMINTEL}
 
 procedure MD5Transform(var buf: TMd5Buf; const in_: TMd5In);
 var
@@ -9781,7 +9775,7 @@ begin
   inc(buf[3], d);
 end;
 
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
 {$ifndef FPC} // this operation is an intrinsic with the FPC compiler
 function RolDWord(value: cardinal; count: integer): cardinal;
@@ -9988,8 +9982,7 @@ end;
 
 { TSha1 }
 
-{$ifndef CPUINTEL}
-
+{$ifndef ASMINTEL}
 procedure Sha1ExpandMessageBlocks(W: PCardinalArray; n: cardinal);
 var
   x: cardinal;
@@ -10003,8 +9996,7 @@ begin
     dec(n, 2);
   until n = 0;
 end;
-
-{$endif CPUINTEL}
+{$endif ASMINTEL}
 
 procedure Sha1CompressPas(var Hash: TShaHash; Data: PByteArray);
 var
@@ -10207,11 +10199,11 @@ begin
   // (in big endian format) and do a final compress
   PCardinal(@Data.Buffer[56])^ := bswap32(TQWordRec(Data.MLen).h);
   PCardinal(@Data.Buffer[60])^ := bswap32(TQWordRec(Data.MLen).L);
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   if cfSHA in CpuFeatures then
     Sha1ni(Data.Buffer, Data.Hash, 64)     // Intel SHA HW opcodes
   else
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
     Sha1CompressPas(Data.Hash, @Data.Buffer); // regular code
   // Hash -> Digest to little endian format
   bswap160(@Data.Hash, @Digest);
@@ -10265,14 +10257,14 @@ begin
       end
       else
         // direct compression to avoid uneeded temporary copy
-        {$ifdef ASMX64}
+        {$ifdef ASMX64NOTPIC}
         if cfSHA in CpuFeatures then
         begin
           aLen := Len and (not 63);
           Sha1ni(Buffer^, Data.Hash, aLen);    // Intel SHA HW opcodes
         end
         else
-        {$endif ASMX64}
+        {$endif ASMX64NOTPIC}
           Sha1CompressPas(Data.Hash, Buffer); // regular code
       dec(Len, aLen);
       inc(PByte(Buffer), aLen);
@@ -10293,11 +10285,11 @@ end;
 
 procedure RawSha1Compress(var Hash; Data: pointer);
 begin
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   if cfSHA in CpuFeatures then
     Sha1ni(Data^, Hash, 64)     // Intel SHA HW opcodes
   else
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
     Sha1CompressPas(TShaHash(Hash), Data); // regular code
 end;
 
@@ -10513,7 +10505,7 @@ begin
   {$ifndef USEAESNI}
   ComputeAesStaticTables; // ARM or pure pascal would need those tables anyway
   {$endif USEAESNI}
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   {$ifdef CRC32C_X64}
   if (cfSSE42 in CpuFeatures) and
      (cfAesNi in CpuFeatures) and
@@ -10540,7 +10532,7 @@ begin
         exclude(CpuFeatures, cfSHA); // SHA256 HW opcodes seem not available
       end;
   end;
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
   {$ifdef USEAESNIHASH}
   {$ifdef OSWINDOWS}
   if not IsWow64Emulation then // PRISM seems inconsistent with only few aesenc
@@ -10611,10 +10603,10 @@ end;
 
 procedure FinalizeUnit;
 begin
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   if K256Aligned <> @K256 then
     FreeMemAligned(K256Aligned, SizeOf(K256Aligned^));
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
   {$ifdef USEAESNIHASH}
   if AesNiHashKey <> nil then
     FreeMemAligned(AesNiHashKey, SizeOf(AesNiHashKey^));

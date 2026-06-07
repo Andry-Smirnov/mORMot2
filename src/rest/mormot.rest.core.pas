@@ -39,6 +39,7 @@ uses
   mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
+  mormot.core.fmt,
   mormot.core.threads,
   mormot.core.perf,
   mormot.crypt.core,
@@ -1118,10 +1119,11 @@ type
     // - warning: you should re-call SetPassword(aMutualAuth=true) when this
     // LogonName field is changed, since PasswordHashHexa is bound to LogonName
     // - so in this field, you may encounter such values:
-    // $ 0123abc.....ffee = 256-bit hexa of mORMot 1 SHA256('salt'+password)
-    // $ bc01a89.....2b07 = HA0 = Hash(username:realm:password) for DIGEST
-    // $ $mcf$params$checkum = standard "Modular Crypt" hash
-    // $ #mcf$params$scramkeys = SCRAM-like "Modular" hash with mutual auth
+    // $ '0123abc.....ffee' = 256-bit hexa of mORMot 1 SHA256('salt'+password)
+    // $ 'bc01a89.....2b07' = HA0 = Hash(username:realm:password) for DIGEST
+    // $ '$mcf$params$checkum' = standard "Modular Crypt" hash
+    // $ '#mcf$params$scramkeys' = SCRAM-like "Modular" hash with mutual auth
+    // $ '' for password-less authentication e.g. with GSSAPI/SSPI Kerberos
     property PasswordHashHexa: RawUtf8
       index 192 read fPasswordHashHexa write fPasswordHashHexa;
     /// the associated access rights of this user
@@ -2415,8 +2417,8 @@ class function TRest.CreateFromFile(aModel: TOrmModel;
   const aJsonFile: TFileName; aServerHandleAuthentication: boolean;
   aKey: cardinal): TRest;
 begin
-  result := CreateFromJson(
-    aModel, RawUtf8FromFile(aJsonFile), aServerHandleAuthentication, aKey);
+  result := CreateFromJson(aModel, JsonNormalizeFromFile(aJsonFile),
+    aServerHandleAuthentication, aKey);
 end;
 
 procedure TRest.ServicesRelease(Caller: TServiceContainer);
@@ -3961,7 +3963,7 @@ var
   up: TByteToAnsiChar;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else if fInHeaderLastName = HeaderName then
     result := fInHeaderLastValue
   else
@@ -4089,7 +4091,7 @@ begin
   if server = '' then
     server := crc32cUtf8ToHex(Call^.OutBody);
   server := Join(['"', server, '"']);
-  if client <> server then
+  if client <> server then // ETAG value is case sensitive by RFV 7232
     AppendLine(Call^.OutHead, ['ETag: ', server])
   else
   begin
@@ -4247,10 +4249,12 @@ begin
         AddDirect('[');
         repeat
           AddJsonEscapeVarRec(v);
+          dec(n);
+          if n = 0 then
+            break;
           AddComma;
           inc(v);
-          dec(n);
-        until n = 0;
+        until false;
         AddDirect(']');
       end;
       AddDirect('}');

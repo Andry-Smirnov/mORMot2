@@ -1819,113 +1819,113 @@ end;
 
 procedure memcmp;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_memcmp
 end;
 
 procedure __ms_vsnprintf;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_vsnprintf
 end;
 
 procedure printf;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_printf
 end;
 
 procedure sprintf;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_sprintf
 end;
 
 procedure fprintf;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_fprintf
 end;
 
 procedure strchr;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_strchr
 end;
 
 procedure strcspn;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_strcspn
 end;
 
 procedure strrchr;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp mormot.lib.static.strrchr
 end;
 
 procedure putchar;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp mormot.lib.static.putchar
 end;
 
 procedure __strtod;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_strtod
 end;
 
 procedure strcpy;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_strcpy
 end;
 
 procedure fwrite;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp mormot.lib.static.fwrite
 end;
 
 procedure memchr;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_memchr
 end;
 
 procedure log;
 asm
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   .noframe
-  {$endif CPUX64}
+  {$endif ASMX64}
   jmp libc_log // Delphi Win64 ln() is buggy -> redirect to msvcrt
 end;
 
@@ -1957,7 +1957,7 @@ begin
   result := mormot.core.base.StrComp(p1, p2);
 end;
 
-{$ifdef CPUX64}
+{$ifdef ASMX64}
 
 procedure ___chkstk_ms;
 asm
@@ -2021,7 +2021,7 @@ asm
   jmp udivmoddi4
 end;
 
-{$endif CPUX64}
+{$endif ASMX64}
 
 function atoi(const str: PUtf8Char): PtrInt; cdecl;
 begin
@@ -3420,8 +3420,8 @@ end;
 
 function TJSContext.FromW(P: PWideChar; Len: PtrInt): JSValue;
 var
+  W: PtrInt;
   tmp: TSynTempBuffer; // avoid most memory allocations
-  W: integer;
 begin
   if (P = nil) or (Len = 0) then
     result := From(nil, 0)
@@ -3539,7 +3539,7 @@ var
   v: TVarData absolute val;
 begin
   vt := v.VType;
-  case vt of
+  case vt of // most simple types with a O(1) case jmp
     varEmpty:
       {%H-}result.Empty;
     varNull:
@@ -3576,41 +3576,30 @@ begin
       result.FromFloat(v.VCurrency);
     varDate:
       FromDate(v.VDate, result);
-    varString:
-      result := From(RawUtf8(v.VString));
-    {$ifdef HASVARUSTRING}
-    varUString:
-      result := FromW(v.VAny, length(UnicodeString(v.VAny)));
-    {$endif HASVARUSTRING}
     varOleStr:
       result := FromW(v.VAny, length(WideString(v.VAny)));
   else
-    if SetVariantUnRefSimpleValue(val, tmp{%H-}) then
-      // simple varByRef
-      FromVariant(Variant(tmp), result)
-    else if vt = varVariantByRef then
-      // complex varByRef
-      FromVariant(PVariant(v.VPointer)^, result)
-    else if vt = varStringByRef then
-      result := From(PRawUtf8(v.VString)^)
-    else if vt = varOleStrByRef then
-      result := FromW(PPointer(v.VAny)^, length(PWideString(v.VAny)^))
-    else
+    if vt = varString then
+      result := From(RawUtf8(v.VString))
     {$ifdef HASVARUSTRING}
-    if vt = varUStringByRef then
-      result := FromW(PPointer(v.VAny)^, length(PUnicodeString(v.VAny)^))
-    else
+    else if vt = varUString then
+      result := FromW(v.VAny, length(UnicodeString(v.VAny)))
     {$endif HASVARUSTRING}
-      begin
-        // not recognizable vt -> seralize as JSON to handle also custom types
-        tmp.VAny := nil;
-        try
-          _VariantSaveJson(val, twJsonEscape, RawUtf8(tmp.VAny));
-          FromJson(RawUtf8(tmp.VAny), result, {exceptonerror=}false);
-        finally
-          FastAssignNew(tmp.VAny);
-        end;
+    else if vt and varByRef = 0 then
+    begin
+      // not recognizable vt -> seralize as JSON to handle also custom types
+      tmp.VAny := nil;
+      try
+        _VariantSaveJson(val, twJsonEscape, RawUtf8(tmp.VAny));
+        FromJson(RawUtf8(tmp.VAny), result, {exceptonerror=}false);
+      finally
+        FastAssignNew(tmp.VAny);
       end;
+    end
+    else if vt = varVariantByRef then
+      FromVariant(PVariant(v.VPointer)^, result)
+    else
+      FromVariant(SetVarDataUnRef(vt, @v, tmp)^, result);
   end;
 end;
 

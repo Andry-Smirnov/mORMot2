@@ -4724,9 +4724,7 @@ var
 begin
   if BEnd - B <= 24 then
     Save;
-  {$ifndef ASMINTEL} // our StrInt32 asm has less CPU cache pollution
   if cardinal(Value) < 1000 then
-  {$endif ASMINTEL}
     if cardinal(Value) < 10 then
     begin
       B^ := AnsiChar(Value + 48);
@@ -4737,13 +4735,11 @@ begin
       PWord(B)^ := TwoDigitLookupW[Value];
       inc(B, 2);
     end
-    {$ifndef ASMINTEL}
     else
     begin
-      PCardinal(B)^ := PCardinal(SmallUInt32Utf8[Value])^;
+      PCardinal(B)^ := UINT_999[Value].TextLo;
       inc(B, 3);
     end
-    {$endif ASMINTEL}
   else
   begin
     P := StrInt32(@t[23], Value);
@@ -5551,7 +5547,7 @@ begin
     end
     else
     begin
-      PCardinal(B)^ := PCardinal(SmallUInt32Utf8[Value])^ + 32 shl 24;
+      PCardinal(B)^ := UINT_999[Value].TextLo + 32 shl 24;
       inc(B, 4);
     end
   else
@@ -6054,15 +6050,15 @@ end;
 const
   { collection of flags defining various characteristics of the font
     see PDF Reference 1.3 #5.7.1 }
-  PDF_FONT_FIXED_WIDTH = 1;
-  PDF_FONT_SERIF = 2;
-  PDF_FONT_SYMBOLIC = 4;
-  PDF_FONT_SCRIPT = 8;
-  PDF_FONT_STD_CHARSET = 32;
-  PDF_FONT_ITALIC = 64;
-  PDF_FONT_ALL_CAP = 65536;
-  PDF_FONT_SMALL_CAP = 131072;
-  PDF_FONT_FORCE_BOLD = 262144;
+  PDF_FONT_FIXED_WIDTH = 1 shl 0;
+  PDF_FONT_SERIF       = 1 shl 1;
+  PDF_FONT_SYMBOLIC    = 1 shl 2;
+  PDF_FONT_SCRIPT      = 1 shl 3;
+  PDF_FONT_STD_CHARSET = 1 shl 5;
+  PDF_FONT_ITALIC      = 1 shl 6;
+  PDF_FONT_ALL_CAP     = 1 shl 16;
+  PDF_FONT_SMALL_CAP   = 1 shl 17;
+  PDF_FONT_FORCE_BOLD  = 1 shl 18;
 
 type
   /// a Ttf name record used for the 'name' Format 4 table
@@ -7608,7 +7604,7 @@ end;
 
 function TPdfDocument.GetTrueTypeFontIndex(const AName: RawUtf8): integer;
 begin
-  if StrIComp(pointer(fTrueTypeFontLastName), pointer(AName)) = 0 then
+  if StrIEqual(pointer(fTrueTypeFontLastName), pointer(AName)) then
   begin
     result := fTrueTypeFontLastIndex; // simple but efficient cache
     exit;

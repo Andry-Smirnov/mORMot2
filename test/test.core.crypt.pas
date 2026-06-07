@@ -74,6 +74,8 @@ type
     procedure _AES_GCM;
     /// RC4 encryption function
     procedure _RC4;
+    /// BlowFish CTR mode + key-schedule regression checks
+    procedure _BlowFish;
     /// pure pascal RSA tests
     procedure _RSA;
     /// X509 Certificates
@@ -259,14 +261,14 @@ procedure TTestCoreCrypto._SHA1;
 
 begin
   DoTest;
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   if cfSHA in CpuFeatures then
   begin
     Exclude(CpuFeatures, cfSHA); // validate regular code without SHA-NI
     DoTest;
     Include(CpuFeatures, cfSHA);
   end;
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
   // see https://datatracker.ietf.org/doc/html/rfc6070
   Rfc(saSha1, 'password', 'salt', 1, 20,
       '0c60c80f961f0e71f3a9b524af6012062fe037a6', '1 round');
@@ -373,7 +375,7 @@ procedure TTestCoreCrypto._SHA256;
 
 begin
   DoTest;
-  {$ifdef ASMX64}
+  {$ifdef ASMX64NOTPIC}
   if cfSSE41 in CpuFeatures then // validate regular code without Sha256Sse4()
   begin
     Exclude(CpuFeatures, cfSSE41);
@@ -386,7 +388,7 @@ begin
     DoTest;
     Include(CpuFeatures, cfSHA);
   end;
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
 // https://github.com/brycx/Test-Vector-Generation/blob/master/PBKDF2/pbkdf2-hmac-sha2-test-vectors.md
   Rfc(saSha224, 'password', 'salt', 1, 20,
       '3c198cbdb9464b7857966bd05b7bc92bc1cc4e6e', '1 round');
@@ -464,6 +466,56 @@ begin
       rc4.EncryptBuffer(pointer(d), pointer(d), len); // decrypt
       check(s = d);
     end;
+  end;
+end;
+
+procedure TTestCoreCrypto._BlowFish;
+var
+  bf: TBlowFishCtr;
+  data, enc1, enc2: RawByteString;
+  salt, saltCopy: THash128Rec;
+begin
+  // regression for the rodata-salt corruption in BlowFishKeySetup() - see the
+  // commit that introduced this test. BlowFishPrepareKey() now returns the
+  // big-endian salt via an out-parameter, so the caller's Salt^ buffer
+  // (possibly @BLOWFISHCTR_DEFAULTSALT in .rodata on Delphi POSIX, or any
+  // read-only/const buffer) is never mutated.
+  data := 'mORMot2 BlowFish rodata-salt regression test vector payload';
+  // 1. two TBlowFishCtr.Create('secret') with no explicit Salt must produce
+  //    the same key schedule, i.e. encrypt identically: catches the silent
+  //    BLOWFISHCTR_DEFAULTSALT mutation that used to happen on Delphi
+  //    Windows (typed const in .data) and segfault on Delphi POSIX (typed
+  //    const in .rodata)
+  FastNewRawByteString(enc1, length(data));
+  FastNewRawByteString(enc2, length(data));
+  bf := TBlowFishCtr.Create('secret');
+  try
+    bf.EncryptBuffer(pointer(data), pointer(enc1), length(data));
+  finally
+    bf.Free;
+  end;
+  bf := TBlowFishCtr.Create('secret');
+  try
+    bf.EncryptBuffer(pointer(data), pointer(enc2), length(data));
+  finally
+    bf.Free;
+  end;
+  CheckEqual(enc1, enc2, 'BLOWFISHCTR_DEFAULTSALT stable');
+  // 2. a caller-supplied salt buffer must also remain byte-identical across
+  //    Create() (BCrypt path with Cost > 0 takes a different code branch)
+  RandomBytes(@salt, SizeOf(salt));
+  saltCopy := salt;
+  bf := TBlowFishCtr.Create('secret', 0, @salt);
+  try
+    Check(CompareMem(@salt, @saltCopy, SizeOf(salt)), 'caller salt unchanged');
+  finally
+    bf.Free;
+  end;
+  bf := TBlowFishCtr.Create('secret', 4, @salt); // BCrypt expensive setup
+  try
+    Check(CompareMem(@salt, @saltCopy, SizeOf(salt)), 'caller salt unchanged (bcrypt)');
+  finally
+    bf.Free;
   end;
 end;
 
@@ -601,22 +653,22 @@ procedure TTestCoreCrypto._SHA512;
 
 begin
   DoTest;
-  {$ifdef ASMX86}
+  {$ifdef ASMX86NOTPIC}
   if cfSSSE3 in CpuFeatures then // validate regular code without sha512_compress()
   begin
     Exclude(CpuFeatures, cfSSSE3);
     DoTest;
     Include(CpuFeatures, cfSSSE3);
   end;
-  {$endif ASMX86}
-  {$ifdef ASMX64}
+  {$endif ASMX86NOTPIC}
+  {$ifdef ASMX64NOTPIC}
   if cfSSE41 in CpuFeatures then // validate regular code without sha512_sse4()
   begin
     Exclude(CpuFeatures, cfSSE41);
     DoTest;
     Include(CpuFeatures, cfSSE41);
   end;
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
 // https://github.com/brycx/Test-Vector-Generation/blob/master/PBKDF2/pbkdf2-hmac-sha2-test-vectors.md
   Rfc(saSha384, 'password', 'salt', 1, 20,
       'c0e14f06e49e32d73f9f52ddf1d0c5c719160923', '1 round');
@@ -762,14 +814,14 @@ procedure TTestCoreCrypto._SHA3;
 
 begin
   DoTest;
-  {$ifdef ASMX64AVXNOCONST}
+  {$ifdef ASMX64AVX1}
   if cpuAVX2 in X64CpuFeatures then // validate without KeccakPermutationAvx2()
   begin
     Exclude(X64CpuFeatures, cpuAVX2);
     DoTest;
     Include(X64CpuFeatures, cpuAVX2);
   end;
-  {$endif ASMX64AVXNOCONST}
+  {$endif ASMX64AVX1}
 end;
 
 procedure TTestCoreCrypto._PRNG;
@@ -2516,13 +2568,13 @@ begin
   SetLength(tmp2, length(tmp));
   L := 0;
   n := 50;
-  {$ifdef ASMX64AVXNOCONST}
+  {$ifdef ASMX64AVX1}
   if cfAVX2 in CpuFeatures then
   begin
     n := n * 10;
     msg := ' avx2';
   end;
-  {$endif ASMX64AVXNOCONST}
+  {$endif ASMX64AVX1}
   for i := 0 to 20 do
   begin
     enc.Resume;
@@ -2680,13 +2732,13 @@ var
   Tags: array[0..2, 7..9] of THash256DynArray; // Tags[k,m]
   h32: array[0..2, 0..9] of TCardinalDynArray;
   tab: PCardinalArray;
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   backup: TIntelCpuFeatures;
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
 begin
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   backup := CpuFeatures;
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   CheckEqual(SizeOf(TMd5Buf), SizeOf(TMd5Digest));
   CheckEqual(1 shl AesBlockShift, SizeOf(TAesBlock));
   CheckEqual(SizeOf(TAes), AES_CONTEXT_SIZE);
@@ -3017,7 +3069,7 @@ begin
           end
         end;
       end;
-    {$ifdef CPUINTEL}
+    {$ifdef ASMINTEL}
     if noaesni then
     begin
       AddConsole('cypher with AES-NI: %, without: %',
@@ -3026,11 +3078,11 @@ begin
     end;
     if HasHWAes then
       Exclude(CpuFeatures, cfAESNI);
-    {$endif CPUINTEL}
+    {$endif ASMINTEL}
   end;
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   CpuFeatures := backup;
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   // see https://datatracker.ietf.org/doc/html/rfc3962#appendix-B
   st := mormot.core.text.HexToBin('636869636b656e207465726979616b69');
   CheckEqual(length(st), 16);
@@ -3251,9 +3303,9 @@ const
         IV_Len, aLen, cLen, tag, avx), 'FullEncryptAndAuthenticate #%', [tn]);
       CheckUtf8(CompareMem(@tag, ptag, tlen), 'Tag #%', [tn]);
       CheckUtf8(CompareMem(@ct, ctp, cLen), 'Encoded #%', [tn]);
-      {$ifndef CPUX64ASM}
+      {$ifndef ASMX64AVX0}
       break;
-      {$endif CPUX64ASM}
+      {$endif ASMX64AVX0}
     end;
   end;
 
@@ -3384,10 +3436,9 @@ var
   h128, ref128: THash128;
   bak: THash512;
 begin
-  for i := 0 to high(bytes) do
-    bytes[i] := i;
   // validate AesNiHash128() against reference vectors
   // - should be done FIRST with no process in the background
+  FillIncreasingB(@bytes, 0, high(bytes));
   if Assigned(AesNiHash128) and
      not CheckFailed(not fBackgroundRun.Waiting, 'no background run') then
   begin
@@ -3679,11 +3730,19 @@ const
     $18, $94, $1a, $0e, $92, $78, $d6, $d9, $78, $f3, $b5, $bb, $a7, $a1, $99,
     $50, $c6, $c1, $2c, $78, $6e, $26, $ba, $ec, $ac, $d9, $4d, $0b, $cb, $6f,
     $56, $87, $00, $00, $00, $01);
+  // $ klist
+  // Ticket cache: FILE:/tmp/krb5cc_1000
+  // Default principal: abouchez@AD.TRANQUIL.IT
+  CCACHE_REF: array[0 .. 63] of byte = ( // truncated for safety
+    $05, $04, $00, $0c, $00, $01, $00, $08, $00, $00, $00, $00, $00, $00, $00, $00,
+    $00, $00, $00, $01, $00, $00, $00, $01, $00, $00, $00, $0e, $41, $44, $2e, $54,
+    $52, $41, $4e, $51, $55, $49, $4c, $2e, $49, $54, $00, $00, $00, $08, $61, $62,
+    $6f, $75, $63, $68, $65, $7a, $00, $00, $00, $01, $00, $00, $00, $01, $00, $00);
 
 procedure TTestCoreCrypto._TKerberosKeyTab;
 var
   bin, bin2, password: RawByteString;
-  hex: RawUtf8;
+  hex, realm: RawUtf8;
   kt, kt2: TKerberosKeyTab;
   ktg: TKerberosKeyTabGenerator;
   a: TSignAlgo;
@@ -3843,7 +3902,7 @@ begin
     if CheckEqual(length(ktg.Entry), 2) then
     begin
       CheckHash(ktg.Entry[1].Key, $D101D374);
-      Check(ktg.Entry[1].Timestamp > 1750947820);
+      Check(ktg.Entry[0].Timestamp > 1750947820);
       Check(ktg.Entry[1].Timestamp > 1750947820);
       Check(UnixTimeUtc - ktg.Entry[0].Timestamp < 2, 'UnixTimeUtc');
       ktg.Entry[0].Timestamp := 1750947820; // as in KEYTAB_REF
@@ -3856,6 +3915,12 @@ begin
   finally
     ktg.Free;
   end;
+  // validate ccache file parsing
+  CheckEqual(BufferCcachePrincipal('', @realm), '');
+  CheckEqual(realm, '');
+  FastSetRawByteString(bin, @CCACHE_REF, SizeOf(CCACHE_REF));
+  CheckEqual(BufferCcachePrincipal(bin, @realm), 'abouchez@AD.TRANQUIL.IT');
+  CheckEqual(realm, 'AD.TRANQUIL.IT');
 end;
 
 procedure TTestCoreCrypto.CatalogRunAsym(Context: TObject);
@@ -4534,7 +4599,7 @@ begin
   {$endif USE_OPENSSL}
   DoEcc(TCryptPublicKeyEcc);
   alg := TCryptAsym.Instances;
-  //fCatalogAllGenerate := SystemInfo.dwNumberOfProcessors > 8; // not worth it
+  //fCatalogAllGenerate := CpuThreads > 8; // not worth it
   for a := 0 to high(alg) do
   begin
     asy := alg[a] as TCryptAsym;

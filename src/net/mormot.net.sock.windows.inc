@@ -10,7 +10,6 @@
 
 uses
   Windows,
-  mormot.core.os.security,
   mormot.lib.sspi; // for Low-Level SSPI/SChannel Functions
 
 
@@ -81,42 +80,29 @@ const
   }
 
 type
-  PInAddr = ^in_addr;
-  in_addr = packed record
-    case integer of
-      0: (S_bytes: packed array[0..3] of byte);
-      1: (S_addr: TNetIP4);
-  end;
-
-  PSockAddrIn = ^sockaddr_in;
-  sockaddr_in = packed record
+  TSockAddrIn = packed record
     case integer of
       0: (sin_family: word;
-          sin_port: word;
-          sin_addr: in_addr;
-          sin_zero: array[0..7] of AnsiChar);
-      1: (sa_family: word;
-          sa_data: array[0..13] of AnsiChar)
+          sin_port:   word;
+          sin_addr:   TNetIP4;
+          sin_zero:   array[0..7] of AnsiChar);
+      1: (sa_family:  word;
+          sa_data:    array[0..13] of AnsiChar)
   end;
+  PSockAddrIn = ^TSockAddrIn;
 
-  PInAddr6 = ^in6_addr;
-  in6_addr = packed record
-    case integer of
-      0: (S6_addr:   THash128);
-      1: (u6_addr8:  packed array[0..15] of byte);
-      2: (u6_addr16: packed array[0..7]  of word);
-      3: (u6_addr32: packed array[0..3]  of integer);
-  end;
-
-  PSockAddrIn6 = ^sockaddr_in6;
-  sockaddr_in6 = packed record
+  TSockAddrIn6 = packed record
     sin6_family:   word;     // AF_INET6
     sin6_port:     word;     // Transport level port number
     sin6_flowinfo: cardinal; // IPv6 flow information
-    sin6_addr:     in6_addr; // IPv6 address
-    sin6_scope_id: cardinal; // Scope Id: IF number for link-local
-                             //           SITE id for site-local
+    sin6_addr:     TNetIP6; // IPv6 address
+    sin6_scope_id: cardinal; // IF number for link-local, SITE id for site-local
   end;
+  PSockAddrIn6 = ^TSockAddrIn6;
+
+  // structure used by kernel to store most addresses
+  TSockAddr = TSockAddrIn;
+  PSockAddr = ^TSockAddr;
 
 const
   INADDR_ANY       = $00000000;
@@ -222,12 +208,6 @@ const
   PF_INET         = AF_INET;
   PF_INET6        = AF_INET6;
   PF_MAX          = AF_MAX;
-
-type
-  // Structure used by kernel to store most addresses
-  PSockAddr = ^TSockAddr;
-  TSockAddr = sockaddr_in;
-  sockaddr = sockaddr_in; // as in POSIX
 
 type
   PAddrInfo = ^TAddrInfo;
@@ -567,6 +547,11 @@ begin
   FillCharFast(Addr, SizeOf(Addr), 0);
 end; // some obscure Windows docs seem to state that zeroing is expected
 
+procedure TNetAddr.SetFamily(fam: cardinal);
+begin
+  PSockAddr(@Addr)^.sin_family := fam;
+end;
+
 function TNetAddr.SetFrom(const address, addrport: RawUtf8;
   layer: TNetLayer): TNetResult;
 var
@@ -635,6 +620,45 @@ end;
 procedure TNetSocketWrap.SetCork(cork: boolean);
 begin
   // do nothing on Windows
+end;
+
+type
+  TTCPKeepAlive = record
+    onoff: cardinal;
+    keepalivetime: cardinal;
+    keepaliveinterval: cardinal;
+  end;
+const
+  IOC_IN             = DWORD($80000000);
+  IOC_VENDOR         = DWORD($18000000);
+  SIO_KEEPALIVE_VALS = IOC_IN or IOC_VENDOR or 4;
+
+  TCP_KEEPIDLE  = 3;
+  TCP_KEEPINTVL = 17;
+  TCP_KEEPCNT   = 16;
+
+procedure TNetSocketWrap.SetKeepAliveTcp(idle, intvl, cnt: cardinal);
+var
+  ka: TTCPKeepAlive;
+  ret: DWORD;
+  s: TSocket;
+begin
+  s := TSocket(@self);
+  // first try the newest API available
+  if (OSVersion32.win >= wEleven) or // Windows 11 or Windows Server 2019
+     ((OSVersion32.win in [wTen, wTen_64]) and // Windows 10 1709 (16299)
+      (OSVersion32.winbuild >= 16299)) then
+    if setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, @idle, SizeOf(idle)) = NO_ERROR then
+    begin
+      setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, @intvl, SizeOf(intvl));
+      setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT,   @cnt, SizeOf(cnt));
+      exit;
+    end;
+  // fallback to SIO_KEEPALIVE_VALS for Windows 7/8/2016 - cnt not handled
+  ka.onoff := 1;
+  ka.keepalivetime := idle * 1000;
+  ka.keepaliveinterval := intvl * 1000;
+  WSAIoctl(s, SIO_KEEPALIVE_VALS, @ka, SizeOf(ka), nil, 0, @ret, nil, nil);
 end;
 
 const
@@ -972,7 +996,7 @@ var
   GetBestInterface: function(dwDestAddrIPv4: cardinal;
     var pdwBestIfIndex: DWord): DWord; stdcall;
 
-function _GetDnsAddresses(usePosixEnv, getAD: boolean): TRawUtf8DynArray;
+procedure _GetDnsAddresses(usePosixEnv, getAD: boolean; var result: TRawUtf8DynArray);
 var
   n, l: PtrInt;
   siz: ULONG;
@@ -1087,9 +1111,9 @@ begin
               if b <= 32 then
                 b := IP4Netmask(b)
               else
-                b := IP4Mask(a^.Address.lpSockaddr^.sin_addr.S_addr);
+                b := IP4Mask(a^.Address.lpSockaddr^.sin_addr);
               IP4Text(@b, m^.NetMask);
-              b := a^.Address.lpSockaddr^.sin_addr.S_addr or (not b);
+              b := a^.Address.lpSockaddr^.sin_addr or (not b);
               IP4Text(@b, m^.Broadcast);
               break; // we found the first IPv4 network information
             end;
@@ -1172,7 +1196,7 @@ var
   PhyAddrLen: Longword;
   pMacAddr: array[0..7] of byte;
 begin
-  result := '';
+  FastAssignNew(result);
   if NetIsIP4(pointer(IP), @dwRemoteIP) and
      DelayedProc(SendARP, iphlpapiDll, 'iphlpapi.dll', 'SendARP') then
   begin
@@ -1501,7 +1525,7 @@ end;
 constructor TWinIocp.Create(processing: integer; options: TWinIocpOptions);
 begin
   if processing = 0 then
-    processing := SystemInfo.dwNumberOfProcessors;
+    processing := CpuThreads;
   fIocp := IocpCreate(INVALID_HANDLE_VALUE, 0, nil, processing);
   if fIocp <= 0 then
     RaiseLastError('TWinIocp: CreateIoCompletionPort', EWinIocp);
@@ -2630,10 +2654,12 @@ end;
 function GetExtensionFunc(sock: TSocket; const id: TGuid): pointer;
 var
   ret: cardinal;
+  res: pointer; // safer with an explicit local variable
 begin
-  result := nil;
   if WSAIoctl(sock, SIO_GET_EXTENSION_FUNCTION_POINTER, @id, sizeof(id),
-      @result, SizeOf(result), @ret, nil, nil) <> 0 then
+      @res, SizeOf(res), @ret, nil, nil) = 0 then
+    result := res
+  else
     result := nil;
 end;
 

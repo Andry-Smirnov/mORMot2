@@ -50,10 +50,9 @@ interface
   {$else not FPC}
     {$ifdef WIN32}
       {$define ZLIBSTATIC} // Delphi Win32: our static .obj
+    {$else}
+      {$define ZLIBRTL}    // system.zlib.pas from Delphi RTL is good enough
     {$endif WIN32}
-    {$ifdef WIN64}
-      {$define ZLIBRTL}    // Delphi Win64: system.zlib.pas from Delphi RTL
-    {$endif WIN64}
   {$endif FPC}
 
 {$ifend}
@@ -1049,18 +1048,21 @@ function UncompressMem(src, dst: pointer; srcLen, dstLen: PtrInt;
 var
   dec: PLibDeflateDecompressor; // note: instances should not be cached/reused
   res: TLibDeflateResult;
+  n: PtrInt; // safer with a local transient variable
 begin
   dec := libdeflate_alloc_decompressor; // alloc when needed
   if dec = nil then
     raise EZLib.Create('UncompressMem: libdeflate_alloc_decompressor failed');
+  n := 0;
   if ZlibFormat then
-    res := libdeflate_zlib_decompress(dec, src, srcLen, dst, dstLen, @result)
+    res := libdeflate_zlib_decompress(dec, src, srcLen, dst, dstLen, @n)
   else
-    res := libdeflate_deflate_decompress(dec, src, srcLen, dst, dstLen, @result);
+    res := libdeflate_deflate_decompress(dec, src, srcLen, dst, dstLen, @n);
   libdeflate_free_decompressor(dec);
   if res <> LIBDEFLATE_SUCCESS  then
     raise EZLib.CreateFmt('UncompressMem: libdeflate=%s',
       [GetEnumNameRtti(TypeInfo(TLibDeflateResult), ord(res))^]);
+  result := n;
 end;
 
 {$else}
@@ -1104,7 +1106,7 @@ function CompressStream(src: pointer; srcLen: integer; tmp: TStream;
 var
   z: TZLib;
   code: integer;
-  temp: array[word] of word; // 128KB is good enough (fine for IIS e.g.)
+  temp: TBuffer128K; // seems good enough (fine for IIS e.g.)
 begin
   z.Init(src, srcLen, tmp, nil, @temp, SizeOf(temp), TempBufSize);
   if z.CompressInit(CompressionLevel, ZlibFormat) then
@@ -1125,7 +1127,7 @@ function UncompressStream(src: pointer; srcLen: integer; tmp: TStream;
 var
   z: TZLib;
   code: integer;
-  temp: array[word] of word; // 128KB
+  temp: TBuffer128K;
 begin
   z.Init(src, srcLen, tmp, checkCRC, @temp, SizeOf(temp), TempBufSize);
   if z.UncompressInit(ZlibFormat) then
@@ -1150,7 +1152,7 @@ begin
   if (src = nil) or
      (srcLen <= 0) then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   s := TRawByteStringStream.Create;
@@ -1178,7 +1180,7 @@ begin
   if (src = nil) or
      (srcLen <= 0) then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   s := TRawByteStringStream.Create;

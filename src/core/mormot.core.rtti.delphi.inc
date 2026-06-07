@@ -138,7 +138,7 @@ begin
     result := @NULCHAR;
 end;
 
-{$ifdef CPUX86} // Delphi is not efficient when inlining code :(
+{$ifdef ASMX86} // Delphi is not efficient when inlining this code :(
 
 function GetEnumName(aTypeInfo: PRttiInfo; aIndex: integer): PShortString;
 asm     // eax=aTypeInfo edx=aIndex
@@ -389,12 +389,12 @@ function TRttiInfo.Name: PShortString;
 begin
   result := pointer(@self);
   if result <> nil then
-    if result <> TypeInfo(RawUtf8) then
-      result := @RawName   // as stored in RTTI
+    if result <> TypeInfo(RawUtf8) then // = TypeInfo(Utf8String)
+      result := @RawName                // as stored in RTTI
     else
-      result := @UTF8_NAME // instead of 'UTF8String'
+      result := @UTF8_NAME              // instead of 'UTF8String'
   else
-    result := @NULCHAR;    // instead of a GPF
+    result := @NULCHAR;                 // instead of a GPF
 end;
 
 function TRttiInfo.RecordSize: PtrInt;
@@ -474,12 +474,12 @@ begin
   if @self = TypeInfo(QWord) then
     result := true
   else
-    {$ifdef UNICODE}
+    {$ifdef HASQWORD}
     if Kind = rkInt64 then
       with PHash128Rec(PAnsiChar(@RawName[1]) + ord(RawName[0]))^ do
         result := Lo > Hi // check MinInt64Value>MaxInt64Value
     else
-    {$endif UNICODE}
+    {$endif HASQWORD}
       result := false;
 end;
 
@@ -661,7 +661,7 @@ var
     if pp^ = nil then
     begin
       {$ifdef HASNOSTATICRTTI} // detect e.g. TGuid/THash128 -> fake TypeInfo()
-      rc := Rtti.FindName(argtypnam^, []);
+      rc := Rtti.FindName(argtypnam^, []); // search in fHashTable[].HashName[]
       if rc <> nil then
         argtypnfo := rc.Info
       else

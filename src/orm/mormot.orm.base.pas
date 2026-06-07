@@ -41,8 +41,8 @@ uses
   mormot.core.data,
   mormot.core.rtti,
   mormot.core.json,
+  mormot.core.fmt,
   mormot.core.threads,
-  mormot.core.perf,
   mormot.core.zip,     // for ODS export
   mormot.crypt.secure, // for TSynUniqueIdentifierBits
   mormot.db.core;
@@ -813,28 +813,11 @@ var
 { ************ TOrmWriter Class for TOrm Serialization }
 
 type
-  /// several options to customize how TOrm will be serialized
-  // - e.g. if properties storing JSON should be serialized as an object, and not
-  // escaped as a string (which is the default, matching ORM column storage)
-  // - if an additional "ID_str":"12345" field should be added to the standard
-  // "ID":12345 field, which may exceed 53-bit integer precision of JavaScript
-  // - to generate JS-friendly "id" (and "idStr") instead of "ID" or "RowID"
-  // - to generate JS-friendly "propName": from a PropName pascal property
-  TOrmWriterOption = (
-    owoAsJsonNotAsString,
-    owoID_str,
-    owoLowCaseID,
-    owoLowCaseFirstPropChar);
-
-  /// options to customize how TOrm will be written by TOrmWriter
-  TOrmWriterOptions = set of TOrmWriterOption;
-
   /// simple writer to a Stream, specialized for writing TOrm as JSON
   // - in respect to the standard TResultsWriter as defined in mormot.db.core,
   // this class has some options dedicated to our TOrm serialization
   TOrmWriter = class(TResultsWriter)
   protected
-    fOrmOptions: TOrmWriterOptions;
     procedure SetOrmOptions(Value: TOrmWriterOptions);
   public
     /// customize TOrm.GetJsonValues serialization process
@@ -1927,7 +1910,7 @@ type
     /// release internal list items
     destructor Destroy; override;
     /// add a TOrmPropInfo to the list
-    function Add(aItem: TOrmPropInfo): integer;
+    function Add(aItem: TOrmPropInfo): PtrInt;
     /// set the length of the internal List[] array and the sorted names
     procedure AfterAdd;
     /// find an item in the list using O(log(n)) binary search
@@ -2789,11 +2772,10 @@ type
   TOrmLocks = object
   {$endif USERECORDWITHMETHODS}
   private
-    fSafe: TRWLock; // thread-safe and not blocking concurrent IsLocked()
-    fID: TIDDynArray;        // array[0..Count-1] of locked TID
-    fTix: TCardinalDynArray; // GetTickSec values at the Lock() time
-    fCount: PtrInt;
-    fLastPurge: integer;
+    fSafe: TRWLock;              // thread-safe and not blocking IsLocked()
+    fID: TIDDynArray;            // array[0..Count-1] of locked TID
+    fTix: TCardinalDynArray;     // GetTickSec values at the Lock() time
+    fCount, fLastPurge: integer; // no need of PtrInt here and better alignment
   public
     /// lock a record, specified by its TID
     // - returns true on success, false if was already locked
@@ -2811,7 +2793,7 @@ type
     // - could be used to release locked records e.g. if some client(s) crashed
     procedure PurgeOlderThan(MinutesFromNow: cardinal);
     /// the current number of locked TID
-    property Count: PtrInt
+    property Count: integer
       read fCount;
   end;
   POrmLocks = ^TOrmLocks;
@@ -3544,7 +3526,7 @@ begin
                 dec(MultiInsertRowCount);
               end;
             end;
-            W.CancelLastComma(')');
+            W.ReplaceLastComma(')');
           end;
         end;
     else
@@ -5436,7 +5418,7 @@ end;
 procedure TOrmPropInfoRttiMany.GetValueVar(Instance: TObject; ToSql: boolean;
   var result: RawUtf8; wasSqlString: PBoolean);
 begin
-  result := '';
+  FastAssignNew(result);
 end;
 
 procedure TOrmPropInfoRttiMany.SetValue(Instance: TObject; Value: PUtf8Char;
@@ -7365,22 +7347,18 @@ begin
 end;
 
 procedure TOrmPropInfoList.AfterAdd;
-var
-  i: PtrInt;
 begin
   SetLength(fList, fCount);
-  if fCount = 0 then
-    fLast := nil
-  else
+  fLast := nil;
+  if fCount <> 0 then
     fLast := fList[fCount - 1];
   // initialize once the ordered lookup indexes, for binary search
   SetLength(fOrderedByName, fCount);
-  for i := 0 to fCount - 1 do
-    fOrderedByName[i] := i;
+  FillIncreasingB(pointer(fOrderedByName), 0, fCount - 1);
   QuickSortByName(0, fCount - 1);
 end;
 
-function TOrmPropInfoList.Add(aItem: TOrmPropInfo): integer;
+function TOrmPropInfoList.Add(aItem: TOrmPropInfo): PtrInt;
 var
   f: PtrInt;
 begin
@@ -7762,7 +7740,7 @@ begin
   begin
     GetNextItemShortString(P, @n); // n ends with #0
     if n[0] = #0 then
-      exit;
+      break; // reached end of the CSV input text
     ndx := IndexByNameU(@n[1]);
     if ndx < 0 then
       exit; // invalid field name
@@ -7788,7 +7766,7 @@ begin
       inc(len, length(List[f].Name) + 1);
   if len = 0 then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   p := FastSetString(result, len - 1); // allocate once for all
@@ -8786,8 +8764,11 @@ begin
 end;
 
 function TOrmTableAbstract.GetAsCurrency(Row, Field: PtrInt): currency;
+var
+  curr: currency; // safer with an explicit local variable
 begin
-  PInt64(@result)^ := StrToCurr64(Get(Row, Field), nil);
+  PInt64(@curr)^ := StrToCurr64(Get(Row, Field), nil);
+  result := curr;
 end;
 
 function TOrmTableAbstract.GetAsCurrency(Row: PtrInt; const FieldName: RawUtf8): currency;
@@ -9280,7 +9261,7 @@ begin
             W.Add('f');
             W.AddU(f);
             W.AddDirect('=', '"');
-            W.AddXmlEscape(U);
+            AddXmlEscape(W, U);
             W.AddDirect('"', ' ');
           end;
           inc(o); // points to next value
@@ -9390,20 +9371,20 @@ begin
                   ftCurrency:
                     begin
                       W.AddShort('float" office:value="');
-                      W.AddXmlEscape(U);
+                      AddXmlEscape(W, U);
                       W.AddDirect('"', ' ', '/', '>');
                     end;
                   ftDate:
                     begin
                       W.AddShort('date" office:date-value="');
-                      W.AddXmlEscape(U);
+                      AddXmlEscape(W, U);
                       W.AddDirect('"', ' ', '/', '>');
                     end;
                 else
                   begin
                     //ftUnknown,ftNull,ftUtf8,ftBlob:
                     W.AddShort('string"><text:p>');
-                    W.AddXmlEscape(U);
+                    AddXmlEscape(W, U);
                     W.AddShort('</text:p></table:table-cell>');
                   end;
                 end;
@@ -9414,7 +9395,7 @@ begin
               for f := 0 to FieldCount - 1 do
               begin
                 W.AddShort('<table:table-cell office:value-type="string"><text:p>');
-                W.AddXmlEscape(GetResults(o));
+                AddXmlEscape(W, GetResults(o));
                 W.AddShort('</text:p></table:table-cell>');
                 inc(o);
               end;
@@ -9453,7 +9434,7 @@ begin
         Dest.AddDirect('<', 't', 'd', '>');
       if Assigned(OnExportValue) and
          (r > 0) then
-        Dest.AddHtmlEscapeUtf8(OnExportValue(self, r, f, true), hfOutsideAttributes)
+        AddHtmlEscapeUtf8(Dest, OnExportValue(self, r, f, true), hfOutsideAttributes)
       else
         Dest.AddHtmlEscape(GetResults(o), hfOutsideAttributes);
       if r = 0 then
@@ -9586,7 +9567,7 @@ begin
   end;
 end;
 
-{$ifdef CPUX86}
+{$ifdef ASMX86}
 procedure ExchgData(P1, P2: TOrmTableDataArray; FieldCount: integer);
 {$ifdef FPC} nostackframe; assembler; {$endif}
 asm     // eax=P1 edx=P2 ecx=FieldCount
@@ -9631,7 +9612,7 @@ begin
     dec(FieldCount);
   until FieldCount = 0;
 end;
-{$endif CPUX86}
+{$endif ASMX86}
 
 procedure TUtf8QuickSort.Sort(L, R: integer);
 var
@@ -9688,7 +9669,7 @@ begin
             dec(OJ, f);
             ExchgData(@Data[OI], @Data[OJ], Params.FieldCount);
             {$ifndef NOTORMTABLELEN}
-            {$ifdef CPUX86}ExchgData{$else}ExchgLen{$endif}(
+            {$ifdef ASMX86}ExchgData{$else}ExchgLen{$endif}(
               @Len[OI], @Len[OJ], Params.FieldCount);
             {$endif NOTORMTABLELEN}
             f := Params.FieldIndex;
@@ -9898,7 +9879,7 @@ begin
             ExchgData(@Data[i * FieldCount],
                       @Data[j * FieldCount], FieldCount);
             {$ifndef NOTORMTABLELEN}
-            {$ifdef CPUX86}ExchgData{$else}ExchgLen{$endif}(
+            {$ifdef ASMX86}ExchgData{$else}ExchgLen{$endif}(
               @Len[i * FieldCount], @Len[j * FieldCount], FieldCount);
             {$endif NOTORMTABLELEN}
           end;
@@ -11126,10 +11107,10 @@ function TOrmPropertiesAbstract.OrmFieldTypeToSql(FieldIndex: integer): RawUtf8;
 begin
   if (self = nil) or
     (cardinal(FieldIndex) >= cardinal(Fields.Count)) then
-    result := ''
+    FastAssignNew(result)
   else if (FieldIndex < length(fCustomCollation)) and
           (fCustomCollation[FieldIndex] <> '') then
-    result := ' TEXT COLLATE ' + fCustomCollation[FieldIndex] + ', '
+    Join([' TEXT COLLATE ', fCustomCollation[FieldIndex], ', '], result)
   else
     result := DEFAULT_ORMFIELDTYPETOSQL[Fields.List[FieldIndex].OrmFieldTypeStored];
 end;
@@ -11219,19 +11200,19 @@ begin
   W.AddColumns(KnownRowsCount);
 end;
 
-function TOrmPropertiesAbstract.CreateJsonWriter(Json: TStream; Expand,
-  withID: boolean; const aFields: TFieldBits; KnownRowsCount, aBufSize: integer;
-  aStackBuffer: PTextWriterStackBuffer): TOrmWriter;
+function TOrmPropertiesAbstract.CreateJsonWriter(Json: TStream;
+  Expand, withID: boolean; const aFields: TFieldBits; KnownRowsCount,
+  aBufSize: integer; aStackBuffer: PTextWriterStackBuffer): TOrmWriter;
 var
   f: TFieldIndexDynArray;
 begin
   FieldBitsToIndex(aFields, f, Fields.Count);
-  result := CreateJsonWriter(
-    Json, Expand, withID, f, KnownRowsCount, aBufSize, aStackBuffer);
+  result := CreateJsonWriter(Json,
+    Expand, withID, f, KnownRowsCount, aBufSize, aStackBuffer);
 end;
 
-function TOrmPropertiesAbstract.CreateJsonWriter(Json: TStream; Expand,
-  withID: boolean; const aFields: TFieldIndexDynArray; KnownRowsCount,
+function TOrmPropertiesAbstract.CreateJsonWriter(Json: TStream;
+  Expand, withID: boolean; const aFields: TFieldIndexDynArray; KnownRowsCount,
   aBufSize: integer; aStackBuffer: PTextWriterStackBuffer): TOrmWriter;
 begin
   if (self = nil) or
@@ -11253,8 +11234,8 @@ var
   bits: TFieldBits;
 begin
   if FieldBitsFromCsv(aFieldsCsv, bits, withID) then
-    result := CreateJsonWriter(
-      Json, Expand, withID, bits, KnownRowsCount, aBufSize, aStackBuffer)
+    result := CreateJsonWriter(Json,
+      Expand, withID, bits, KnownRowsCount, aBufSize, aStackBuffer)
   else
     result := nil;
 end;
@@ -11324,7 +11305,7 @@ begin
     if (decoded <> 0) and
        (sfoPutIDLast in Format) then
       W.AddPropInt64('ID', decoded);
-    W.CancelLastComma('}');
+    W.ReplaceLastComma('}');
     W.SetText(JsonObject);
   finally
     W.Free;
@@ -11476,7 +11457,7 @@ begin
   begin
     GetNextItemShortString(P, @n); // n ends with #0
     if n[0] = #0 then
-      exit;
+      break; // reached end of the CSV input text
     ndx := Fields.IndexByNameU(@n[1]);
     if ndx < 0 then
       exit; // invalid field name
@@ -11516,7 +11497,7 @@ begin
   begin
     GetNextItemShortString(P, @n); // n ends with #0
     if n[0] = #0 then
-      exit;
+      break; // reached end of the CSV input text
     if IsRowIDShort(n) then
     begin
       withID := true;
@@ -11683,7 +11664,7 @@ function TOrmPropertiesAbstract.MainFieldName(ReturnFirstIfNoUnique: boolean): R
 begin
   if (self = nil) or
      (MainField[ReturnFirstIfNoUnique] < 0) then
-    result := ''
+    FastAssignNew(result)
   else
     result := Fields.List[MainField[ReturnFirstIfNoUnique]].Name;
 end;
@@ -11736,11 +11717,11 @@ begin
   pointer(@OrmFieldTypeComp[oftVariant])    := @StrComp;
   pointer(@OrmFieldTypeComp[oftNullable])   := @StrComp;
   // refresh ORM types RTTI with actual type definitions
-  PTC_INFO[pctRecordReference] := TypeInfo(TRecordReference);
+  PTC_INFO[pctRecordReference]            := TypeInfo(TRecordReference);
   PTC_INFO[pctRecordReferenceToBeDeleted] := TypeInfo(TRecordReferenceToBeDeleted);
-  PTC_INFO[pctCreateTime]      := TypeInfo(TCreateTime);
-  PTC_INFO[pctModTime]         := TypeInfo(TModTime);
-  PTC_INFO[pctRecordVersion]   := TypeInfo(TRecordVersion);
+  PTC_INFO[pctCreateTime]                 := TypeInfo(TCreateTime);
+  PTC_INFO[pctModTime]                    := TypeInfo(TModTime);
+  PTC_INFO[pctRecordVersion]              := TypeInfo(TRecordVersion);
   for ptc := succ(low(ptc)) to high(ptc) do
     PTC_RTTI[ptc] := Rtti.RegisterType(PTC_INFO[ptc]);
 end;

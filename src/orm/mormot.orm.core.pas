@@ -3113,8 +3113,8 @@ type
     // retrieve the column exact type information
     // - the JSON data is parsed and formatted in-place, after copied
     // in the protected fPrivateCopy variable (by reference if aJsonOwned=true)
-    constructor CreateFromTables(const Tables: array of TOrmClass; const
-      aSql, aJson: RawUtf8; aJsonOwned: boolean = false); reintroduce; overload;
+    constructor CreateFromTables(const Tables: array of TOrmClass;
+      const aSql, aJson: RawUtf8; aJsonOwned: boolean = false); reintroduce; overload;
     /// initialize the result table from a JSON-formated Data message
     // - you can set the expected column types matching the results column layout
     // - the JSON data is parsed and formatted in-place
@@ -5143,7 +5143,7 @@ var
   i: PtrInt;
   SQL: RawUtf8;
 begin
-  result := ''; // RowID is added by sqlite3_declare_vtab() for a Virtual Table
+  FastAssignNew(result); // RowID is added by sqlite3_declare_vtab() for a Virtual Table
   for i := 0 to Props.Fields.Count - 1 do
     with Props.Fields.List[i] do
     begin
@@ -5204,7 +5204,7 @@ begin
         W.AddStrings('?,', FieldCount);
         dec(RowCount);
       end;
-      W.CancelLastComma(')');
+      W.ReplaceLastComma(')');
     end;
     W.SetText(result);
   finally
@@ -5293,15 +5293,15 @@ var
 begin
   if ((Value shr 6) = 0) then
     // Value=0 or no valid ID
-    result := ''
+    FastAssignNew(result)
   else
   begin
     aTable := Table(Model);
     if aTable = nil then
-      result := ''
+      FastAssignNew(result)
     else
-      result := Model.TableProps[Value and 63].Props.SqlTableName + ' ' +
-        Int64ToUtf8(Value shr 6);
+      Make([Model.TableProps[Value and 63].Props.SqlTableName, ' ',
+        Value shr 6], result);
   end;
 end;
 
@@ -5311,7 +5311,7 @@ var
   aID: TID;
   m: TOrmModel;
 begin
-  result := '';
+  FastAssignNew(result);
   if ((Value shr 6) = 0) or
      (Rest = nil) then
     exit;
@@ -6296,7 +6296,7 @@ end;
 class function TOrm.SqlTableName: RawUtf8;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
     result := OrmProps.SqlTableName;
 end;
@@ -7091,7 +7091,7 @@ begin
     GetJsonValues(W);
     W.AddComma;
   end;
-  W.CancelLastComma(']');
+  W.ReplaceLastComma(']');
 end;
 
 function TOrm.SetFieldSqlVars(const Values: TSqlVarDynArray): boolean;
@@ -7297,7 +7297,7 @@ begin
     end;
     inc(nfo);
   end;
-  W.CancelLastComma('}');
+  W.ReplaceLastComma('}');
 end;
 
 procedure TOrm.AppendFillAsJsonArray(const FieldName: RawUtf8;
@@ -7311,7 +7311,7 @@ begin
     AppendAsJsonObject(W, Fields, WithID);
     W.AddComma;
   end;
-  W.CancelLastComma(']');
+  W.ReplaceLastComma(']');
   if FieldName <> '' then
     W.AddComma;
 end;
@@ -7361,8 +7361,8 @@ begin
   if self = nil then
     exit;
   with Orm do
-    serializer := CreateJsonWriter(Json, Expand, withID,
-      SimpleFieldsIndex[Occasion], {knownrows=}0, 0, @tmp);
+    serializer := CreateJsonWriter(Json,
+      Expand, withID, SimpleFieldsIndex[Occasion], {knownrows=}0, 0, @tmp);
   serializer.OrmOptions := OrmOptions; // SetOrmOptions() may refine ColNames[]
   GetJsonValuesAndFree(serializer);
 end;
@@ -7376,8 +7376,8 @@ var
 begin
   J := TRawByteStringStream.Create;
   try
-    serializer := Orm.CreateJsonWriter(J, Expand, withID, Fields,
-      {knownrows=}0, 0, @tmp);
+    serializer := Orm.CreateJsonWriter(J,
+      Expand, withID, Fields, {knownrows=}0, 0, @tmp);
     serializer.OrmOptions := OrmOptions; // SetOrmOptions() may refine ColNames[]
     GetJsonValuesAndFree(serializer);
     result := J.DataString;
@@ -7394,7 +7394,7 @@ begin
   if Orm.FieldBitsFromCsv(FieldsCsv, bits) then
     result := GetJsonValues(Expand, withID, bits, OrmOptions)
   else
-    result := '';
+    FastAssignNew(result);
 end;
 
 function TOrm.GetJsonValues(Expand, withID: boolean;
@@ -7406,7 +7406,7 @@ begin
   if not withID and
      IsZero(Orm.SimpleFieldsBits[Occasion]) then
     // no simple field to write -> quick return
-    result := ''
+    FastAssignNew(result)
   else
   begin
     if UsingStream <> nil then
@@ -7563,7 +7563,7 @@ var
   V: RawUtf8;
   wasString: boolean;
 begin
-  result := '';
+  FastAssignNew(result);
   if self = nil then
     exit;
   with Orm do
@@ -7586,7 +7586,7 @@ var
   V: RawUtf8;
   wasString: boolean;
 begin
-  result := '';
+  FastAssignNew(result);
   if self <> nil then
     with Orm do
       if SimpleFields = nil then
@@ -8430,7 +8430,7 @@ function TOrm.GetFieldValue(const PropName: RawUtf8): RawUtf8;
 var
   P: TOrmPropInfo;
 begin
-  result := '';
+  FastAssignNew(result);
   if self = nil then
     exit;
   P := Orm.Fields.ByName(pointer(PropName)); // fast O(log(n)) binary search
@@ -8748,7 +8748,7 @@ var
   msg: string;
 begin
   if FilterAndValidate(aRest, msg, aFields, aValidator) then
-    result := ''
+    FastAssignNew(result)
   else
     StringToUtf8(msg, result);
 end;
@@ -9131,7 +9131,7 @@ begin
      (fSourceID = nil) or
      (fDestID = nil) or
      (aClient = nil) then
-    result := ''
+    FastAssignNew(result)
   else
   begin
     if aAndWhereSql <> '' then
@@ -9839,7 +9839,7 @@ end;
 function TOrmModel.SafeRoot: RawUtf8;
 begin
   if self = nil then
-    result := ''
+    FastAssignNew(result)
   else
     result := fRoot;
 end;
@@ -10076,7 +10076,7 @@ end;
 
 function TOrmModel.GetUri(aTable: TOrmClass): RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   if self = nil then
     exit;
   if aTable <> nil then
@@ -10247,7 +10247,7 @@ function TOrmModel.GetSqlCreate(aTableIndex: integer): RawUtf8;
 begin
   if (self = nil) or
      (cardinal(aTableIndex) > cardinal(fTablesMax)) then
-    result := ''
+    FastAssignNew(result)
   else
     result := Tables[aTableIndex].GetSqlCreate(self);
 end;
@@ -10256,7 +10256,7 @@ function TOrmModel.GetSqlAddField(aTableIndex: integer; aFieldIndex: integer): R
 begin
   if (self = nil) or
      (cardinal(aTableIndex) > cardinal(fTablesMax)) then
-    result := ''
+    FastAssignNew(result)
   else
     result := TableProps[aTableIndex].Props.SqlAddField(aFieldIndex);
 end;
@@ -10529,7 +10529,7 @@ procedure TOrmModelProperties.SetKind(Value: TOrmVirtualKind);
       else
         result := IDComma[Kind]
     else
-      result := '';
+      FastAssignNew(result);
     for i := 0 to length(Props.SimpleFields) - 1 do
     begin
       if withTableName then
@@ -10860,8 +10860,7 @@ begin
   end;
 end;
 
-function TOrmMapping.ExternalToInternalOrNull(
-  const ExtFieldName: RawUtf8): RawUtf8;
+function TOrmMapping.ExternalToInternalOrNull(const ExtFieldName: RawUtf8): RawUtf8;
 var
   i: PtrInt;
 begin
@@ -10874,8 +10873,7 @@ begin
     result := ''; // indicates not found
 end;
 
-function TOrmMapping.AppendFieldName(FieldIndex: integer;
-  var Text: RawUtf8): boolean;
+function TOrmMapping.AppendFieldName(FieldIndex: integer; var Text: RawUtf8): boolean;
 begin
   result := false; // success
   if FieldIndex = VIRTUAL_TABLE_ROWID_COLUMN then
@@ -10906,7 +10904,7 @@ begin
     result := RowIDFieldName
   else if cardinal(FieldIndex) >= cardinal(Length(ExtFieldNames)) then
     // FieldIndex out of range
-    result := ''
+    FastAssignNew(result)
   else
     result := ExtFieldNames[FieldIndex];
 end;
@@ -11246,7 +11244,7 @@ function TOrmCache.RetrieveJson(aTable: TOrmClass; aTableIndex: integer; aID: TI
 var
   tmp: TOrm; // we use a temporary TOrm instance for the serialization itself
 begin
-  result := '';
+  FastAssignNew(result);
   if (self = nil) or (aTable = nil) or (aID <= 0) or
      (cardinal(aTableIndex) >= cardinal(Length(fCache))) or
      not fCache[aTableIndex].CacheEnable then
@@ -11565,7 +11563,7 @@ begin
             end;
             inc(nfo);
           end;
-          fBatch.CancelLastComma(']');
+          fBatch.ReplaceLastComma(']');
         end
     end;
     if fCalledWithinRest and ForceID then
@@ -11677,7 +11675,7 @@ begin
       end;
       inc(nfo);
     end;
-    fBatch.CancelLastComma(']');
+    fBatch.ReplaceLastComma(']');
   end;
   fBatch.AddComma;
   if Assigned(fRest) and
@@ -11718,7 +11716,7 @@ begin
   begin
     if fBatchCount > 0 then
     begin // if something to send
-      fBatch.CancelLastComma(']');
+      fBatch.ReplaceLastComma(']');
       if (fTable <> nil) and
          (fModel <> nil) and
          not (boOnlyObjects in fOptions) then

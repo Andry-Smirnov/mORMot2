@@ -7,11 +7,14 @@ unit mormot.core.threads;
   *****************************************************************************
 
    High-Level Multi-Threading features shared by all framework units
+    - TThreads thread-safe wrapper
+    - IAutoFree and IAutoLocker Reference-Counted Process
     - Thread-Safe TSynQueue and TPendingTaskList
     - Thread-Safe ILockedDocVariant Storage
     - Background Thread Processing
     - Parallel Execution in a Thread Pool
     - Server Process Oriented Thread Pool
+    - TPipeStream Read/Write synchronization between two threads
 
   *****************************************************************************
 }
@@ -35,8 +38,8 @@ uses
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
-  mormot.core.log,
-  mormot.core.perf;
+  mormot.core.log;
+
 
 {$ifndef PUREMORMOT2}
 
@@ -57,12 +60,275 @@ type
 
 {$endif PUREMORMOT2}
 
-type
-  /// a dynamic array of TThread
-  TThreadDynArray = array of TThread;
 
+{ ************* TThreads thread-safe wrapper }
+
+type
   /// exception class raised by this unit
   ESynThread = class(ESynException);
+
+  /// a dynamic array of TThread
+  TThreadDynArray = array of TThread;
+  PThreadDynArray = ^TThreadDynArray;
+
+  /// maintain a thread-safe list of TThread instances
+  {$ifdef USERECORDWITHMETHODS}
+  TThreads = record
+  {$else}
+  TThreads = object
+  {$endif USERECORDWITHMETHODS}
+  public
+    /// make this list thread-safe
+    Safe: TLightLock;
+    /// the actual dynamic array of TThread instances
+    List: TThreadDynArray;
+    /// thread-safe add an item to the list
+    procedure Add(t: TThread);
+    /// notify the list that a thread is finished and about to be destroyed
+    procedure Terminated(t: TThread);
+    /// trigger all List^[].Terminate
+    procedure Terminate;
+    /// trigger all List^[].Terminate and wait for List^ = nil via Terminated
+    // - so each background thread should notify
+    procedure TerminateAndWait(secs: integer; sender: TObject = nil;
+      logclass: TSynLogClass = nil);
+  end;
+
+
+{ ************ IAutoFree and IAutoLocker Reference-Counted Process }
+
+{ WARNING:
+    FPC and Delphi 10.4+ do require an explicit local variable or "with"
+    clause to keep the reference locked - previous behavior was to keep the
+    variable up to the end of the method, which is not the case any more.
+}
+
+type
+  /// interface for TAutoFree to register another TObject instance
+  // to an existing IAutoFree local variable
+  // - WARNING: both FPC and Delphi 10.4+ don't keep the IAutoFree instance
+  // up to the end-of-method -> you should not use TAutoFree for new projects :(
+  IAutoFree = interface
+    procedure Another(var objVar; obj: TObject);
+    /// do-nothing method to circumvent the Delphi 10.4 IAutoFree early release
+    procedure ForMethod;
+  end;
+
+  /// simple reference-counted storage for local objects
+  // - WARNING: both FPC and Delphi 10.4+ don't keep the IAutoFree instance
+  // up to the end-of-method -> you should not use TAutoFree for new projects :(
+  // - be aware that it won't implement a full ARC memory model, but may be
+  // just used to avoid writing some try ... finally blocks on local variables
+  // - use with caution, only on well defined local scope, via a "with" clause
+  // or a local variable
+  TAutoFree = class(TInterfacedObject, IAutoFree)
+  protected
+    fObject: TObject;
+    fObjectList: array of TObject;
+    // do-nothing method to circumvent the Delphi 10.4 IAutoFree early release
+    procedure ForMethod;
+  public
+    /// initialize the TAutoFree class for one local variable
+    // - do not call this constructor, but class function One() instead
+    constructor Create(var localVariable; obj: TObject); reintroduce; overload;
+    /// initialize the TAutoFree class for several local variables
+    // - do not call this constructor, but class function Several() instead
+    constructor Create(const varObjPairs: array of pointer); reintroduce; overload;
+    /// protect one local TObject variable instance life time
+    // - for instance, instead of writing:
+    // !var
+    // !  myVar: TMyClass;
+    // !begin
+    // !  myVar := TMyClass.Create;
+    // !  try
+    // !    ... use myVar
+    // !  finally
+    // !    myVar.Free;
+    // !  end;
+    // !end;
+    // - you may write:
+    // !var
+    // !  myVar: TMyClass;
+    // !begin
+    // !  with TAutoFree.One(myVar,TMyClass.Create) do
+    // !  begin
+    // !  ... use myVar
+    // !  end; // Delphi 10.4 and later: myVar will be released here
+    // !  ... some other code
+    // !end; // Delphi 10.3 and sooner: myVar will be released here
+    // - warning: under FPC, you should assign the result of this method to a local
+    // IAutoFree variable - see bug http://bugs.freepascal.org/view.php?id=26602
+    // - Delphi 10.4 also did change it and release the IAutoFree before the
+    // end of the current method, so we inlined a void method call trying to
+    // circumvent this problem - https://quality.embarcadero.com/browse/RSP-30050
+    // - for both Delphi 10.4+ and FPC, you may use with TAutoFree.One() do
+    class function One(var localVariable; obj: TObject): IAutoFree;
+      {$ifdef ISDELPHI104} inline; {$endif}
+    /// protect several local TObject variable instances life time
+    // - specified as localVariable/objectInstance pairs
+    // - you may write:
+    // !var
+    // !  var1, var2: TMyClass;
+    // !begin
+    // !  with TAutoFree.Several([
+    // !    @var1,TMyClass.Create,
+    // !    @var2,TMyClass.Create]) do
+    // !  begin
+    // !  ... use var1 and var2
+    // !  end;
+    // !  ... some other code
+    // !end;
+    // - warning: under FPC, you should assign the result of this method to a local
+    // IAutoFree variable - see bug http://bugs.freepascal.org/view.php?id=26602
+    // - Delphi 10.4 also did change it and release the IAutoFree before the
+    // end of the current method, and an "array of pointer" cannot be inlined
+    // by the Delphi compiler, so you could explicitly call ForMethod:
+    // !  TAutoFree.Several([
+    // !    @var1,TMyClass.Create,
+    // !    @var2,TMyClass.Create]).ForMethod;
+    class function Several(const varObjPairs: array of pointer): IAutoFree;
+    /// protect another TObject variable to an existing IAutoFree instance life time
+    // - you may write:
+    // !var
+    // !  var1, var2: TMyClass;
+    // !  auto: IAutoFree;
+    // !begin
+    // !  auto := TAutoFree.One(var1,TMyClass.Create);,
+    // !  .... do something
+    // !  auto.Another(var2,TMyClass.Create);
+    // !  ... use var1 and var2
+    // !end; // here var1 and var2 will be released since local auto is explicit
+    procedure Another(var localVariable; obj: TObject);
+    /// will finalize the associated TObject instances
+    // - note that releasing the TObject instances won't be protected, so
+    // any exception here may induce a memory leak: use only with "safe"
+    // simple objects, e.g. mORMot's TOrm
+    destructor Destroy; override;
+  end;
+
+
+  /// an interface used by TAutoLocker to protect multi-thread execution
+  IAutoLocker = interface
+    ['{97559643-6474-4AD3-AF72-B9BB84B4955D}']
+    /// enter the mutex
+    // - any call to Enter should be ended with a call to Leave, and
+    // protected by a try..finally block, as such:
+    // !begin
+    // !  ... // unsafe code
+    // !  fSharedAutoLocker.Enter;
+    // !  try
+    // !    ... // thread-safe code
+    // !  finally
+    // !    fSharedAutoLocker.Leave;
+    // !  end;
+    // !end;
+    procedure Enter;
+    /// leave the mutex
+    // - any call to Leave should be preceded with a call to Enter
+    procedure Leave;
+    /// will enter the mutex until the IUnknown reference is released
+    // - using an IUnknown interface to let the compiler auto-generate a
+    // try..finally block statement to release the lock for the code block
+    // - could be used as such under Delphi:
+    // !begin
+    // !  ... // unsafe code
+    // !  fSharedAutoLocker.ProtectMethod;
+    // !  ... // thread-safe code
+    // !end; // local hidden IUnknown will release the lock for the method
+    // - warning: under FPC, you should assign its result to a local variable -
+    // see bug http://bugs.freepascal.org/view.php?id=26602
+    // !var
+    // !  LockFPC: IUnknown;
+    // !begin
+    // !  ... // unsafe code
+    // !  LockFPC := fSharedAutoLocker.ProtectMethod;
+    // !  ... // thread-safe code
+    // !end; // LockFPC will release the lock for the method
+    // or
+    // !begin
+    // !  ... // unsafe code
+    // !  with fSharedAutoLocker.ProtectMethod do
+    // !  begin
+    // !    ... // thread-safe code
+    // !  end; // local hidden IUnknown will release the lock for the method
+    // !end;
+    function ProtectMethod: IUnknown;
+    /// gives an access to the internal low-level TSynLocker instance used
+    function Safe: PSynLocker;
+  end;
+
+  /// reference-counted block code critical section
+  // - you can use one instance of this to protect multi-threaded execution
+  // - the main class may initialize a IAutoLocker property in Create, then call
+  // IAutoLocker.ProtectMethod in any method to make its execution thread safe
+  // - this class inherits from TInterfacedPersistent so you could define
+  // one published property of a mormot.core.interface.pas TInjectableObject as
+  // IAutoLocker so that this class may be automatically injected
+  // - consider inherit from high-level TSynLocked or call low-level
+  // fSafe := NewSynLocker / fSafe^.DoneAndFreemem instead
+  // - use with caution, only on well defined local scope, via a "with" clause
+  // or a local variable, especially on FPC or Delphi 10.4+
+  TAutoLocker = class(TInterfacedPersistent, IAutoLocker)
+  protected
+    fSafe: TSynLocker;
+  public
+    /// initialize the mutex
+    constructor Create; override;
+    /// finalize the mutex
+    destructor Destroy; override;
+    /// will enter the mutex until the IUnknown reference is released
+    // - as expected by IAutoLocker interface
+    // - could be used as such under Delphi:
+    // !begin
+    // !  ... // unsafe code
+    // !  fSharedAutoLocker.ProtectMethod;
+    // !  ... // thread-safe code
+    // !end; // local hidden IUnknown will release the lock for the method
+    // - warning: under FPC, you should assign its result to a local variable -
+    // see bug http://bugs.freepascal.org/view.php?id=26602
+    // !var
+    // !  LockFPC: IUnknown;
+    // !begin
+    // !  ... // unsafe code
+    // !  LockFPC := fSharedAutoLocker.ProtectMethod;
+    // !  ... // thread-safe code
+    // !end; // LockFPC will release the lock for the method
+    // or
+    // !begin
+    // !  ... // unsafe code
+    // !  with fSharedAutoLocker.ProtectMethod do
+    // !  begin
+    // !    ... // thread-safe code
+    // !  end; // local hidden IUnknown will release the lock for the method
+    // !end;
+    function ProtectMethod: IUnknown;
+    /// enter the mutex
+    // - as expected by IAutoLocker interface
+    // - any call to Enter should be ended with a call to Leave, and
+    // protected by a try..finally block, as such:
+    // !begin
+    // !  ... // unsafe code
+    // !  fSharedAutoLocker.Enter;
+    // !  try
+    // !    ... // thread-safe code
+    // !  finally
+    // !    fSharedAutoLocker.Leave;
+    // !  end;
+    // !end;
+    procedure Enter;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// leave the mutex
+    // - as expected by IAutoLocker interface
+    procedure Leave;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// access to the locking methods of this instance
+    // - as expected by IAutoLocker interface
+    function Safe: PSynLocker;
+    /// direct access to the locking methods of this instance
+    // - sligtly faster than IAutoLocker.Safe function if you have a TAutoLocker
+    property Locker: TSynLocker
+      read fSafe;
+  end;
 
 
 { ************ Thread-Safe TSynQueue and TPendingTaskList }
@@ -335,7 +601,7 @@ type
     /// delete all stored properties
     procedure Clear;
     /// save the stored values as UTF-8 encoded JSON Object
-    function ToJson(HumanReadable: boolean = false): RawUtf8;
+    function ToJson(Format: TTextWriterJsonFormat = jsonCompact): RawUtf8;
     /// low-level access to the internal TDocVariant instance and all its features
     // - warning: the returned result is not thread-safe so you should use Safe^
     function Data: PDocVariantData;
@@ -405,7 +671,7 @@ type
     procedure Clear;
     /// save the stored value as UTF-8 encoded JSON Object
     // - implemented as just a wrapper around VariantSaveJson()
-    function ToJson(HumanReadable: boolean = false): RawUtf8;
+    function ToJson(Format: TTextWriterJsonFormat = jsonCompact): RawUtf8;
     /// low-level access to the internal TDocVariant instance and all its features
     function Data: PDocVariantData;
     /// low-level access to the associated thread-safe Read/Write lock
@@ -687,7 +953,7 @@ type
     fOnException: TNotifyEvent;
     fOnProcessMS: cardinal;
     fProcessingCounter: integer;
-    fStats: TSynMonitor;
+    fStats: TSynMonitorAbstract;
     procedure ExecuteLoop; override;
   public
     /// initialize the thread for a periodic task processing
@@ -717,7 +983,7 @@ type
       read fOnProcessMS write fOnProcessMS;
     /// processing statistics
     // - may be nil if aStats was nil in the class constructor
-    property Stats: TSynMonitor
+    property Stats: TSynMonitorAbstract
       read fStats;
   end;
 
@@ -826,15 +1092,15 @@ type
 
   /// used by TSynBackgroundTimer internal registration list
   TSynBackgroundTimerTask = record
-    MsgSafe: TLightLock; // protect Msg[] list - topmost to ensure aarch64 align
-    OnProcess: TOnSynBackgroundTimerProcess;
-    Secs: cardinal;
-    NextTix: Int64;
     Msg: TRawUtf8DynArray;
+    MsgCount, MilliSecs: integer; // not PtrInt
+    OnProcess: TOnSynBackgroundTimerProcess;
+    NextTix: Int64;
   end;
+  PSynBackgroundTimerTask = ^TSynBackgroundTimerTask;
 
   /// stores TSynBackgroundTimer internal registration list
-  TSynBackgroundTimerTaskDynArray = array of TSynBackgroundTimerTask;
+  TSynBackgroundTimerTasks = array of TSynBackgroundTimerTask;
 
   /// TThread able to run one or several tasks at a periodic pace in a
   // background thread
@@ -846,10 +1112,13 @@ type
   // use its own separated thread
   TSynBackgroundTimer = class(TSynBackgroundThreadProcess)
   protected
-    fTask: TSynBackgroundTimerTaskDynArray;
-    fTasks: TDynArrayLocked;
+    fSafe: TLightLock;  // seems enough - TOSLightLock is more than twice slower
+    fTask: TSynBackgroundTimerTasks;
+    fTaskCount: integer; // not PtrInt
+    fTasks: TDynArray;
+    fTodo: TSynBackgroundTimerTasks; // local storage for EverySecond()
     procedure EverySecond(Sender: TSynBackgroundThreadProcess);
-    function Find(const aProcess: TMethod): PtrInt;
+    function Find(const aProcess: TMethod): PSynBackgroundTimerTask;
     function Add(const aOnProcess: TOnSynBackgroundTimerProcess;
       const aMsg: RawUtf8; aExecuteNow: boolean): boolean;
   public
@@ -868,7 +1137,7 @@ type
     // - for background process on a mORMot service, consider using TRest
     // TimerEnable/TimerDisable methods, and its associated BackgroundTimer thread
     procedure Enable(const aOnProcess: TOnSynBackgroundTimerProcess;
-      aOnProcessSecs: cardinal);
+      aOnProcessSecs: integer);
     /// undefine a task running on a periodic number of seconds
     // - aOnProcess should have been registered by a previous call to Enable() method
     // - returns true on success, false if the supplied task was not registered
@@ -908,12 +1177,12 @@ type
     function ExecuteOnce(const aOnProcess: TOnSynBackgroundTimerProcess): boolean;
     /// wait until no background task is processed
     procedure WaitUntilNotProcessing(timeoutsecs: integer = 10);
-    /// low-level access to the internal task list
-    property Task: TSynBackgroundTimerTaskDynArray
+    /// low-level access to the internal task list - not thread safe
+    property Task: TSynBackgroundTimerTasks
       read fTask;
-    /// low-level access to the internal task list wrapper and safe
-    property Tasks: TDynArrayLocked
-      read fTasks;
+    /// low-level access to the internal task list count - not thread safe
+    property TaskCount: integer
+      read fTaskCount;
     /// returns true if there is currenly some tasks processed
     property Processing: boolean
       read fProcessing;
@@ -1302,7 +1571,7 @@ type
     procedure RunDone(Sender: TObject); virtual;
   public
     /// initialize the task threading process
-    // - default aMaxThread=0 will use SystemInfo.dwNumberOfProcessors
+    // - default aMaxThread=0 will use CpuThreads = SystemInfo.dwNumberOfProcessors
     constructor Create(aSynLog: TSynLogClass; aMaxThread: integer = 0); reintroduce;
     /// finalize this instance, aborting and waiting for closure if needed
     destructor Destroy; override;
@@ -1339,7 +1608,7 @@ type
     property Running: integer
       read fRunning;
     /// up to how many TLoggedWorkThread could be used
-    // - default to SystemInfo.dwNumberOfProcessors if 0 is kept at Create()
+    // - default to CpuThreads if 0 is kept at Create()
     // - lwtForceThreadMaybeQueued would use an internal queue
     property MaxRunning: integer
       read fMaxRunning;
@@ -1352,10 +1621,10 @@ type
   protected
     fOwner: TSynThreadPool;
     fThreadNumber: integer;
-    {$ifndef USE_WINIOCP}
+    {$ifndef USE_THREADWINIOCP}
     fProcessingContext: pointer; // protected by fOwner.fSafe.Lock
     fEvent: TSynEvent;
-    {$endif USE_WINIOCP}
+    {$endif USE_THREADWINIOCP}
     procedure NotifyThreadStart(Sender: TSynThread);
     procedure DoTask(Context: pointer); // exception-safe call of fOwner.Task()
   public
@@ -1377,9 +1646,9 @@ type
   // Event-driven approach under Linux/POSIX
   TSynThreadPool = class
   protected
-    {$ifndef USE_WINIOCP}
+    {$ifndef USE_THREADWINIOCP}
     fSafe: TOSLightLock; // TLightLock is likely to be less stable
-    {$endif USE_WINIOCP}
+    {$endif USE_THREADWINIOCP}
     fWorkThread: TSynThreadPoolWorkThreads;
     fWorkThreadCount: integer;
     fRunningThreads: integer;
@@ -1393,7 +1662,7 @@ type
     fName, fPoolName: RawUtf8;
     fPendingContextCount: integer;
     fTerminated: boolean;
-    {$ifdef USE_WINIOCP}
+    {$ifdef USE_THREADWINIOCP}
     fRequestQueue: THandle; // IOCP has its own internal queue
     {$else}
     fQueuePendingContext: boolean;
@@ -1401,7 +1670,7 @@ type
     function GetPendingContextCount: integer;
     function PopPendingContext: pointer;
     function QueueLength: integer; virtual;
-    {$endif USE_WINIOCP}
+    {$endif USE_THREADWINIOCP}
     /// end thread on IO error
     function NeedStopOnIOError: boolean; virtual;
     /// process to be executed after notification
@@ -1417,13 +1686,13 @@ type
     // opened using Windows Overlapped I/O (IOCP)
     // - on POSIX, aQueuePendingContext=true will store the pending context into
     // an internal queue, so that Push() returns true until the queue is full
-    {$ifdef USE_WINIOCP}
+    {$ifdef USE_THREADWINIOCP}
     constructor Create(NumberOfThreads: integer = 32;
       aOverlapHandle: THandle = INVALID_HANDLE_VALUE; const aName: RawUtf8 = '');
     {$else}
     constructor Create(NumberOfThreads: integer = 32;
       aQueuePendingContext: boolean = false; const aName: RawUtf8 = '');
-    {$endif USE_WINIOCP}
+    {$endif USE_THREADWINIOCP}
     /// shut down the Thread pool, releasing all associated threads
     destructor Destroy; override;
     /// let a task (specified as a pointer) be processed by the Thread Pool
@@ -1435,7 +1704,7 @@ type
     // queue is full; set aWaitOnContention=true to wait up to
     // ContentionAbortDelay ms and retry to queue the task
     function Push(aContext: pointer; aWaitOnContention: boolean = false): boolean;
-    {$ifndef USE_WINIOCP}
+    {$ifndef USE_THREADWINIOCP}
     /// may be called after Push() returned false to see if queue was actually full
     // - returns false if QueuePendingContext is false
     function QueueIsFull: boolean;
@@ -1443,7 +1712,7 @@ type
     // - supplied as Create constructor parameter
     property QueuePendingContext: boolean
       read fQueuePendingContext;
-    {$endif USE_WINIOCP}
+    {$endif USE_THREADWINIOCP}
     /// low-level access to the threads defined in this thread pool
     property WorkThread: TSynThreadPoolWorkThreads
       read fWorkThread;
@@ -1483,11 +1752,11 @@ type
       read fContentionCount;
     /// how many input tasks are currently waiting to be affected to threads
     property PendingContextCount: integer
-      {$ifdef USE_WINIOCP}
+      {$ifdef USE_THREADWINIOCP}
       read fPendingContextCount;
       {$else}
       read GetPendingContextCount;
-      {$endif USE_WINIOCP}
+      {$endif USE_THREADWINIOCP}
   end;
 
   {$M-}
@@ -1502,8 +1771,273 @@ const
 procedure ThreadCountAdjust(var aThreadPoolCount: integer);
 
 
+{ ************* TPipeStream Read/Write synchronization between two threads }
+
+type
+  /// allow to customize TPipeStream behavior
+  // - psoWritePartial for Write() to return without blocking on partial sending
+  // - psoWriteNonBlocking for Write() to return 0 bytes on full buffer
+  // - psoWritePosition for Position to return the Write() number of bytes
+  // instead of the Read() number of bytes by default
+  // - psoReadNonBlocking for Read() to return 0 bytes on empty buffer
+  // - psoReadCheckSynchronize for Read() to detect the main thread and call
+  // CheckSynchronize which is slower but allow VCL/LCL UI responsiveness
+  // - psoCheckThread will ensure Read() and Write() are always called from
+  // the very same thread - may be useful to debug some unexpected behavior
+  TPipeStreamOptions = set of (
+    psoWritePartial,
+    psoWriteNonBlocking,
+    psoWritePosition,
+    psoReadNonBlocking,
+    psoReadCheckSynchronize,
+    psoCheckThread);
+
+  /// a TStream which transmits its Write() method buffer into its blocking Read()
+  // - used e.g. to efficiently synchronize/pipe data between two threads,
+  // as exactly one producer/Write thread and one consumer/Read thread
+  // - purpose is to replace e.g. a TFileStream with some asynchronous source
+  // of data, e.g. a HTTP request made in its background thread
+  TPipeStream = class(TStreamWithNoSeek)
+  protected
+    fLock: TLightLock;  // enough to protect MoveFast + TSynEvent.ResetEvent
+    fBuffer: PAnsiChar; // =nil after Close
+    fBufferSize, fPending: integer;
+    fReadPos, fWritePos: integer;
+    fReadTimeout, fWriteTimeout: cardinal;
+    fCanRead: TSynEvent;
+    fCanWrite: TSynEvent;
+    fOptions: TPipeStreamOptions;
+    fOnClose: TNotifyEvent;
+    fCallingThread: array[{wr=}boolean] of TThreadID;
+    procedure CheckCallingThread(wr: boolean);
+    function GetSize: Int64; override;
+    procedure DoTerminate; virtual; // called once from Abort/Destroy
+  public
+    /// initialize this TStream and its internal buffer
+    constructor Create(aBufSize: cardinal = 65536); reintroduce;
+    /// finalize this instance and its buffer
+    // - both producer/consumer threads should not use this instance from now on
+    destructor Destroy; override;
+    /// abort/close any blocking Read/Write process
+    // - as eventually called by Destroy - so you should not have to call this
+    // method, unless you want to break both Read() and Write() blocking methods
+    procedure Abort; virtual;
+    /// read up to Count bytes waiting for data sent on Write()
+    // - this method blocks when the internal buffer is empty (Pending = 0)
+    // - may return less than Count bytes if there is some data in the buffer
+    // - return 0 if aReadTimeout has been reached or psoReadNonBlocking was set
+    // - by default, TPipeStream.Position/Size reflect the total number of bytes
+    // from Read(), unless the psoWritePosition option is set
+    function Read(var Buffer; Count: Longint): Longint; override;
+    /// send Count bytes to the corresponding Read() on the other side of pipe
+    // - blocks when the internal buffer is full, until Count bytes are sent
+    // - write less than Count bytes only if aWriteTimeout has been reached,
+    // or if psoWritePartial/psoWriteNonBlocking options have been set
+    function Write(const Buffer; Count: Longint): Longint; override;
+    /// check if Abort has been called and pipe process was stopped
+    function Closed: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// informative value about data waiting for Read() - not thread-safe by design
+    property Pending: integer
+      read fPending;
+    /// informative value about the internal buffer size as supplied to Create()
+    property Capacity: integer
+      read fBufferSize;
+    /// Read() optional timeout in milliseconds
+    // - convenient e.g. when used in conjunction with sockets
+    property ReadTimeout: cardinal
+      read fReadTimeout write fReadTimeout;
+    /// Write() optional timeout in milliseconds
+    // - convenient e.g. when used in conjunction with sockets
+    property WriteTimeout: cardinal
+      read fWriteTimeout write fWriteTimeout;
+    /// customize the instance behavior
+    property Options: TPipeStreamOptions
+      read fOptions write fOptions;
+    /// internal metadata field which will be returned as TPipeStream.Size
+    // - convenient e.g. when the eventual/final resource size is known
+    // - equals -1 by default, i.e. if Size value should follow current Position
+    property ExpectedSize: Int64
+      read fSize write fSize;
+    /// called by Destroy/Abort e.g. to force shutdown of the running threads
+    property OnClose: TNotifyEvent
+      read fOnClose write fOnClose;
+  end;
+
 
 implementation
+
+
+{ ************* TThreads thread-safe wrapper }
+
+{ TThreads }
+
+procedure TThreads.Add(t: TThread);
+begin
+  Safe.Lock;
+  try
+    PtrArrayAdd(List, t);
+  finally
+    Safe.UnLock;
+  end;
+end;
+
+procedure TThreads.Terminated(t: TThread);
+begin
+  if t <> nil then
+    PtrArrayDelete(List, t, Safe);
+end;
+
+procedure TThreads.Terminate;
+var
+  i: PtrInt;
+begin
+  Safe.Lock;
+  try
+    for i := 0 to length(List) - 1 do
+      List[i].Terminate;
+  finally
+    Safe.UnLock;
+  end;
+end;
+
+procedure TThreads.TerminateAndWait(secs: integer; sender: TObject;
+  logclass: TSynLogClass);
+var
+  tix, endtix, lasttix: cardinal;
+  log: ISynLog;
+begin
+  if List = nil then
+    exit;
+  if logclass <> nil then
+    logclass.EnterLocal(log, sender, 'Shutdown');
+  Terminate;
+  if secs <= 0 then
+    exit;
+  lasttix := GetTickSec;
+  endtix := lasttix + cardinal(secs); // never wait forever
+  repeat
+    SleepHiRes(10);
+    if List = nil then
+      exit; // all thread did call Terminated()
+    tix := GetTickSec;
+    if Assigned(log) and
+       (lasttix <> tix) then
+      log.Log(sllTrace, 'TerminateAndWait: threads=#', [length(List)], sender);
+    lasttix := tix;
+  until tix > endtix;
+end;
+
+
+{ ************ IAutoFree and IAutoLocker Reference-Counted Process }
+
+{ TAutoFree }
+
+constructor TAutoFree.Create(var localVariable; obj: TObject);
+begin
+  fObject := obj;
+  TObject(localVariable) := obj;
+end;
+
+constructor TAutoFree.Create(const varObjPairs: array of pointer);
+var
+  n, i: PtrInt;
+begin
+  n := length(varObjPairs);
+  if (n = 0) or
+     (n and 1 = 1) then
+    exit;
+  n := n shr 1;
+  if n = 0 then
+    exit;
+  if n = 1 then
+  begin
+    fObject := varObjPairs[1];
+    PPointer(varObjPairs[0])^ := fObject;
+    exit;
+  end;
+  SetLength(fObjectList, n);
+  for i := 0 to n - 1 do
+  begin
+    fObjectList[i] := varObjPairs[i * 2 + 1];
+    PPointer(varObjPairs[i * 2])^ := fObjectList[i];
+  end;
+end;
+
+procedure TAutoFree.ForMethod;
+begin
+  // do-nothing method to circumvent the Delphi 10.4 IAutoFree early release
+end;
+
+class function TAutoFree.One(var localVariable; obj: TObject): IAutoFree;
+begin
+  result := Create(localVariable,obj);
+  {$ifdef ISDELPHI104}
+  result.ForMethod;
+  {$endif ISDELPHI104}
+end;
+
+class function TAutoFree.Several(const varObjPairs: array of pointer): IAutoFree;
+begin
+  result := Create(varObjPairs);
+  // inlining is not possible on Delphi -> Delphi 10.4 caller should run ForMethod :(
+end;
+
+procedure TAutoFree.Another(var localVariable; obj: TObject);
+var
+  n: PtrInt;
+begin
+  n := length(fObjectList);
+  SetLength(fObjectList, n + 1);
+  fObjectList[n] := obj;
+  TObject(localVariable) := obj;
+end;
+
+destructor TAutoFree.Destroy;
+var
+  i: PtrInt;
+begin
+  if fObjectList <> nil then
+    for i := length(fObjectList) - 1 downto 0 do // release FILO
+      fObjectList[i].Free;
+  fObject.Free;
+  inherited;
+end;
+
+
+{ TAutoLocker }
+
+constructor TAutoLocker.Create;
+begin
+  fSafe.Init;
+end;
+
+destructor TAutoLocker.Destroy;
+begin
+  fSafe.Done;
+  inherited Destroy;
+end;
+
+function TAutoLocker.ProtectMethod: IUnknown;
+begin
+  result := TAutoLock.Create(@fSafe);
+end;
+
+procedure TAutoLocker.Enter;
+begin
+  fSafe.Lock;
+end;
+
+procedure TAutoLocker.Leave;
+begin
+  fSafe.UnLock;
+end;
+
+function TAutoLocker.Safe: PSynLocker;
+begin
+  result := @fSafe;
+end;
+
 
 { ************ Thread-Safe TSynQueue and TPendingTaskList }
 
@@ -1517,9 +2051,9 @@ begin
   fLast := -2;
   fValues.Init(aArrayTypeInfo, fValueVar, @fCount);
   if aKind = ptNone then
-    aKind := fValues.Info.ArrayFirstFieldSort;      // compare by first field
+    aKind := fValues.Info.ArrayFirstFieldSort; // compare by first field
   if aKind <> ptNone then
-    fValues.SetParserType(aKind, aCaseInsensitive); // set fValues.fCompare()
+    fValues.Compare := DynArraySortOne(aKind, aCaseInsensitive); // may be nil
 end;
 
 {$ifdef HASGENERICS}
@@ -2106,7 +2640,7 @@ function TPendingTaskList.NextPendingTask: RawByteString;
 var
   tix: Int64;
 begin
-  result := '';
+  FastAssignNew(result);
   if (self = nil) or
      (fTasks.Count = 0) then
     exit;
@@ -2341,7 +2875,7 @@ begin
   end;
 end;
 
-function TLockedDocVariant.ToJson(HumanReadable: boolean): RawUtf8;
+function TLockedDocVariant.ToJson(Format: TTextWriterJsonFormat): RawUtf8;
 var
   tmp: RawUtf8;
 begin
@@ -2351,8 +2885,8 @@ begin
   finally
     fSafe.ReadOnlyUnLock;
   end;
-  if HumanReadable then
-    JsonBufferReformat(pointer(tmp), result)
+  if Format <> jsonCompact then
+    JsonBufferReformat(pointer(tmp), result, Format)
   else
     result := tmp;
 end;
@@ -2623,9 +3157,14 @@ begin
       until false
     else
     {$endif OSWINDOWS}
-      fCallerEvent.WaitForEver;
+      // loop to ignore any (spurious) wake-up until the process is actually done
+      // - e.g. Delphi POSIX TEvent does not filter pthread_cond spurious wakeups
+      repeat
+        fCallerEvent.WaitForEver;
+      until fPendingProcessFlag <> flagStarted;
     if fPendingProcessFlag <> flagFinished then
-      ESynThread.RaiseUtf8('%.WaitForFinished: flagFinished?', [self]);
+      ESynThread.RaiseUtf8('%.WaitForFinished: flag=% exec=% terminated=%',
+        [self, ord(fPendingProcessFlag), ord(fExecute), ord(Terminated)]);
     if fBackgroundException <> nil then
     begin
       E := fBackgroundException;
@@ -2972,15 +3511,11 @@ end;
 
 { TSynBackgroundTimer }
 
-var
-  ProcessSystemUse: TSystemUse;
-
 constructor TSynBackgroundTimer.Create(const aThreadName: RawUtf8;
   const aOnBeforeExecute: TOnNotifyThread; aOnAfterExecute: TOnNotifyThread;
   aStats: TSynMonitorClass; aLogClass: TSynLogClass);
 begin
-  fTasks.DynArray.Init(TypeInfo(TSynBackgroundTimerTaskDynArray),
-    fTask, @fTasks.Count);
+  fTasks.Init(TypeInfo(TSynBackgroundTimerTasks), fTask, @fTaskCount);
   if not Assigned(aOnAfterExecute) and
      Assigned(aLogClass) then // minimal TSynLog support
     aOnAfterExecute := aLogClass.Family.OnThreadEnded;
@@ -2990,100 +3525,116 @@ end;
 
 destructor TSynBackgroundTimer.Destroy;
 begin
-  if (ProcessSystemUse <> nil) and
-     (ProcessSystemUse.Timer = self) then
-    ProcessSystemUse.Timer := nil; // allows processing by another background timer
+  if (ProcessSystemUseTimer <> nil) and
+     (ProcessSystemUseTimer^ = self) then
+    ProcessSystemUseTimer^ := nil; // free ownership for another background timer
   inherited Destroy;
 end;
-
-const
-  TIXPRECISION = 32; // GetTickCount64 resolution (for aOnProcessSecs=1)
 
 procedure TSynBackgroundTimer.EverySecond(Sender: TSynBackgroundThreadProcess);
 var
   tix: Int64;
-  i, f, n: PtrInt;
-  t: ^TSynBackgroundTimerTask;
-  todo: TSynBackgroundTimerTaskDynArray; // avoid lock contention
+  i: integer;
+  t, todo: PSynBackgroundTimerTask;
 begin
   if (fTask = nil) or
      Terminated then
     exit;
-  tix := mormot.core.os.GetTickCount64;
-  n := 0;
+  tix := mormot.core.os.GetTickCount64; // retrieve once outside lock
   LockedInc32(@fProcessingCounter);
   try
-    fTasks.Safe.WriteLock;
+    i := 0;
+    todo := nil;
+    fSafe.Lock; // very quick, just enough to copy to fTodo[]
     try
-      i := 0;
-      while i < fTasks.Count do
+      t := pointer(fTask);
+      while i < fTaskCount do
       begin
-        t := @fTask[i];
         if tix >= t^.NextTix then
         begin
-          if n = 0 then
-            SetLength(todo, fTasks.Count - n);
-          MoveFast(t^, todo[n], SizeOf(t^)); // no COW needed
-          pointer(t^.Msg) := nil; // now owned by todo[n].Msg
-          inc(n);
-          if integer(t^.Secs) = -1 then
+          // threadsafe move of this triggerred task into our local todo list
+          if todo = nil then
           begin
-            // from ExecuteOnce()
-            fTasks.DynArray.Delete(i); // is likely to be the last -> no move
-            continue; // don't inc(i)
-          end
-          else
-            // schedule for next time
-            t^.NextTix := tix + ((t^.Secs * 1000) - TIXPRECISION);
+            if length(fTodo) < fTaskCount then // no need to resize often
+              SetLength(fTodo, NextGrow(fTaskCount));
+            todo := pointer(fTodo);
+          end;
+          todo^ := t^;
+          inc(todo);
+          if t^.MilliSecs < 0 then
+          begin
+            // Secs=-1 from ExecuteOnce() -> delete
+            fTasks.Delete(i); // is likely to be the last -> no move
+            t := @fTask[i];   // t may have moved to another location
+            continue;         // no inc(i)
+          end;
+          // schedule for next occurence - should match Enable() logic below
+          t^.NextTix := tix + t^.MilliSecs;
+          t^.Msg := nil;
+          t^.MsgCount := 0; // reset
         end;
         inc(i);
+        inc(t);
       end;
     finally
-      fTasks.Safe.WriteUnLock;
+      fSafe.UnLock;
     end;
-    for i := 0 to n - 1 do
-      with todo[i] do
-        if Msg <> nil then
-          for f := 0 to length(Msg) - 1 do
-            try
-              OnProcess(self, Msg[f]);
-            except // any exception is just ignored
-            end
-        else
+    if todo = nil then
+      exit;
+    // execute the pending tasks out of the main fSafe lock
+    t := pointer(fTodo);
+    repeat
+      if t^.MsgCount <> 0 then
+      begin
+        for i := 0 to t^.MsgCount - 1 do
           try
-            OnProcess(self, '');
-          except
+            t^.OnProcess(self, t^.Msg[i]);
+          except // any exception is just ignored
           end;
+        t^.Msg := nil; // release memory ASAP
+      end
+      else
+        try
+          t^.OnProcess(self, '');
+        except
+        end;
+      inc(t);
+    until t = todo;
   finally
     fProcessing := InterlockedDecrement(fProcessingCounter) <> 0;
   end;
 end;
 
-function TSynBackgroundTimer.Find(const aProcess: TMethod): PtrInt;
+function TSynBackgroundTimer.Find(const aProcess: TMethod): PSynBackgroundTimerTask;
 var
-  m: ^TSynBackgroundTimerTask;
+  n: integer;
 begin
-  // caller should have made fTaskLock.Lock;
-  result := fTasks.Count - 1;
-  if result >= 0 then
+  // caller should have made fTasks.Safe.*Lock
+  n := fTaskCount;
+  if (n > 0) and
+     Assigned(aProcess.Code) then
   begin
-    m := @fTask[result];
+    result := pointer(fTask);
     repeat
-      with TMethod(m^.OnProcess) do
-        if (Code = aProcess.Code) and
-           (Data = aProcess.Data) then
-          exit;
-      dec(result);
-      dec(m);
-    until result < 0;
+      if (TMethod(result^.OnProcess).Code = aProcess.Code) and
+         (TMethod(result^.OnProcess).Data = aProcess.Data) then
+        exit;
+      inc(result);
+      dec(n);
+    until n = 0;
   end;
+  result := nil;
 end;
 
+const
+  TIXPRECISION = 32; // GetTickCount64 resolution (for aOnProcessSecs=1)
+  NO_MSG: RawUtf8 = '-nomsg-'; // hidden place holder for ExecuteNow()
+
 procedure TSynBackgroundTimer.Enable(
-  const aOnProcess: TOnSynBackgroundTimerProcess; aOnProcessSecs: cardinal);
+  const aOnProcess: TOnSynBackgroundTimerProcess; aOnProcessSecs: integer);
 var
-  task: TSynBackgroundTimerTask;
-  found: PtrInt;
+  new: TSynBackgroundTimerTask;
+  found: PSynBackgroundTimerTask;
 begin
   if (self = nil) or
      Terminated or
@@ -3094,19 +3645,19 @@ begin
     Disable(aOnProcess);
     exit;
   end;
-  task.OnProcess := aOnProcess;
-  task.Secs := aOnProcessSecs;
-  task.NextTix := mormot.core.os.GetTickCount64 + (aOnProcessSecs * 1000 - TIXPRECISION);
-  task.MsgSafe.Init; // required since task is on stack
-  fTasks.Safe.WriteLock;
+  new.MsgCount  := 0;
+  new.OnProcess := aOnProcess;
+  new.MilliSecs := aOnProcessSecs * 1000 - TIXPRECISION; // may be -1032 from -1
+  new.NextTix   := mormot.core.os.GetTickCount64 + new.MilliSecs;
+  fSafe.Lock;
   try
     found := Find(TMethod(aOnProcess));
-    if found >= 0 then
-      fTask[found] := task
+    if found <> nil then
+      found^ := new
     else
-      fTasks.DynArray.Add(task);
+      fTasks.Add(new);
   finally
-    fTasks.Safe.WriteUnLock;
+    fSafe.UnLock;
   end;
 end;
 
@@ -3118,7 +3669,7 @@ end;
 function TSynBackgroundTimer.ExecuteNow(
   const aOnProcess: TOnSynBackgroundTimerProcess): boolean;
 begin
-  result := Add(aOnProcess, #0, true);
+  result := Add(aOnProcess, NO_MSG, true);
 end;
 
 function TSynBackgroundTimer.ExecuteOnce(
@@ -3128,7 +3679,7 @@ begin
             Assigned(self);
   if not result then
     exit;
-  Enable(aOnProcess, cardinal(-1));
+  Enable(aOnProcess, {Secs=}-1);
   Add(aOnProcess, 'Once', true);
 end;
 
@@ -3143,93 +3694,79 @@ function TSynBackgroundTimer.EnQueue(
   const aOnProcess: TOnSynBackgroundTimerProcess; const aMsgFmt: RawUtf8;
   const Args: array of const; aExecuteNow: boolean): boolean;
 var
-  msg: RawUtf8;
+  txt: RawUtf8;
 begin
-  FormatUtf8(aMsgFmt, Args, msg);
-  result := Add(aOnProcess, msg, aExecuteNow);
+  FormatUtf8(aMsgFmt, Args, txt);
+  result := Add(aOnProcess, txt, aExecuteNow);
 end;
 
 function TSynBackgroundTimer.Add(
   const aOnProcess: TOnSynBackgroundTimerProcess; const aMsg: RawUtf8;
   aExecuteNow: boolean): boolean;
 var
-  found: PtrInt;
+  t: PSynBackgroundTimerTask;
 begin
   result := false;
   if (self = nil) or
-     Terminated or
-     (not Assigned(aOnProcess)) then
+     Terminated then
     exit;
-  fTasks.Safe.ReadLock;
+  fSafe.Lock;
   try
-    found := Find(TMethod(aOnProcess));
-    if found >= 0 then
-    begin
-      with fTask[found] do
-      begin
-        if aExecuteNow then
-          NextTix := 0;
-        if aMsg <> #0 then
-        begin
-          MsgSafe.Lock;
-          AddRawUtf8(Msg, aMsg);
-          MsgSafe.UnLock;
-        end;
-      end;
-      if aExecuteNow then
-        ProcessEvent.SetEvent;
-      result := true;
-    end;
+    t := Find(TMethod(aOnProcess));
+    if t = nil then
+      exit;
+    if pointer(aMsg) <> pointer(NO_MSG) then // ExecuteNow() expects no Msg
+      AddRawUtf8(t^.Msg, t^.MsgCount, aMsg);
+    if aExecuteNow then
+      t^.NextTix := 0;
+    result := true;
   finally
-    fTasks.Safe.ReadUnLock;
+    fSafe.UnLock;
   end;
+  if aExecuteNow then
+    fProcessEvent.SetEvent; // trigger outside of the lock to keep it short
 end;
 
 function TSynBackgroundTimer.DeQueue(
   const aOnProcess: TOnSynBackgroundTimerProcess; const aMsg: RawUtf8): boolean;
 var
-  found: PtrInt;
+  t: PSynBackgroundTimerTask;
+  i: integer;
 begin
   result := false;
   if (self = nil) or
-     Terminated or
-     (not Assigned(aOnProcess)) then
+     Terminated then
     exit;
-  fTasks.Safe.ReadLock;
+  fSafe.Lock;
   try
-    found := Find(TMethod(aOnProcess));
-    if found >= 0 then
-      with fTask[found] do
-      begin
-        MsgSafe.Lock;
-        result := DeleteRawUtf8(Msg, FindRawUtf8(Msg, aMsg));
-        MsgSafe.UnLock;
-      end;
+    t := Find(TMethod(aOnProcess));
+    if t = nil then
+      exit;
+    i := FindRawUtf8(pointer(t^.Msg), aMsg, t^.MsgCount, {casesens=}true);
+    result := DeleteRawUtf8(t^.Msg, t^.MsgCount, i);
   finally
-    fTasks.Safe.ReadUnLock;
+    fSafe.UnLock;
   end;
 end;
 
 function TSynBackgroundTimer.Disable(
   const aOnProcess: TOnSynBackgroundTimerProcess): boolean;
 var
-  found: PtrInt;
+  t: PSynBackgroundTimerTask;
 begin
   result := false;
   if (self = nil) or
-     Terminated or
-     (not Assigned(aOnProcess)) then
+     Terminated then
     exit;
-  fTasks.Safe.WriteLock;
+  fSafe.Lock;
   try
-    found := Find(TMethod(aOnProcess));
-    if found >= 0 then
-    begin
-      fTasks.DynArray.Delete(found);
-      result := true;
-    end;
+    t := Find(TMethod(aOnProcess));
+    if t = nil then
+      exit;
+    fTasks.Delete((PtrUInt(t) - PtrUInt(fTask)) div SizeOf(t^));
+    result := true;
   finally
-    fTasks.Safe.WriteUnLock;
+    fSafe.UnLock;
   end;
 end;
 
@@ -3681,7 +4218,7 @@ procedure TNotifiedThread.SetServerThreadsAffinityPerCpu(
 var
   rnd, i: PtrInt;
 begin
-  rnd := SystemInfo.dwNumberOfProcessors;
+  rnd := CpuThreads;
   if (threads = nil) or
      (rnd <= 1) then
     exit;
@@ -3696,17 +4233,16 @@ end;
 procedure TNotifiedThread.SetServerThreadsAffinityPerSocket(
   const log: ISynLog; const threads: TThreadDynArray);
 var
-  sock, persock, i: integer;
+  sock, persock, i: cardinal;
   ok: boolean;
 begin
   if (threads = nil) or
      (CpuSockets <= 1) then
     exit;
   // with multiple CPU sockets, group threads by closest HW socket
-  persock := length(threads) div CpuSockets;
+  persock := cardinal(length(threads)) div CpuSockets;
   if Assigned(log) then
-    log.Log(sllTrace, 'Create: CpuSockets=% persock=%',
-      [CpuSockets, persock], self);
+    log.Log(sllTrace, 'Create: CpuSockets=% persock=%', [CpuSockets, persock], self);
   sock := 0;
   SetThreadSocketAffinity(self, sock); // AW with R0 and lower R# threads
   for i := 0 to high(threads) do
@@ -3907,7 +4443,7 @@ constructor TLoggedWorker.Create(aSynLog: TSynLogClass; aMaxThread: integer);
 begin
   fSynLog := aSynLog;
   if aMaxThread = 0 then
-    aMaxThread := SystemInfo.dwNumberOfProcessors;
+    aMaxThread := CpuThreads; // = SystemInfo.dwNumberOfProcessors logical count
   fMaxRunning := aMaxThread;
 end;
 
@@ -4053,13 +4589,15 @@ end;
 
 { TSynThreadPool }
 
-{$ifdef USE_WINIOCP}
+{.$define THREADPOOL_DEBUGLOG} // to help debugging e.g. THttpServer
+
+{$ifdef USE_THREADWINIOCP}
 constructor TSynThreadPool.Create(NumberOfThreads: integer;
   aOverlapHandle: THandle; const aName: RawUtf8);
 {$else}
 constructor TSynThreadPool.Create(NumberOfThreads: integer;
   aQueuePendingContext: boolean; const aName: RawUtf8);
-{$endif USE_WINIOCP}
+{$endif USE_THREADWINIOCP}
 var
   i: PtrInt;
 begin
@@ -4074,7 +4612,7 @@ begin
   if fPoolName = '' then
     fPoolName := 'pool';
   // create IO completion port to queue the HTTP requests
-  {$ifdef USE_WINIOCP}
+  {$ifdef USE_THREADWINIOCP}
   fRequestQueue := IocpCreate(aOverlapHandle, 0, nil, NumberOfThreads);
   if fRequestQueue = INVALID_HANDLE_VALUE then
     fRequestQueue := 0;
@@ -4083,7 +4621,7 @@ begin
   {$else}
   fSafe.Init; // mandatory for TOSLightLock
   fQueuePendingContext := aQueuePendingContext;
-  {$endif USE_WINIOCP}
+  {$endif USE_THREADWINIOCP}
   // now create the worker threads
   fWorkThreadCount := NumberOfThreads;
   SetLength(fWorkThread, fWorkThreadCount);
@@ -4098,9 +4636,9 @@ var
 begin
   fTerminated := true; // fWorkThread[].Execute will check this flag
   try
-    {$ifdef USE_WINIOCP}
+    {$ifdef USE_THREADWINIOCP}
     // notify the threads we are shutting down
-    for i := 0 to fWorkThreadCount * 2  do
+    for i := 0 to fWorkThreadCount * 2 do // *2 = better safe than sorry
       IocpPostQueuedStatus(fRequestQueue, 0, nil, {ctxt=}nil);
       // TaskAbort() is done in Execute when fTerminated = true
     {$else}
@@ -4110,27 +4648,33 @@ begin
     // cleanup now any pending task (e.g. THttpServerSocket instance)
     for i := 0 to fPendingContextCount - 1 do
       TaskAbort(fPendingContext[i]);
-    {$endif USE_WINIOCP}
+    {$endif USE_THREADWINIOCP}
     // wait for threads to finish, with 30 seconds TimeOut
     endtix := GetTickSec + 30;
     while (fRunningThreads > 0) and
           (GetTickSec < endtix) do
       SleepHiRes(5);
     for i := 0 to fWorkThreadCount - 1 do
+    begin
+      {$ifdef THREADPOOL_DEBUGLOG}
+      TSynLog.Add.Log(sllTrace, 'fWorkThread[%].Free as %',
+        [i, fWorkThread[i].fThreadNumber]);
+      {$endif THREADPOOL_DEBUGLOG}
       fWorkThread[i].Free;
+    end;
   finally
-    {$ifdef USE_WINIOCP}
+    {$ifdef USE_THREADWINIOCP}
     CloseHandle(fRequestQueue);
     {$else}
     fSafe.Done; // mandatory for TOSLightLock
-    {$endif USE_WINIOCP}
+    {$endif USE_THREADWINIOCP}
   end;
   inherited Destroy;
 end;
 
 function TSynThreadPool.Push(aContext: pointer; aWaitOnContention: boolean): boolean;
 
-{$ifdef USE_WINIOCP}
+{$ifdef USE_THREADWINIOCP}
 
   function Enqueue: boolean;
   begin
@@ -4179,7 +4723,7 @@ function TSynThreadPool.Push(aContext: pointer; aWaitOnContention: boolean): boo
     fSafe.UnLock;
   end;
 
-{$endif USE_WINIOCP}
+{$endif USE_THREADWINIOCP}
 
 var
   tix, starttix, endtix: Int64;
@@ -4220,7 +4764,7 @@ begin
     inc(fContentionAbortCount);
 end;
 
-{$ifndef USE_WINIOCP}
+{$ifndef USE_THREADWINIOCP}
 
 function TSynThreadPool.GetPendingContextCount: integer;
 begin
@@ -4273,7 +4817,7 @@ begin
   result := 10000; // lazy high value
 end;
 
-{$endif USE_WINIOCP}
+{$endif USE_THREADWINIOCP}
 
 function TSynThreadPool.NeedStopOnIOError: boolean;
 begin
@@ -4291,18 +4835,18 @@ constructor TSynThreadPoolWorkThread.Create(Owner: TSynThreadPool);
 begin
   fOwner := Owner; // ensure it is set ASAP: on Linux, Execute raises immediately
   fOnThreadTerminate := Owner.fOnThreadTerminate;
-  {$ifndef USE_WINIOCP}
+  {$ifndef USE_THREADWINIOCP}
   fEvent := TSynEvent.Create;
-  {$endif USE_WINIOCP}
+  {$endif USE_THREADWINIOCP}
   inherited Create({suspended=}false);
 end;
 
 destructor TSynThreadPoolWorkThread.Destroy;
 begin
   inherited Destroy;
-  {$ifndef USE_WINIOCP}
+  {$ifndef USE_THREADWINIOCP}
   fEvent.Free;
-  {$endif USE_WINIOCP}
+  {$endif USE_THREADWINIOCP}
 end;
 
 procedure TSynThreadPoolWorkThread.DoTask(Context: pointer);
@@ -4317,43 +4861,66 @@ end;
 
 procedure TSynThreadPoolWorkThread.Execute;
 var
-  ctxt: pointer;
-  {$ifdef USE_WINIOCP}
+  ctxt: {$ifdef THREADPOOL_DEBUGLOG} TObject {$else} pointer {$endif};
+  {$ifdef USE_THREADWINIOCP}
   dum1: cardinal; // those variables are not used by our queue
   dum2: pointer;
-  {$endif USE_WINIOCP}
+  {$endif USE_THREADWINIOCP}
 begin
   if fOwner <> nil then
   try
     fThreadNumber := InterlockedIncrement(fOwner.fRunningThreads);
     NotifyThreadStart(self);
-    {$ifdef USE_WINIOCP}
+    {$ifdef USE_THREADWINIOCP}
     // main loop, waiting for the next task(s) to process from IOCP
     ctxt := nil;
     repeat
+      {$ifdef THREADPOOL_DEBUGLOG}
+      TSynLog.Add.Log(sllTrace, 'Thread #% IOCP waiting', [fThreadNumber]);
+      {$endif THREADPOOL_DEBUGLOG}
       if not IocpGetQueuedStatus(fOwner.fRequestQueue, dum1, dum2,
-           ctxt, INFINITE) then // blocking during normal process
+           pointer(ctxt), INFINITE) then // blocking during normal process
         if fOwner.NeedStopOnIOError then
-          break;
+          break
+      {$ifdef THREADPOOL_DEBUGLOG}
+        else
+          TSynLog.Add.Log(sllTrace, 'Thread #% IOCP failed', [fThreadNumber]);
+      TSynLog.Add.Log(sllTrace, 'Received ctxt=% in thread #%', [ctxt, fThreadNumber])
+      {$endif THREADPOOL_DEBUGLOG};
       if fOwner.fTerminated then
         break;
       if ctxt = nil then
         continue;
+      {$ifdef THREADPOOL_DEBUGLOG}
+      TSynLog.Add.Log(sllTrace, 'Thread #% before DoTask(%)', [fThreadNumber, ctxt]);
+      {$endif THREADPOOL_DEBUGLOG}
       DoTask(ctxt);
+      {$ifdef THREADPOOL_DEBUGLOG}
+      TSynLog.Add.Log(sllTrace, 'Thread #% after DoTask(%)', [fThreadNumber, ctxt]);
+      {$endif THREADPOOL_DEBUGLOG}
       InterlockedDecrement(fOwner.fPendingContextCount);
       ctxt := nil;
     until fOwner.fTerminated or
           Terminated;
+    {$ifdef THREADPOOL_DEBUGLOG}
+    TSynLog.Add.Log(sllTrace, 'After main loop in thread #%', [fThreadNumber]);
+    {$endif THREADPOOL_DEBUGLOG}
     // this thread is finished: pending tasks cleanup
     repeat
       if ctxt = nil then
         break; // reached the TSynThreadPool.Destroy "nil" events in the queue
       try
+        {$ifdef THREADPOOL_DEBUGLOG}
+        TSynLog.Add.Log(sllTrace, 'Task Abort in thread #%', [fThreadNumber]);
+        {$endif THREADPOOL_DEBUGLOG}
         fOwner.TaskAbort(ctxt); // e.g. free the THttpServerSocket instance
       except
       end;
       InterlockedDecrement(fOwner.fPendingContextCount); // always dec
-    until not IocpGetQueuedStatus(fOwner.fRequestQueue, dum1, dum2, ctxt, {ms=}1);
+    until not IocpGetQueuedStatus(fOwner.fRequestQueue, dum1, dum2, pointer(ctxt), {ms=}1);
+    {$ifdef THREADPOOL_DEBUGLOG}
+    TSynLog.Add.Log(sllTrace, 'Ended thread #%', [fThreadNumber]);
+    {$endif THREADPOOL_DEBUGLOG}
     {$else}
     // main loop, waiting for the next task(s) notified from this thread event
     repeat
@@ -4376,7 +4943,7 @@ begin
     until fOwner.fTerminated or
           Terminated;
     // TaskAbort(fPendingContext[]) is done in fOwner's TSynThreadPool.Destroy
-    {$endif USE_WINIOCP}
+    {$endif USE_THREADWINIOCP}
   finally
     LockedDec32(@fOwner.fRunningThreads);
   end;
@@ -4404,6 +4971,176 @@ begin
     if aThreadPoolCount > 4 then
       aThreadPoolCount := 4; // Windows PRISM does not like too many threads
   {$endif OSWINDOWS}
+end;
+
+
+{ ************* TPipeStream Read/Write synchronization between two threads }
+
+{ TPipeStream }
+
+constructor TPipeStream.Create(aBufSize: cardinal);
+begin
+  inherited Create;
+  fBufferSize := NextPowerOfTwo(aBufSize); // for efficient "and size-1" modulo
+  fReadTimeout := INFINITE;
+  fWriteTimeout := INFINITE;
+  fSize := -1; // eventual Size metadata is disabled by default
+  GetMem(fBuffer, fBufferSize);
+  fCanRead := TSynEvent.Create;
+  fCanWrite := TSynEvent.Create;
+  fCanWrite.SetEvent; // initially empty => writable
+end;
+
+destructor TPipeStream.Destroy;
+begin
+  Abort; // do-nothing if already called
+  fCanRead.Free;
+  fCanWrite.Free;
+  inherited Destroy;
+end;
+
+procedure TPipeStream.Abort;
+begin
+  fLock.Lock;
+  try
+    if fBuffer <> nil then // make the method re-entrant (e.g. from Destroy)
+    begin
+      DoTerminate;
+      FreeMem(fBuffer);
+    end;
+    fBuffer := nil;    // mark as closed
+  finally
+    fLock.UnLock;
+  end;
+  fCanRead.SetEvent; // always release both Read() and Write() methods
+  fCanWrite.SetEvent;
+end;
+
+procedure TPipeStream.DoTerminate;
+begin
+  if Assigned(fOnClose) then
+  try
+    fOnClose(self);  // may e.g. notify the threads
+  except
+    fOnClose := nil; // trap any exception in user code and disable it
+  end;
+end;
+
+function TPipeStream.Closed: boolean;
+begin
+  result := fBuffer = nil;
+end;
+
+function TPipeStream.Read(var Buffer; Count: Longint): Longint;
+var
+  tail: integer;
+  wakewriter: boolean;
+begin
+  result := 0;
+  if (Count <= 0) or
+     Closed then
+    exit;
+  if psoCheckThread in fOptions then
+    CheckCallingThread({wr=}false);
+  repeat
+    wakewriter := false;
+    fLock.Lock;
+    try
+      if Closed then
+        exit;
+      fCanRead.ResetEvent;
+      if fPending > 0 then
+      begin
+        wakewriter := fPending = fBufferSize; // Write() blocks on full buffer
+        result := MinPtrInt(Count, fPending);
+        tail := fBufferSize - fReadPos;
+        MoveFast(fBuffer[fReadPos], Buffer, MinPtrInt(result, tail));
+        if result > tail then
+          MoveFast(fBuffer[0], PAnsiChar(@Buffer)[tail], result - tail);
+        fReadPos := (fReadPos + result) and (fBufferSize - 1); // fast modulo
+        dec(fPending, result);
+        if not (psoWritePosition in fOptions) then
+          inc(fPosition, result);
+        exit; // quickly return partial Read() without blocking
+      end;
+    finally
+      fLock.UnLock;
+      if wakewriter then
+        fCanWrite.SetEvent; // trigger to fill some more from Write()
+    end;
+  until Closed or
+        (psoReadNonBlocking in fOptions) or // return 0 on timeout or non-blocking
+        not fCanRead.WaitForSafe(fReadTimeout, not(psoReadCheckSynchronize in fOptions));
+end;
+
+function TPipeStream.Write(const Buffer; Count: Longint): Longint;
+var
+  avail, towrite, tail: integer;
+  wakereader: boolean;
+  P: PAnsiChar;
+begin
+  result := 0;
+  if (Count <= 0) or
+     Closed then
+    exit;
+  if psoCheckThread in fOptions then
+    CheckCallingThread({wr=}true);
+  P := @Buffer;
+  repeat
+    fLock.Lock;
+    try
+      if Closed then
+        exit;
+      fCanWrite.ResetEvent;
+      wakereader := fPending = 0; // Read() blocks on empty buffer
+      avail := fBufferSize - fPending;
+      if avail > 0 then
+      begin
+        towrite := MinPtrInt(Count - result, avail);
+        tail := fBufferSize - fWritePos;
+        MoveFast(P[0], fBuffer[fWritePos], MinPtrInt(towrite, tail));
+        if towrite > tail then
+          MoveFast(P[tail], fBuffer[0], towrite - tail);
+        fWritePos := (fWritePos + towrite) and (fBufferSize - 1); // fast modulo
+        inc(P, towrite);
+        inc(fPending, towrite);
+        inc(result, towrite);
+        if psoWritePosition in fOptions then
+          inc(fPosition, towrite);
+      end;
+    finally
+      fLock.UnLock;
+    end;
+    if wakereader then
+      fCanRead.SetEvent; // trigger to consume some more from Read()
+  until Closed or
+        (result = Count) or // blocks until all Count bytes have been written
+        (psoWriteNonBlocking in fOptions) or
+        ((result <> 0) and
+         (psoWritePartial in fOptions)) or    // optional partial Write()
+        not fCanWrite.WaitFor(fWriteTimeout); // partial Write() on timeout
+end;
+
+function TPipeStream.GetSize: Int64;
+begin
+  result := fSize; // custom ExpectedSize meta-data value
+  if result < 0 then
+    result := fPosition;
+end;
+
+const
+  _RW: array[boolean] of TShort7 = ('Read', 'Write');
+
+procedure TPipeStream.CheckCallingThread(wr: boolean);
+var
+  tid: TThreadID;
+begin
+  tid := GetCurrentThreadId;
+  if fCallingThread[wr] <> tid then
+    if PtrUInt(fCallingThread[wr]) = 0 then
+      fCallingThread[wr] := tid // set at first call
+    else
+      ESynThread.RaiseUtf8('%.% called from wrong thread', [self, _RW[wr]]);
 end;
 
 end.

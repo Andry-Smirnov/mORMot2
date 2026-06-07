@@ -22,6 +22,7 @@ uses
   mormot.core.data,
   mormot.core.json,
   mormot.core.variants,
+  mormot.core.fmt,
   mormot.crypt.core,
   mormot.crypt.secure,
   mormot.crypt.ecc,
@@ -194,6 +195,7 @@ type
     function QuickSelectGT(IndexA, IndexB: PtrInt): boolean;
     procedure intadd(const Sender; Value: integer);
     procedure intdel(const Sender; Value: integer);
+    // methods below are run in the background from _TDynArray startup
     /// test the TDynArrayHashed object and methods (dictionary features)
     // - this test will create an array of 200,000 items to test speed
     procedure TDynArrayHashedSlow(Context: TObject);
@@ -205,12 +207,14 @@ type
     procedure TimeZonesSlow(Context: TObject);
     /// test the TRawUtf8List class
     procedure TRawUtf8ListSlow(Context: TObject);
+    /// test the TPipeStream class
+    procedure TStreamSlow(Context: TObject);
   published
     /// test RecordCopy(), TRttiMap and TRttiFilter
     procedure _Records;
     /// test the TSynList class
     procedure _TSynList;
-    /// test the TDynArray object and methods
+    /// test the TDynArray object and methods - also launch background *Slow()
     procedure _TDynArray;
     /// validate the TSynQueue class
     procedure _TSynQueue;
@@ -645,7 +649,7 @@ begin
   Check(mormot.core.text.HexToBin('200100B80A0B12F00000000000000001', PByte(@ip), 16));
   IP6Text(@ip, txt);
   CheckEqual(txt, '2001:b8:a0b:12f0::1');
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   GetBitsCountPtrInt := @GetBitsCountPurePascal;
   TestPopCnt('pas');
   GetBitsCountPtrInt := @GetBitsCountPas; // x86/x86_64 assembly
@@ -657,7 +661,7 @@ begin
   end;
   {$else}
   TestPopCnt('pas');
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   {$ifdef FPC}
   timer.Start;
   for u := 1 to N do
@@ -825,14 +829,48 @@ procedure TTestCoreBase.FastStringCompare;
     Check(HasAnyChar(text, any) = expected);
   end;
 
+  function _StrIEqualW(p1, p2: PWideChar): boolean; // for Delphi 7-2027
+  begin
+    result := StrIEqualW(pointer(p1), pointer(p2));
+  end;
+
+var
+  fn: TFileName;
 begin
   CheckEqual(CompareText('', ''), 0);
   Check(CompareText('abcd', '') > 0);
   Check(CompareText('', 'abcd') < 0);
   CheckEqual(StrIComp(nil, nil), 0);
+  Check(StrIEqual(nil, nil));
   CheckEqual(StrIComp(PAnsiChar('abcD'), nil), 1);
   CheckEqual(StrIComp(nil, PAnsiChar('ABcd')), -1);
   CheckEqual(StrIComp(PAnsiChar('abcD'), PAnsiChar('ABcd')), 0);
+  Check(StrIEqual(nil, nil));
+  Check(StrIEqual(PAnsiChar('abcD'), PAnsiChar('ABcd')));
+  Check(not StrIEqual(PAnsiChar('abcD'), PAnsiChar('ABc')));
+  Check(not StrIEqual(PAnsiChar('abcD'), PAnsiChar('ABce')));
+  Check(not StrIEqual(PAnsiChar('abcD'), PAnsiChar('ABcde')));
+  Check(not StrIEqual(nil, PAnsiChar('test')));
+  Check(not StrIEqual(PAnsiChar('test'), nil));
+  Check(StrIEqual(PAnsiChar('Test'), PAnsiChar('test')));
+  Check(not StrIEqual(PAnsiChar('abc'), PAnsiChar('xyz')));
+  Check(_StrIEqualW('abcD', 'ABcd'));
+  Check(not _StrIEqualW('abcD', 'ABc'));
+  Check(not _StrIEqualW('abcD', 'ABce'));
+  Check(not _StrIEqualW('abcD', 'ABcde'));
+  Check(_StrIEqualW(nil, nil));
+  Check(not _StrIEqualW(nil, 'test'));
+  Check(not _StrIEqualW('test', nil));
+  Check(_StrIEqualW('Test', 'test'));
+  Check(not _StrIEqualW('abc', 'xyz'));
+  Check(SameTextS('', ''));
+  Check(SameTextS('a', 'a'));
+  Check(SameTextS('a', 'A'));
+  Check(SameTextS('ab', 'Ab'));
+  Check(SameTextS('aBC', 'AbC'));
+  Check(not SameTextS('aBC', 'Ab'));
+  Check(not SameTextS('aBC', 'Abd'));
+  Check(not SameTextS('aBC', 'Abcd'));
   Check(StrIComp(PAnsiChar('abcD'), PAnsiChar('ABcF')) =
     StrComp(PAnsiChar('ABCD'), PAnsiChar('ABCF')));
   CheckEqual(StrComp(PAnsiChar('abcD'), nil), 1, 'abcD');
@@ -911,6 +949,22 @@ begin
   Check(not HasOnlyChar('eabab', ['a' .. 'c']));
   Check(not HasOnlyChar('ababe', ['a' .. 'c']));
   Check(HasOnlyChar('ababe', ['a' .. 'e']));
+  CheckEqual(GetFileNameWithoutExtOrPath(''), '');
+  CheckEqual(GetFileNameWithoutExtOrPath('toto.ext'), 'toto');
+  CheckEqual(GetFileNameWithoutExtOrPath('toto'), 'toto');
+  {$ifdef OSWINDOWS}
+  CheckEqual(GetFileNameWithoutExtOrPath('c:\temp\toto.ext'), 'toto');
+  CheckEqual(GetFileNameWithoutExtOrPath('c:\temp\toto'), 'toto');
+  {$else}
+  CheckEqual(GetFileNameWithoutExtOrPath('/var/tmp/toto.ext'), 'toto');
+  CheckEqual(GetFileNameWithoutExtOrPath('/var/tmp/toto'), 'toto');
+  {$endif OSWINDOWS}
+  fn := '/var/toto.ext';
+  Check(EqualFileNameNotNull(fn, fn));
+  Check(EqualFileNameNotNull(fn, '/var/toto.ext'));
+  Check(not EqualFileNameNotNull(fn, '/var/toto.ex2'));
+  Check(not EqualFileNameNotNull(fn, '/var/toto.ex'));
+  Check(not EqualFileNameNotNull(fn, '/Var/toto.ext'));
 end;
 
 procedure TTestCoreBase.IniFiles;
@@ -1067,84 +1121,187 @@ end;
 procedure TTestCoreBase.TRawUtf8ListSlow(Context: TObject);
 const
   MAX = 20000;
+  ONLYLOG = false;
 var
-  i, n: integer;
+  i, n, len: PtrInt; // @len = PPtrInt
   L: TRawUtf8List;
-  C: TComponent;
-  Rec: TSynFilterOrValidate;
-  s: RawUtf8;
+  B: TBinDictionary;
+  O: TSynMonitorTime;
+  v: TRawUtf8DynArray;
+  v64: Int64;
+  sl: TStrings;
+  timer: TPrecisionTimer;
+
+  procedure TestBinDictionary;
+  var
+    i, len: PtrInt; // @len = PPtrInt
+  begin
+    CheckEqual(B.Count, MAX + 1);
+    Check(B.IndexOf(nil, 0) < 0);
+    for i := MAX downto 0 do
+    begin
+      len := 0;
+      Check(PInteger(B.Find(pointer(v[i]), length(v[i]), @len))^ = i);
+      Check(len = 4);
+    end;
+  end;
+
 begin
+  SetLength(v, MAX + 1); // allocate once the strings
+  for i := 0 to MAX do
+    UInt32ToUtf8(i, v[i]);
   L := TRawUtf8List.CreateEx([fObjectsOwned]);
   try // no hash table involved
+    timer.Start;
     for i := 0 to MAX do
     begin
-      C := TComponent.Create(nil);
-      C.Tag := i;
-      Check(L.AddObject(UInt32ToUtf8(i), C) = i);
+      O := TSynMonitorTime.Create; // any TObject would fit
+      O.MicroSec := i;
+      Check(L.AddObject(v[i], O) = i);
     end;
+    NotifyTestSpeed('TRawUtf8List.Add no hash', MAX + 1, 0, @timer, ONLYLOG);
     Check(L.Count = MAX + 1);
     for i := 0 to MAX do
-      Check(GetInteger(Pointer(L[i])) = i);
+    begin
+      Check(IsInt64(Pointer(L[i]), length(L[i]), @v64));
+      Check(v64 = i);
+    end;
     for i := 0 to MAX do
-      Check(TComponent(L.Objects[i]).Tag = i);
+      Check(TSynMonitorTime(L.Objects[i]).MicroSec = i);
+    sl := L.ToStrings;
+    Check(sl is TVirtualStringList);
+    CheckEqual(sl.Count, L.Count);
+    CheckEqual(sl.Capacity, L.Count);
+    for i := 0 to MAX do
+    begin
+      Check(StrToInt(sl[i]) = i);
+      Check(TSynMonitorTime(sl.Objects[i]).MicroSec = i);
+    end;
+    sl.Free;
+    timer.Start;
     Check(L.IndexOf('') < 0);
+    for i := MAX downto MAX - 99 do // O(n) worst case: appear at the end
+      Check(L.IndexOf(v[i]) = i);
+    NotifyTestSpeed('TRawUtf8List.IndexOf no hash', 100, 0, @timer, ONLYLOG);
     Check(L.IndexOf('5') = 5);
-    Check(L.IndexOf('999') = 999);
+    if MAX {%H-}>= 999 then
+      Check(L.IndexOf('999') = 999);
     for i := MAX downto 0 do
       if i and 1 = 0 then
         L.Delete(i); // delete half the array
     Check(L.Count = MAX div 2);
     for i := 0 to L.Count - 1 do
-      Check(GetInteger(Pointer(L[i])) = TComponent(L.Objects[i]).Tag);
+      Check(GetInteger(Pointer(L[i])) = TSynMonitorTime(L.Objects[i]).MicroSec);
     Check(L.IndexOf('5') = 2);
     Check(L.IndexOf('6') < 0);
     Check(L.Exists('5'));
     Check(not L.Exists('6'));
+    L.Clear;
+    Check(L.Count = 0);
+    Check(L.IndexOf('5') < 0);
+    Check(L.Add('toto') = 0);
+    Check(L.Count = 1);
+    Check(L.IndexOf('titi') < 0);
+    Check(L.IndexOf('toto') = 0);
   finally
     L.Free;
   end;
   L := TRawUtf8List.CreateEx([fObjectsOwned, fNoDuplicate, fCaseSensitive]);
   try // with hash table
+    timer.Start;
     for i := 1 to MAX do
     begin
-      Rec := TSynFilterLowerCase.Create; // any TSynPersistent would have done
-      Rec.Parameters := Int32ToUtf8(i);
-      CheckEqual(L.AddObject(Rec.Parameters, Rec), i - 1);
-      CheckEqual(L.IndexOf(Rec.Parameters), i - 1);
+      O := TSynMonitorTime.Create; // any TSynPersistent would fit
+      O.MicroSec := i;
+      Check(L.AddObject(v[i], O) = i - 1);
     end;
+    NotifyTestSpeed('TRawUtf8List.Add hashed', MAX, 0, @timer, ONLYLOG);
+    timer.Start;
+    for i := 1 to MAX do
+      Check(L.IndexOf(v[i]) = i - 1);
+    NotifyTestSpeed('TRawUtf8List.IndexOf hashed', MAX, 0, @timer, ONLYLOG);
     Check(not L.Exists(''));
     Check(L.IndexOf('abcd') < 0);
     Check(L.Count = MAX);
     n := 0;
     for i := 1 to MAX do
     begin
-      UInt32ToUtf8(i, s);
-      CheckEqual(L.IndexOf(s), n);
-      CheckEqual(TSynFilterOrValidate(L.Objects[n]).Parameters, s);
+      Check(L.IndexOf(v[i]) = n);
+      Check(TSynMonitorTime(L.Objects[n]).MicroSec = i);
       if i and 127 = 0 then
-        CheckEqual(L.Delete(s), n)
+        CheckEqual(L.Delete(v[i]), n, 'delete')
       else
         inc(n);
     end;
     CheckEqual(L.Count, n);
     for i := 1 to MAX do
-    begin
-      UInt32ToUtf8(i, s);
-      Check((L.IndexOf(s) >= 0) = (i and 127 <> 0));
-    end;
+      Check((L.IndexOf(v[i]) >= 0) = (i and 127 <> 0));
     L.SaveToFile(WorkDir + 'utf8list.txt');
     L.Clear;
     CheckEqual(L.Count, 0);
     L.LoadFromFile(WorkDir + 'utf8list.txt');
     CheckEqual(L.Count, n);
     for i := 1 to MAX do
-    begin
-      UInt32ToUtf8(i, s);
-      Check((L.IndexOf(s) >= 0) = (i and 127 <> 0));
-    end;
+      Check((L.IndexOf(v[i]) >= 0) = (i and 127 <> 0));
     DeleteFile(WorkDir + 'utf8list.txt');
+    L.Clear;
+    Check(L.Count = 0);
+    Check(L.Add('toto') = 0);
+    Check(L.Count = 1);
+    Check(L.IndexOf('titi') < 0);
+    Check(L.IndexOf('toto') = 0);
+    Check(L.IndexOf('') < 0);
+    Check(L.Add('') = 1);
+    Check(L.Count = 2);
+    Check(L.IndexOf('') = 1);
+    Check(L.IndexOf('toto') = 0);
   finally
     L.Free;
+  end;
+  B := TBinDictionary.Create;
+  try // with hash table
+    timer.Start;
+    for i := 0 to MAX do
+    begin
+      CheckEqual(B.Count, i);
+      Check(B.Add(pointer(v[i]), @i, length(v[i]), 4) = i);
+    end;
+    NotifyTestSpeed('TBinDictionary.Add', MAX + 1, 0, @timer, ONLYLOG);
+    timer.Start;
+    TestBinDictionary;
+    NotifyTestSpeed('TBinDictionary.Find', MAX + 1, 0, @timer, ONLYLOG);
+    B.Clear;
+    for i := 0 to MAX do
+    begin
+      CheckEqual(B.Count, i);
+      Check(B.Update(pointer(v[i]), @i, length(v[i]), 4) = i);
+    end;
+    for i := 0 to MAX do
+      if i and 127 = 0 then
+        Check(B.Update(pointer(v[i]), @i, length(v[i]), 4) = i)
+      else if i and 255 = 0 then
+        Check(B.Add(pointer(v[i]), @i, length(v[i]), 4) < 0);
+    for i := 0 to MAX do
+    begin
+      len := 0;
+      Check(MemCmp(B.Keys(i, @len), pointer(v[i]), length(v[i])) = 0);
+      Check(len = length(v[i]));
+      len := 0;
+      Check(PInteger(B.Values(i, @len))^ = i);
+      Check(len = 4);
+    end;
+    TestBinDictionary;
+    B.Clear;
+    Check(B.Count = 0);
+    Check(B.IndexOf(nil, 0) < 0);
+    Check(B.Add(nil, nil, 0, 0) = 0);
+    Check(B.Count = 1);
+    Check(B.IndexOf(nil, 0) = 0);
+    len := 1;
+    Check(PInteger(B.Find(nil, 0, @len))^ = 0);
+    Check(len = 0);
+finally
+    B.Free;
   end;
 end;
 
@@ -1345,6 +1502,186 @@ begin
 end;
 
 type
+  TPipeThread = class(TLoggedThread)
+  protected
+    Pipe: TPipeStream;
+    WriteData: RawByteString;
+    Hash: cardinal;
+    Bytes, Expected: integer;
+    procedure DoExecute; override;
+  end;
+const
+  THREAD_ITER = 3; // stream 3 * 100K content between two TPipeThread
+{.$define PIPEDEBUG}
+
+procedure TPipeThread.DoExecute;
+var
+  tmp: TByteToAnsiChar; // very small 256 bytes buffer for stress reading
+  n: integer;
+begin
+  if WriteData <> '' then
+    // from W thread
+    repeat
+      {$ifdef PIPEDEBUG}ConsoleWrite('before Write');{$endif PIPEDEBUG}
+      n := Pipe.Write(pointer(WriteData)^, length(WriteData));
+      {$ifdef PIPEDEBUG}ConsoleWrite(['Write(', length(WriteData), ')=', n]);{$endif PIPEDEBUG}
+      if n <> length(WriteData) then
+        exit; // should block until Write() all data unless Pipe.Close was called
+      Hash := crc32c(Hash, pointer(WriteData), n);
+      inc(Bytes, n);
+      {$ifdef PIPEDEBUG}ConsoleWrite('Write Stop');{$endif PIPEDEBUG}
+      SleepHiRes(Random(50)); // simulate a blocking network connection
+    until Bytes = Expected // execute Write() three times (HTTP-like body)
+  else
+  begin
+    // from R thread
+    {$ifdef PIPEDEBUG}ConsoleWrite('Read Start');{$endif PIPEDEBUG}
+    repeat
+      {$ifdef PIPEDEBUG}ConsoleWrite('before Read');{$endif PIPEDEBUG}
+      n := Pipe.Read(tmp, SizeOf(tmp)); // n=256 until n=160 at end Write()
+      {$ifdef PIPEDEBUG}ConsoleWrite(['Read(', SizeOf(tmp), ')=', n]);{$endif PIPEDEBUG}
+      if n <= 0 then
+        break;
+      Hash := crc32c(Hash, @tmp, n);
+      inc(Bytes, n);
+      if Hash and 255 = 0 then
+        SleepHiRes(Random(30)); // wait a few times during the whole process
+      {$ifdef PIPEDEBUG}ConsoleWrite(['Read Bytes=', Bytes]);{$endif PIPEDEBUG}
+    until Bytes = Expected; // execute Read() per 256-bytes (TFTP-like) chunk
+    {$ifdef PIPEDEBUG}ConsoleWrite(['Read Stop, bytes=', Bytes]);{$endif PIPEDEBUG}
+  end;
+end;
+
+procedure TTestCoreBase.TStreamSlow(Context: TObject);
+var
+  P: TPipeStream;
+  R, W: TPipeThread;
+  S: RawByteString;
+  ps: PAnsiChar;
+  Tix: Int64;
+  i, n, c: integer;
+  crc: cardinal;
+  timer: TPrecisionTimer;
+  tmp: TBuffer1K; // small 1K buffer to stress (should be e.g. 64KB in practice)
+begin
+  S := RandomAnsi7(100000);
+  // basic integrity from two threads
+  P := TPipeStream.Create(512);
+  R := TPipeThread.Create({suspended=}true, nil, nil, TSynLog, 'rd');
+  W := TPipeThread.Create({suspended=}true, nil, nil, TSynLog, 'wr');
+  try
+    P.Options := [psoCheckThread];
+    R.Pipe := P;
+    R.Expected := length(S) * THREAD_ITER;
+    R.Start;
+    CheckEqual(P.Size, 0);
+    CheckEqual(P.Position, 0);
+    CheckEqual(P.Seek(0, soFromCurrent), 0);
+    W.Pipe := P;
+    W.WriteData := S;
+    W.Expected := R.Expected;
+    W.Start;
+    W.WaitFor;
+    CheckEqual(W.Expected, R.Expected);
+    CheckEqual(W.Bytes, W.Expected, 'W.Bytes');
+    R.WaitFor;
+    CheckEqual(R.Bytes, R.Expected, 'R.Bytes');
+    CheckEqual(R.Hash, W.Hash, 'Hash');
+    CheckEqual(P.Size, R.Expected);
+    CheckEqual(P.Position, R.Expected);
+    CheckEqual(P.Seek(0, soFromCurrent), R.Expected);
+    CheckEqual(P.Size, R.Expected);
+    CheckEqual(P.ExpectedSize, -1);
+  finally
+    W.Free;
+    R.Free;
+    P.Free;
+  end;
+  // tiny ring buffer / wrap-around - no thread needed
+  timer.Start;
+  P := TPipeStream.Create(SizeOf(tmp));
+  try
+    CheckEqual(P.ExpectedSize, -1);
+    P.ExpectedSize := 777;
+    CheckEqual(P.Position, 0);
+    CheckEqual(P.Size, 777, 'ExpectedSize before');
+    CheckEqual(P.ExpectedSize, 777);
+    ps := pointer(S);
+    c := length(S) div SizeOf(tmp); // loop c=97 times
+    for i := 1 to c do
+    begin
+      // try variable Write+Read (1..1024 bytes)
+      if i and 31 = 7 then
+        n := SizeOf(tmp) // whole 1K buffer once in a while
+      else if i and 31 = 0 then
+        n := 1 // another very intriguing number
+      else
+        n := Random32(SizeOf(tmp)) + 1; // good enough
+      // verify Write/Read data roundtrip
+      crc := crc32c(0, ps, n);
+      CheckEqual(P.Write(ps^, n), n, 'write all');
+      inc(ps, n);
+      FillCharFast(tmp, n, 0);
+      CheckEqual(P.Read(tmp, SizeOf(tmp)), n, 'read trunc');
+      CheckEqual(crc, crc32c(0, @tmp, n), 'crc');
+      CheckEqual(P.Pending, 0, 'pipe should be empty after full read');
+    end;
+    n := ps - pointer(S); // compute final length: around half of length(S)
+    Check(n <= length(S), 'ps overflow');
+    CheckEqual(P.Position, n, 'Position');
+    CheckEqual(P.Size, 777, 'ExpectedSize after');
+    CheckEqual(P.ExpectedSize, 777);
+    P.ExpectedSize := -1;
+    CheckEqual(P.Size, n, 'ExpectedSize reset');
+    CheckEqual(P.Position, n, 'Position unchanged');
+  finally
+    P.Free;
+  end;
+  NotifyTestSpeed('TPipeStream', c, n, @timer);
+  // read timeout
+  P := TPipeStream.Create(64);
+  try
+    P.ReadTimeout := 50;
+    Tix := GetTickCount64;
+    CheckEqual(P.Read(tmp, 64), 0);
+    Check(GetTickCount64 - Tix >= 30, 'rdto');
+  finally
+    P.Free;
+  end;
+  // write timeout
+  P := TPipeStream.Create(64);
+  try
+    P.WriteTimeout := 50;
+    CheckEqual(P.Write(tmp, 64), 64);
+    Tix := GetTickCount64;
+    n := P.Write(tmp, SizeOf(tmp));
+    Check(n < SizeOf(tmp));
+    Check(GetTickCount64 - Tix >= 30, 'wrto');
+  finally
+    P.Free;
+  end;
+  // close while blocked
+  P := TPipeStream.Create(64);
+  try
+    W := TPipeThread.Create({suspended=}true, nil, nil, TSynLog, 'wr2');
+    try
+      W.Pipe := P;
+      W.WriteData := S;
+      W.Expected := length(s);
+      W.Start;
+      SleepHiRes(50);
+      P.Abort;
+      W.WaitFor;
+      CheckEqual(W.Bytes, 0, 'close');
+    finally
+      W.Free;
+    end;
+  finally
+    P.Free;
+  end;
+end;
+
+type
   TRec = packed record
     a: integer;
     b: byte;
@@ -1382,7 +1719,7 @@ type
 
 function FVSort(const A, B): integer;
 begin
-  // string/PChar compariosn of first "Detailed" field
+  // string/PChar comparison of first "Detailed" field
   result := SysUtils.StrComp(
     PChar(pointer(TFV(A).Detailed)), PChar(pointer(TFV(B).Detailed)));
 end;
@@ -1499,6 +1836,7 @@ begin
   Run(Utf8Slow, self, 'UTF-8', true, false);
   Run(TimeZonesSlow, self, 'TimeZones', true, false);
   Run(TRawUtf8ListSlow, self, 'TRawUtf8List', true, false);
+  Run(TStreamSlow, self, 'TPipeStream', true, false);
   { TODO : implement TypeInfoToHash() if really needed }
   {
   h := TypeInfoToHash(TypeInfo(TAmount));
@@ -2287,9 +2625,9 @@ var
     timer: TPrecisionTimer;
     P: PByteArray;
     msg: string;
-    {$ifdef ASMX64}
+    {$ifdef ASMX64NOTPIC}
     cputxt: RawUtf8;
-    {$endif ASMX64}
+    {$endif ASMX64NOTPIC}
     elapsed: Int64;
   begin
     // first validate FillCharFast
@@ -2311,17 +2649,17 @@ var
         inc(len, 777 + len shr 4);
     until len >= length(buf);
     // benchmark FillChar/FillCharFast
-    {$ifdef ASMX64}
+    {$ifdef ASMX64NOTPIC}
     cputxt := GetSetName(TypeInfo(TX64CpuFeatures), X64CpuFeatures);
-    {$endif ASMX64}
+    {$endif ASMX64NOTPIC}
     if rtl then
       msg := 'FillChar'
     else
-      {$ifdef ASMX64}
+      {$ifdef ASMX64NOTPIC}
       FormatString('FillCharFast [%]', [{%H-}cputxt], msg);
       {$else}
       msg := 'FillCharFast';
-      {$endif ASMX64}
+      {$endif ASMX64NOTPIC}
     // now make the same test with no Check() but with timing
     // small len makes timer.Resume/Pause unreliable -> single shot measure
     b1 := 0;
@@ -2351,11 +2689,11 @@ var
     if rtl then
       msg := 'Move'
     else
-      {$ifdef ASMX64}
+      {$ifdef ASMX64NOTPIC}
       FormatString('MoveFast [%]', [{%H-}cputxt], msg);
       {$else}
       msg := 'MoveFast';
-      {$endif ASMX64}
+      {$endif ASMX64NOTPIC}
     P := pointer(buf);
     for i := 0 to length(buf) - 1 do
       P[i] := i; // fills with 0,1,2,...
@@ -2434,26 +2772,26 @@ var
     CheckHash(buf, $B49DB8A5);
   end;
 
-{$ifdef ASMX64}
+{$ifdef ASMX64NOTPIC}
 var
   bak, cpu: TX64CpuFeatures;
-{$endif ASMX64}
+{$endif ASMX64NOTPIC}
 begin
   Check(FileIsExecutable(Executable.ProgramFileName));
   Check(not FileIsExecutable(Executable.ProgramFilePath));
   SetLength(buf, 16 shl 20); // 16MB
-  {$ifdef ASMX64} // activate and validate SSE2 + AVX branches
+  {$ifdef ASMX64NOTPIC} // activate and validate SSE2 + AVX branches
   bak := X64CpuFeatures;
   cpu := bak - [cpuHaswell, cpuAvx2];
   X64CpuFeatures := []; // default SSE2 128-bit process
   Validate({rtl=}false);
-  {$ifdef ASMX64AVXNOCONST} // oldest Delphi doesn't support AVX asm
+  {$ifdef ASMX64AVX1} // oldest Delphi doesn't support AVX asm
   if cpuAvx in cpu then
   begin
     X64CpuFeatures := [cpuAvx]; // AVX 256-bit process
     Validate(false);
   end;
-  {$endif ASMX64AVXNOCONST}
+  {$endif ASMX64AVX1}
   X64CpuFeatures := bak; // there is no AVX move/fillchar (still 256-bit wide)
   if (cpu <> []) and
      (cpu <> [cpuAvx]) then
@@ -2462,7 +2800,7 @@ begin
   {$else}
   Validate(true);
   Validate(false);
-  {$endif ASMX64}
+  {$endif ASMX64NOTPIC}
 end;
 
 type
@@ -3825,12 +4163,14 @@ begin
       for i := 0 to MAX do
       begin
         v := i and 511;
-        int.Unique(tmp, SmallUInt32Utf8[v]);
+        int.Unique(tmp, SmallUInt32Utf8[v]); // SmallUInt32Utf8[] have refcnt=-1
         check(Utf8ToInteger(tmp) = v);
       end;
       checkEqual(int.Count, 512);
-      checkEqual(int.Clean, 0);
+      tmp := '';
       checkEqual(int.Count, 512);
+      checkEqual(int.Clean, 512); // all int.Pool[] have refcnt=1 -> clean
+      checkEqual(int.Count, 0);
     finally
       int.Free;
     end;
@@ -3890,12 +4230,15 @@ begin
 end;
 
 function crc32creference(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
+var
+  tab: PCrc32tab;
 begin
+  tab := crc32ctab; // retrieve the lookup table once
   result := not crc;
   if buf <> nil then
     while len > 0 do
     begin
-      result := crc32ctab[0, ToByte(result xor ord(buf^))] xor (result shr 8);
+      result := tab[0, ToByte(result xor ord(buf^))] xor (result shr 8);
       dec(len);
       inc(buf);
     end;
@@ -3994,19 +4337,22 @@ end;
 procedure crcblockreference(crc128, data128: PBlock128);
 var
   c: cardinal;
+var
+  tab: PCrc32tab;
 begin
+  tab := crc32ctab; // retrieve the lookup table once
   c := crc128^[0] xor data128^[0];
-  crc128^[0] := crc32ctab[3, byte(c)] xor crc32ctab[2, byte(c shr 8)] xor
-                crc32ctab[1, byte(c shr 16)] xor crc32ctab[0, c shr 24];
+  crc128^[0] := tab[3, byte(c)] xor tab[2, byte(c shr 8)] xor
+                tab[1, byte(c shr 16)] xor tab[0, c shr 24];
   c := crc128^[1] xor data128^[1];
-  crc128^[1] := crc32ctab[3, byte(c)] xor crc32ctab[2, byte(c shr 8)] xor
-                crc32ctab[1, byte(c shr 16)] xor crc32ctab[0, c shr 24];
+  crc128^[1] := tab[3, byte(c)] xor tab[2, byte(c shr 8)] xor
+                tab[1, byte(c shr 16)] xor tab[0, c shr 24];
   c := crc128^[2] xor data128^[2];
-  crc128^[2] := crc32ctab[3, byte(c)] xor crc32ctab[2, byte(c shr 8)] xor
-                crc32ctab[1, byte(c shr 16)] xor crc32ctab[0, c shr 24];
+  crc128^[2] := tab[3, byte(c)] xor tab[2, byte(c shr 8)] xor
+                tab[1, byte(c shr 16)] xor tab[0, c shr 24];
   c := crc128^[3] xor data128^[3];
-  crc128^[3] := crc32ctab[3, byte(c)] xor crc32ctab[2, byte(c shr 8)] xor
-                crc32ctab[1, byte(c shr 16)] xor crc32ctab[0, c shr 24];
+  crc128^[3] := tab[3, byte(c)] xor tab[2, byte(c shr 8)] xor
+                tab[1, byte(c shr 16)] xor tab[0, c shr 24];
 end;
 
 procedure TTestCoreBase._crc32c;
@@ -4051,6 +4397,7 @@ var
 var
   i, j: integer;
   c1, c2: cardinal;
+  p: PAnsiChar;
   crc1, crc2: THash128;
   crcs: THash512Rec;
   digest: THash256;
@@ -4163,30 +4510,31 @@ begin
       LecuyerEncrypt(i, s2);
       CheckEqual(s2, S, 'LecuyerEncrypt');
     end;
-  Check(crc32fast(0, @crc32tab, 5) = $DF4EC16C, 'crc32a');
-  Check(crc32fast(0, @crc32tab, 1024) = $6FCF9E13, 'crc32b');
-  Check(crc32fast(0, @crc32tab, 1024 - 5) = $70965738, 'crc32c');
-  Check(crc32fast(0, pointer(PtrInt(@crc32tab) + 1), 2) = $41D912FF, 'crc32d');
-  Check(crc32fast(0, pointer(PtrInt(@crc32tab) + 3), 1024 - 5) = $E5FAEC6C, 'crc32e');
+  p := pointer(crc32tab);
+  Check(crc32fast(0, p, 5) = $DF4EC16C, 'crc32a');
+  Check(crc32fast(0, p, 1024) = $6FCF9E13, 'crc32b');
+  Check(crc32fast(0, p, 1024 - 5) = $70965738, 'crc32c');
+  Check(crc32fast(0, p + 1, 2) = $41D912FF, 'crc32d');
+  Check(crc32fast(0, p + 3, 1024 - 5) = $E5FAEC6C, 'crc32e');
   Test(crc32creference, 'pas');
   Test(crc32cinlined, 'inl');
   Test(crc32cfast, 'fast');
-  {$ifdef CPUINTEL}
+  {$ifdef ASMINTEL}
   {$ifndef OSDARWIN}
-  // Not [yet] working on Darwin
+  // Not [yet] implemented on Darwin
   if cfSSE42 in CpuFeatures then
     Test(crc32csse42, 'sse42');
   {$endif OSDARWIN}
-  {$ifdef CPUX64}
+  {$ifdef ASMX64}
   if (cfSSE42 in CpuFeatures) and
      (cfAesNi in CpuFeatures) and
      (cfCLMUL in CpuFeatures) then
     Test(crc32c, 'aesni'); // use SSE4.2+pclmulqdq instructions on x64
-  {$endif CPUX64}
+  {$endif ASMX64}
   {$else}
   if @crc32c <> @crc32cfast then
     Test(crc32c, 'armv8');
-  {$endif CPUINTEL}
+  {$endif ASMINTEL}
   AddConsole('%', [msg]);
 end;
 
@@ -4637,29 +4985,29 @@ begin
     AppendShortByte(i, @a);
   CheckEqual(length(a), 253);
   CheckEqual(Hash32(@a[1], ord(a[0])), $1CDCEE09, 'AppendShortByte');
-  Check(TwoDigits(0) = '0');
-  Check(TwoDigits(1) = '1');
-  Check(TwoDigits(10) = '10');
-  Check(TwoDigits(100) = '100');
-  Check(TwoDigits(1000) = '1000');
-  Check(TwoDigits(0.1) = '0.10');
-  Check(TwoDigits(0.12) = '0.12');
-  Check(TwoDigits(0.123) = '0.12');
-  Check(TwoDigits(0.124) = '0.12');
-  Check(TwoDigits(0.125) = '0.12');
-  Check(TwoDigits(0.1251) = '0.13');
-  Check(TwoDigits(0.126) = '0.13');
-  Check(TwoDigits(0.129) = '0.13');
-  Check(TwoDigits(70.131) = '70.13');
-  Check(TwoDigits(70.135) = '70.13');
-  Check(TwoDigits(70.1351) = '70.14');
-  Check(TwoDigits(0.01) = '0.01');
-  Check(TwoDigits(0.05) = '0.05');
-  Check(TwoDigits(0.051) = '0.05');
-  Check(TwoDigits(0.055) = '0.05');
-  Check(TwoDigits(0.0551) = '0.06');
-  Check(TwoDigits(0.0015) = '0');
-  Check(TwoDigits(0.0055) = '0.01');
+  CheckEqualShort(TwoDigits(0), '0');
+  CheckEqualShort(TwoDigits(1), '1');
+  CheckEqualShort(TwoDigits(10), '10');
+  CheckEqualShort(TwoDigits(100), '100');
+  CheckEqualShort(TwoDigits(1000), '1000');
+  CheckEqualShort(TwoDigits(0.1), '0.10');
+  CheckEqualShort(TwoDigits(0.12), '0.12');
+  CheckEqualShort(TwoDigits(0.123), '0.12');
+  CheckEqualShort(TwoDigits(0.124), '0.12');
+  CheckEqualShort(TwoDigits(0.125), '0.12');
+  CheckEqualShort(TwoDigits(0.1252), '0.13');
+  CheckEqualShort(TwoDigits(0.126), '0.13');
+  CheckEqualShort(TwoDigits(0.129), '0.13');
+  CheckEqualShort(TwoDigits(70.131), '70.13');
+  CheckEqualShort(TwoDigits(70.135), '70.13');
+  CheckEqualShort(TwoDigits(70.1352), '70.14');
+  CheckEqualShort(TwoDigits(0.01), '0.01');
+  CheckEqualShort(TwoDigits(0.05), '0.05');
+  CheckEqualShort(TwoDigits(0.051), '0.05');
+  CheckEqualShort(TwoDigits(0.055), '0.05');
+  CheckEqualShort(TwoDigits(0.0551), '0.06');
+  CheckEqualShort(TwoDigits(0.0015), '0');
+  CheckEqualShort(TwoDigits(0.0055), '0.01');
   n := 100000;
   Timer.Start;
   crc := 0;
@@ -4995,10 +5343,32 @@ begin
   CheckDoubleToShortSame(12.345678901234);
   CheckDoubleToShortSame(123.45678901234);
   CheckDoubleToShortSame(1234.5678901234);
-  Check(Int32ToUtf8(1599638299) = '1599638299');
-  Check(UInt32ToUtf8(1599638299) = '1599638299');
-  Check(Int32ToUtf8(-1599638299) = '-1599638299');
-  Check(Int64ToUtf8(-1271083787498396012) = '-1271083787498396012');
+  CheckEqual(TextToVariantNumberType('1'), varInt64);
+  CheckEqual(TextToVariantNumberType('10'), varInt64);
+  CheckEqual(TextToVariantNumberType('01'), varString);
+  CheckEqual(TextToVariantNumberType(' 1'), varString);
+  CheckEqual(TextToVariantNumberType('1.'), varString);
+  CheckEqual(TextToVariantNumberType('1.1'), varCurrency);
+  CheckEqual(TextToVariantNumberType('1.1234'), varCurrency);
+  CheckEqual(TextToVariantNumberType('1234.1234'), varCurrency);
+  CheckEqual(TextToVariantNumberType('1234.1234'), varCurrency);
+  CheckEqual(TextToVariantNumberType('1234.12345'), varDouble);
+  CheckEqual(TextToVariantNumberType('1234e+45'), varDouble);
+  CheckEqual(TextToVariantNumberTypeNoDouble('1'), varInt64);
+  CheckEqual(TextToVariantNumberTypeNoDouble('10'), varInt64);
+  CheckEqual(TextToVariantNumberTypeNoDouble('01'), varString);
+  CheckEqual(TextToVariantNumberTypeNoDouble(' 1'), varString);
+  CheckEqual(TextToVariantNumberTypeNoDouble('1.'), varString);
+  CheckEqual(TextToVariantNumberTypeNoDouble('1.1'), varCurrency);
+  CheckEqual(TextToVariantNumberTypeNoDouble('1.1234'), varCurrency);
+  CheckEqual(TextToVariantNumberTypeNoDouble('1234.1234'), varCurrency);
+  CheckEqual(TextToVariantNumberTypeNoDouble('1234.1234'), varCurrency);
+  CheckEqual(TextToVariantNumberTypeNoDouble('1234.12345'), varString);
+  CheckEqual(TextToVariantNumberTypeNoDouble('1234e+45'), varString);
+  CheckEqual(Int32ToUtf8(1599638299), '1599638299');
+  CheckEqual(UInt32ToUtf8(1599638299), '1599638299');
+  CheckEqual(Int32ToUtf8(-1599638299), '-1599638299');
+  CheckEqual(Int64ToUtf8(-1271083787498396012), '-1271083787498396012');
   CheckEqual(Int64ToUtf8(242161819595454762), '242161819595454762');
   // detect 64-bit integer overflow in GetExtended()
   CheckDoubleToShort(95.0290695380, '95.029069538');
@@ -5113,6 +5483,8 @@ begin
     CheckEqual(TestAddFloatStr(s), s);
     Check(SysUtils.IntToStr(j) = u);
     s2 := Int32ToUtf8(j);
+    Check(TextToVariantNumberType(pointer(s2)) = varInt64);
+    Check(TextToVariantNumberTypeNoDouble(pointer(s2)) = varInt64);
     CheckEqual(s2, s);
     Check(format('%d', [j]) = u);
     Check(GetInteger(pointer(s)) = j);
@@ -5252,6 +5624,10 @@ begin
     e := GetExtended(Pointer(s), err);
     Check(err = 0, 'GetExt2');
     Check(SameValue(e, d, 0));
+    err := TextToVariantNumberType(pointer(s));
+    if CheckFailed(err in [varDouble, varCurrency], 'TextToVariantNumberType') then
+      NotifyProgress(['TextToVariantNumberType(', s, ')=', err], ccLightRed);
+    Check(TextToVariantNumberTypeNoDouble(pointer(s)) = varString);
     e := d;
     if (i < 9000) or
        (i > 9999) then
@@ -5497,9 +5873,14 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
     FillCharFast(src, SizeOf(src), ord('a'));
     for i := 0 to 200 do
     begin
-      FillCharFast(dst, SizeOf(dst), 0);
+      FillCharFast(dst, SizeOf(dst), 10);
       UpperCopy255Buf(@dst, @src, i)^ := #0;
       Check(StrLen(@dst) = i);
+      Check(StrLenSafe(@dst) = i);
+      Check(ByteScanIndex(@dst, SizeOf(dst), 0) = i);
+      if i = 0 then
+        continue;
+      Check(ByteScanIndex(@dst, i, 0) < 0);
       for j := 0 to i - 1 do
         Check(dst[j] = 'A');
     end;
@@ -5530,11 +5911,21 @@ procedure TTestCoreBase.Utf8Slow(Context: TObject);
   var
     t, c, u: RawUtf8;
   begin
-    trimcopy(S, start, count, t);
     c := copy(S, start, count);
+    TrimCopy(S, start, count, t);
     CheckEqual(t, TrimU(c));
     TrimU(c, u);
     CheckEqual(t, u);
+    TrimLeftCopy(S, start, count, t);
+    CheckEqual(t, TrimLeft(c));
+    TrimRightCopy(S, start, count, t);
+    CheckEqual(t, TrimRight(c));
+  end;
+
+  procedure CheckCleanThreadName(s, exp: RawUtf8);
+  begin
+    CleanThreadName(s);
+    CheckEqual(s, exp);
   end;
 
 var
@@ -5546,11 +5937,13 @@ var
   WU: array[0..3] of WideChar;
   str: string;
   ss: ShortString;
+  fn: TFileName;
   up4: RawUcs4;
   U, U1, U2, res, Up, Up2, json, json1, json2, s1, s2, s3: RawUtf8;
   arr, arr2: TRawUtf8DynArray;
   P: PUtf8Char;
   PB: PByte;
+  PW: PWideChar;
   q: RawUtf8;
   Unic: RawByteString;
   Ucs4: RawUcs4;
@@ -5625,6 +6018,18 @@ begin
   CheckEqual(OnlyChar('abcdz', ['d', 'z']), 'dz');
   CheckEqual(OnlyChar('abzcd', ['z']), 'z');
   CheckEqual(OnlyChar('zabzcdz', ['z']), 'zzz');
+  CheckEqual(TrimOneChar('abcda', 'a'), 'bcd');
+  CheckEqual(TrimOneChar('abcda', 'b'), 'acda');
+  CheckEqual(TrimOneChar('abcda', 'd'), 'abca');
+  CheckEqual(TrimOneChar('', 'a'), '');
+  CheckEqual(TrimOneChar('a', 'a'), '');
+  CheckEqual(TrimOneChar('aa', 'a'), '');
+  CheckEqual(TrimOneChar('aaa', 'a'), '');
+  CheckEqual(TrimOneChar('baaa', 'a'), 'b');
+  CheckEqual(TrimOneChar('aaab', 'a'), 'b');
+  CheckEqual(TrimOneChar('aaaba', 'a'), 'b');
+  CheckEqual(TrimOneChar('aaabaa', 'a'), 'b');
+  CheckEqual(TrimOneChar('a'#13#10'b'#13#10, #13), 'a'#10'b'#10);
   // + on RawByteString seems buggy on FPC - at least inconsistent with Delphi
   rb2 := ARawSetString;
   rb1 := rb2 + RawByteString('test');
@@ -6089,6 +6494,26 @@ begin
   Check(CsvContains('aa,bb,cc', 'cC', ',', false));
   Check(not CsvContains('aa,bb,cc', 'cb', ',', false));
   Check(not CsvContains('aa,bb,cc', 'a', ',', false));
+  Check(CsvContains('"3a8-64cf88076aae1", "a828414ff6"',
+    '"3a8-64cf88076aae1"', 19, ',', {casesens=}true, {trim=}true));
+  Check(CsvContains('"3a8-64cf88076aae1", "a828414ff6"',
+    '"a828414ff6"', 12, ',', true, true));
+  Check(CsvContains(' "3a8-64cf88076aae1" , "a828414ff6" ',
+    '"3a8-64cf88076aae1"', 19, ',', true, true));
+  Check(CsvContains(' "3a8-64cf88076aae1" , "a828414ff6" ',
+    '"a828414ff6"', 12, ',', true, true));
+  Check(CsvContains('"3a8-64cf88076aae1","a828414ff6" ',
+    '"a828414ff6"', 12, ',', true, true));
+  Check(CsvContains('"3a8-64cf88076aae1", "a828414ff6"',
+    '"3a8-64cf88076aae1"', 34, 19, ',', {casesens=}true, {trim=}true));
+  Check(CsvContains('"3a8-64cf88076aae1", "a828414ff6"',
+    '"a828414ff6"', 34, 12, ',', true, true));
+  U1 := ' "3a8-64cf88076aae1" , "a828414ff6" ds46';
+  L := length(U1) - 4; // should stop at ds46 ending chars
+  Check(CsvContains(pointer(U1), '"3a8-64cf88076aae1"645', L, 19, ',', true, true));
+  Check(CsvContains(pointer(U1), '"a828414ff6"275', L, 12, ',', true, true));
+  Check(CsvContains('"3a8-64cf88076aae1","a828414ff6"  321',
+    '"a828414ff6"46', 34, 12, ',', true, true));
   CheckEqual(GetFirstCsvItem(''), '');
   CheckEqual(GetFirstCsvItem('a'), 'a');
   CheckEqual(GetFirstCsvItem('ab'), 'ab');
@@ -6113,6 +6538,10 @@ begin
   Check(MakePath(['1/', 2, 3], true, '/') = '1/2/3/');
   Check(MakePath([1, 2, '3/'], true, '/') = '1/2/3/');
   Check(MakePath([1, '', 2, '3/'], true, '/') = '1/2/3/');
+  MakePath([1, 2, '3'], fn, false, '/');
+  Check(fn = '1/2/3');
+  MakePath(['1', 2, 3], fn, true, '/');
+  Check(fn = '1/2/3/');
   Check(MakeFileName([]) = '');
   Check(MakeFileName(['toto', 'doc']) = 'toto.doc');
   {$ifdef OSWINDOWS}
@@ -6207,6 +6636,20 @@ begin
   CheckEqual(U, '#abcd##e##fg###');
   U := QuotedStr('#abcd#efg', '#');
   CheckEqual(U, '###abcd##efg#');
+  Utf8ToSynUnicode('123456789abcdefghijkl', su);
+  PW := pointer(su);
+  len := length(su);
+  for i := 1 to len do
+    Check(SU[i] <> #0);
+  repeat
+    CheckEqual(StrLenW(PW), len);
+    CheckEqual(WordScanIndex(pointer(PW), len + 10, 0), len);
+    PW^ := #0; // force some #0 within the SSE2 16 bytes alignment
+    inc(PW);
+    dec(len);
+  until len < 0;
+  for i := 1 to length(su) do
+    Check(SU[i] = #0);
   for i := 0 to 1000 do
   begin
     len := i * 5;
@@ -6229,6 +6672,14 @@ begin
            (str[1] <> str[3]) then
           CheckEqual(PosExString(str[3], str), 3);
       end;
+      fn := str;
+      Check(pointer(fn) = pointer(str));
+      check(EqualFileNameNotNull(fn, str));
+      check(SortDynArrayFileName(fn, str) = 0);
+      UniqueString(string(fn));
+      Check(pointer(fn) <> pointer(str));
+      check(EqualFileNameNotNull(fn, str));
+      check(SortDynArrayFileName(fn, str) = 0);
       for j := 1 to lenup100 do
       begin
         CheckEqual(PosExString(#13, str, j), 0);
@@ -6239,6 +6690,15 @@ begin
         k := PosExString(str[j], str);
         check((k > 0) and
              (str[k] = str[j]));
+        inc(fn[j]);
+        check(not EqualFileNameNotNull(fn, str));
+        check(SortDynArrayFileName(fn, str) <> 0);
+        {$ifdef UNICODE}
+        Check(StrCompW(pointer(fn), pointer(str)) <> 0);
+        {$else}
+        Check(StrComp(pointer(fn), pointer(str)) <> 0);
+        {$endif UNICODE}
+        dec(fn[j]);
       end;
     end
     else
@@ -6287,7 +6747,7 @@ begin
     else
       len120 := 0;
     Check(IsValidUtf8Buffer(P, len120), 'IsValidUtf8Buffer truncated');
-    {$ifdef ASMX64AVXNOCONST}
+    {$ifdef ASMX64AVX1}
     HasValidUtf8Avx2 := (cpuHaswell in X64CpuFeatures);
     if HasValidUtf8Avx2 then
     begin
@@ -6296,7 +6756,7 @@ begin
     end;
     {$else}
     HasValidUtf8Avx2 := false; // IsValidUtf8Buffer = @IsValidUtf8Pas
-    {$endif ASMX64AVXNOCONST}
+    {$endif ASMX64AVX1}
     for j := 1 to lenup100 do
     begin
       check(PosChar(P, U[j])^ = U[j], 'PosCharj');
@@ -6344,6 +6804,10 @@ begin
     WinAnsiConvert.AnsiToUtf8(W, U1);
     CheckEqual(WinAnsiConvert.Utf8ToAnsi(U), W, 'uw');
     SU := WinAnsiConvert.AnsiToUnicodeString(W);
+    CheckEqual(StrLenWSafe(pointer(SU)), length(SU));
+    CheckEqual(StrLenW(pointer(SU)), length(SU));
+    if SU <> '' then
+      Check(WordScanIndex(pointer(SU), length(SU) + 10, 0) = length(SU));
     W2 := WinAnsiConvert.UnicodeStringToAnsi(SU);
     //ConsoleWrite(['SU len=', length(SU), ' =', SU]); ConsoleWrite(['W2 len=', length(W2), ' =', W2]); readln;
     CheckEqual(W2, W, 'A2U(U2A)');
@@ -6366,6 +6830,7 @@ begin
     CheckEqual(integer(Utf8ToUnicodeLength(Pointer(U))), length(WS));
     SU := Utf8ToSynUnicode(U);
     CheckEqual(length(SU), length(Unic) shr 1);
+    CheckEqual(StrLenW(pointer(SU)), length(SU));
     if SU <> '' then
       Check(CompareMem(pointer(SU), pointer(Unic), length(Unic)), 'Utf8ToSU');
     WA := IsWinAnsi(pointer(Unic));
@@ -6418,7 +6883,8 @@ begin
       end;
     except
       on E: Exception do
-        CheckUtf8(false, '% for %[%]%', [E, length(U), EscapeToShort(U), length(up4)]);
+        CheckUtf8(false, '% for %[%]%',
+          [E, length(U), EscapeToShort(U), length(up4)]);
     end;
     U2 := LowerCase(U);
     Check(IsLower(U2));
@@ -6500,6 +6966,7 @@ begin
   Utf8ToSynUnicode(U, SU);
   if not CheckFailed(length(SU) = 2) then
     Check(PCardinal(SU)^ = $DCD2D863);
+  CheckEqual(StrLenW(pointer(SU)), length(SU));
   Check(Utf8ToUnicodeLength(Pointer(U)) = 2);
   Check(Utf8FirstLineToUtf16Length(Pointer(U)) = 2);
   PCardinal(@WU)^ := 0;
@@ -6508,6 +6975,7 @@ begin
   U := SynUnicodeToUtf8(SU);
   if not CheckFailed(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
+  CheckEqual(StrLenW(pointer(SU)), length(SU));
   TSynAnsiConvert.Engine(CP_UTF8).UnicodeBufferToAnsiVar(
     pointer(SU), length(SU), RawByteString(U));
   Check(length(U) = 4);
@@ -6534,6 +7002,7 @@ begin
   FastSetString(U, @CHINESE_TEXT, 9);
   CheckEqual(StrLen(pointer(U)), 9);
   SU := Utf8ToSynUnicode(U);
+  CheckEqual(StrLenW(pointer(SU)), length(SU));
   eng := TSynAnsiConvert.Engine(936);
   Check(eng <> nil, 'Engine(936)');
   rb1 := eng.UnicodeStringToAnsi(SU); // GB2312
@@ -6572,16 +7041,20 @@ begin
     PCardinal(U)^ := $A59AAAF0; // valid in GB18030 only
     SU := Utf8ToSynUnicode(U);  // 69 D8 A5 DE , UTF16, Code Point: \uD869\uDEA5
     CheckEqual(PCardinal(SU)^, $DEA5D869);
+    CheckEqual(StrLenW(pointer(SU)), length(SU));
     RB1 := eng.Utf8ToAnsi(U);
-    Check((RB1 <> '') and (PCardinal(RB1)^ = $37EE3598), 'Utf8ToAnsi');
-    RB2 := eng.UnicodeStringToAnsi(SU);
-    Check(SortDynArrayRawByteString(rb1, rb2) = 0, 'UnicodeStringToAnsi');
-    eng.AnsiToUtf8(RB1, U2);
-    CheckEqual(U2, U, 'AnsiToUtf8');
+    if RB1 = '' then // not supported on this sytem
+    begin
+      Check((RB1 <> '') and (PCardinal(RB1)^ = $37EE3598), 'Utf8ToAnsi');
+      RB2 := eng.UnicodeStringToAnsi(SU);
+      Check(SortDynArrayRawByteString(rb1, rb2) = 0, 'UnicodeStringToAnsi');
+      eng.AnsiToUtf8(RB1, U2);
+      CheckEqual(U2, U, 'AnsiToUtf8');
+    end;
   end;
   CheckEqual(CodePageToText(CP_UTF8), 'utf8');
   CheckEqual(CodePageToText(CP_UTF16), 'utf16le');
-  CheckEqual(CodePageToText(CP_WINANSI), 'ms1252');
+  CheckEqual(CodePageToText(CP_WINANSI), 'windows-1252');
   CheckEqual(CodePageToText(54936), 'gb18030');
   Check(LcidToLanguage(0) = lngUndefined);
   CheckEqual(LANG_LCID[lngUndefined], LANG_ENGLISH_US);
@@ -6721,6 +7194,9 @@ begin
   CheckEqual(StringReplaceAll('abcabcabc', 'c', 'C', true), 'abCabCabC');
   CheckEqual(StringReplaceAll('abcabcabc', 'c', '', true), 'ababab');
   CheckEqual(StringReplaceAll('abcabcabc', 'C', '', true), 'ababab');
+  CheckCleanThreadName('', '');
+  CheckCleanThreadName('toto', 'toto');
+  CheckCleanThreadName('TWebSockettotoTSqlRestServerTOrmRestmemory', 'WStotoSrvmem');
   CheckEqual(LogEscapeFull(''), '');
   CheckEqual(LogEscapeFull(' abc'), ' abc');
   CheckEqual(LogEscapeFull('abc'), 'abc');
@@ -6866,10 +7342,12 @@ procedure TTestCoreBase.Charsets;
     // validate UTF-8 to/from UTF-16 conversion
     su := Utf8ToSynUnicode(ru);
     Check(su <> '', msg);
+    CheckEqual(StrLenW(pointer(su)), length(su));
     CheckEqual(SynUnicodeToUtf8(su), ru, 'utf8');
     {$ifdef HASCODEPAGE} // old Delphi RTL does not decode UTF-16 surrogates
     w := UTF8Decode(ru);
     CheckEqual(length(w), length(su), 'rtl1');
+    CheckEqual(StrLenW(pointer(w)), length(su));
     Check(CompareMem(pointer(w), pointer(su), length(w)), 'rtl2');
     {$endif HASCODEPAGE}
     {$ifdef OSWINDOWS}
@@ -6883,6 +7361,7 @@ procedure TTestCoreBase.Charsets;
     CheckEqual(eng.CodePage, cp, 'eng2');
     // with ASCII-7 chars
     su2 := eng.AnsiToUnicodeString('abcd efgh');
+    CheckEqual(StrLenW(pointer(su2)), length(su2));
     Check(su2 = 'abcd efgh', msg);
     a := eng.UnicodeStringToAnsi(su2);
     {$ifdef OSPOSIX}
@@ -6910,6 +7389,10 @@ procedure TTestCoreBase.Charsets;
       // -> we would need some input from native speakers of missing charsets
     end;
     {$ifdef OSPOSIX}
+    {$ifdef ISDELPHI}
+    if cp = 1361 then
+      exit; // not worth investigating yet
+    {$endif ISDELPHI}
     if (name = 'hz') and
        not icu.IsAvailable then // FPC RTL iconv is not enough about HZ-GB2312
       exit;
@@ -6934,6 +7417,7 @@ procedure TTestCoreBase.Charsets;
       exit; // some casing issue to investigate on Windows (not with ICU)
     {$endif OSWINDOWS}
     su2 := eng.AnsiToUnicodeString(ra);
+    CheckEqual(StrLenW(pointer(su2)), length(su));
     Check(su = su2, msg);
     eng := TSynAnsiConvert.Engine(cp); // validate "last" cache
     Check(eng <> nil, 'eng3');
@@ -7506,6 +7990,8 @@ var
   b: TTimeLogBits;
   st, start: TSynSystemTime;
 begin
+  Check(TTextDateWriter.InstanceSize <= SizeOf(TLocalWriter) - 256, 'TLocalWriter');
+  Check(PtrUInt(@HTML_MONTH_NAMES[3]) - PtrUInt(@HTML_MONTH_NAMES[1]) = 8);
   Check(st.FromText('19821031T142319'));
   start := st;
   CheckEqual(st.ToText, '1982-10-31T14:23:19.000');
@@ -7902,6 +8388,8 @@ var
   bak: byte;
   s: RawUtf8;
   b: RawByteString;
+  act: TArmCpuType;
+  aci: TArmCpuImplementer;
 
   procedure CheckAgainst(const full: TSmbiosInfo; const os: TSmbiosBasicInfos);
   begin
@@ -7922,11 +8410,28 @@ var
   end;
 
 begin
+  for act := low(act) to high(act) do
+  begin
+    ShortStringToAnsi7String(ARMCPU_ID_TXT[act], s);
+    CheckEqual(ord(ArmCpuType(ARMCPU_ID[act])), ord(act), s);
+  end;
+  for aci := low(aci) to high(aci) do
+  begin
+    ShortStringToAnsi7String(ARMCPU_IMPL_TXT[aci], s);
+    CheckEqual(ord(ArmCpuImplementer(ARMCPU_IMPL[aci])), ord(aci), s);
+  end;
   CheckEqual(ord(arm64DCPODP), 64);
   CheckEqual(ord(arm32AES), 32);
   CheckEqual(SizeOf(TSmbiosBiosFlags), 8);
   CheckEqual(SizeOf(TSmbiosMemory) - 7 * SizeOf(RawUtf8), 11);
   CheckEqual(SizeOf(TSmbiosMemoryArray) - 2 * SizeOf(pointer), 5);
+  Check(not IsDefaultString(pointer(s), length(s)));
+  s := 'Default string';
+  Check(IsDefaultString(pointer(s), length(s)));
+  s := 'Default String';
+  Check(IsDefaultString(pointer(s), length(s)));
+  s := 'Default 5tring';
+  Check(not IsDefaultString(pointer(s), length(s)));
   // validate actual retrieval from this computer
   GetComputerUuid(uid); // retrieve main SMBIOS and its UUID, or generate it
   Check(_SmbiosRetrieved);
@@ -8028,7 +8533,7 @@ begin
   Check(WinErrorConstant(12002)^ = 'TIMEOUT', 'wecf');
   Check(WinErrorConstant($800b010a)^ = 'CERT_E_CHAINING', 'wecg');
   Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecG');
-  Check(WinErrorConstant($800b010d)^ = '', 'wech');
+  Check(WinErrorConstant($800b010d)^[0] = #0, 'wech');
   Check(WinErrorConstant($80092002)^ = 'CRYPT_E_BAD_ENCODE', 'wecH');
   Check(WinErrorConstant(1229)^  = 'CONNECTION_INVALID', 'weci');
   Check(WinErrorConstant(122)^ = 'INSUFFICIENT_BUFFER', 'wecj');
@@ -8104,7 +8609,7 @@ end;
 
 const
   // some reference Security Descriptor self-relative buffers
-  SD_B64: array[0..8] of RawUtf8 = (
+  SD_B64: array[0..9] of RawUtf8 = (
     // 0 [MS-DTYP] 2.5.1.4 SDDL String to Binary Example
     'AQAUsJAAAACgAAAAFAAAADAAAAACABwAAQAAAAKAFAAAAACAAQEAAAAAAAEAAAAAAgBgAAQAAAAAAxgA' +
     'AAAAoAECAAAAAAAFIAAAACECAAAAAxgAAAAAEAECAAAAAAAFIAAAACACAAAAAxQAAAAAEAEBAAAAAAAF' +
@@ -8185,7 +8690,11 @@ const
     '3g/mve9RqC4nRgRbdx5AQEAAAAAAAUKAAAABRIoADABAAABAAAA3kfmkW/ZcEuVV9Y/9PPM2AEB' +
     'AAAAAAAFCgAAAAASJAD/AQ8AAQUAAAAAAAUVAAAAb66a5T9f7J/5hle4BwIAAAASGAAEAAAAAQI' +
     'AAAAAAAUgAAAAKgIAAAASGAC9AQ8AAQIAAAAAAAUgAAAAIAIAAAEFAAAAAAAFFQAAAG+umuU/X+' +
-    'yf+YZXuAACAAABBQAAAAAABRUAAABvrprlP1/sn/mGV7gAAgAA'
+    'yf+YZXuAACAAABBQAAAAAABRUAAABvrprlP1/sn/mGV7gAAgAA',
+    // 9 from a real Windows System
+    'AQAEgBQAAAAwAAAAAAAAAEwAAAABBQAAAAAABRUAAACBHhhytsTTB48bQEJPBAAAAQUAAAAAAAU' +
+    'VAAAAgR4YcrbE0wePG0BCAQIAAAIAWAADAAAAABAUAP8BHwABAQAAAAAABRIAAAAAEBgA/wEfAA' +
+    'ECAAAAAAAFIAAAACACAAAAECQA/wEfAAEFAAAAAAAFFQAAAIEeGHK2xNMHjxtAQk8EAAA='
     );
   // the expected SDDL export of those binary buffers
   SD_TXT: array[0..high(SD_B64)] of RawUtf8 = (
@@ -8271,14 +8780,19 @@ const
     '(A;CIID;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;S-1-5-21-3852119663-2683068223-3092743929-519)' +
     '(A;CIID;LC;;;RU)(A;CIID;CCLCSWRPWPLOCRSDRCWDWO;;;BA)' +
     'S:AI(OU;CIIOIDSA;WP;f30e3bbe-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)' +
-    '(OU;CIIOIDSA;WP;f30e3bbf-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)');
+    '(OU;CIIOIDSA;WP;f30e3bbf-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)',
+    // 9
+    'O:S-1-5-21-1914183297-131318966-1111497615-1103G:S-1-5-21-1914183297-131318966-1111497615-513D:' +
+    '(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;S-1-5-21-1914183297-131318966-1111497615-1103)'
+    );
   // the Domain SID to be used for RID recognition
   DOM_TXT: array[4..high(SD_B64)] of RawUtf8 = (
     'S-1-5-21-823746769-1624905683-418753922',    // 4
     'S-1-5-21-682003330-1677128483-1060284298',   // 5
     'S-1-5-21-823746769-1624905683-418753922',    // 6
     'S-1-5-21-2461620395-3297676348-3167859224',  // 7
-    'S-1-5-21-3852119663-2683068223-3092743929'); // 8
+    'S-1-5-21-3852119663-2683068223-3092743929',  // 8
+    'S-1-5-21-1914183297-131318966-1111497615');  // 9
   // the SDDL with proper RID recognition
   RID_TXT: array[4..high(SD_B64)] of RawUtf8 = (
     'O:DUG:DAD:(A;;FA;;;DA)',
@@ -8335,7 +8849,9 @@ const
       '(A;CIID;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;EA)(A;CIID;LC;;;RU)' +
       '(A;CIID;CCLCSWRPWPLOCRSDRCWDWO;;;BA)' +
       'S:AI(OU;CIIOIDSA;WP;f30e3bbe-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)' +
-      '(OU;CIIOIDSA;WP;f30e3bbf-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)');
+      '(OU;CIIOIDSA;WP;f30e3bbf-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)',
+      'O:S-1-5-21-1914183297-131318966-1111497615-1103G:DUD:(A;ID;FA;;;SY)(A;ID;FA;;;BA)' +
+      '(A;ID;FA;;;S-1-5-21-1914183297-131318966-1111497615-1103)');
   // [MS-DTYP] 2.4.4.17.9 Examples: Conditional Expression Binary Representation
   ARTX_HEX: array[0..2] of RawUtf8 = (
     '61727478f80a0000005400690074006c00650010040000005600500080000000',
@@ -8443,6 +8959,29 @@ begin
   dom := 'S-1-5-21-823746769-1624905683-418753922';
   CheckEqual(KnownSidToText(wkrUserAdmin, dom), dom + '-500');
   CheckEqual(KnownSidToText(wrkGroupRasServers, dom), dom + '-553');
+  Check(sd.FromText(RID_TXT[9]) = atpSuccess, 'guess domain from O:');
+  CheckEqual(sd.ToText, SD_TXT[9]);
+  bin := Base64ToBin('AQAEhBQAAAAkAAAAAAAAAEAAAAABAgAAAAAABSAAAAAgAgAAAQUAAAAAA' +
+    'AUVAAAA/ZxDLSkUVWPZmlbYAQIAAAMAoAAFAAAAABAUAP8BHwABAQAAAAAABRIAAAAAEBgA/' +
+    'wEfAAECAAAAAAAFIAAAACACAAAAECQAqQESAAEFAAAAAAAFFQAAAP2cQy0pFFVj2ZpW2EdYB' +
+    'AAAECQA/wESAAEFAAAAAAAFFQAAAP2cQy0pFFVj2ZpW2JIfBwAAECQA/wEfAAEFAAAAAAAFF' +
+    'QAAAKu8Fu9mK3SFkRuTS9XrAQA=');
+  Check(sd.FromBinary(bin), 'tolerate acl rev3');
+  u := sd.ToText('');
+  CheckEqual(u,
+    'O:BAG:S-1-5-21-759405821-1666520105-3629554393-513D:AI(A;ID;FA;;;SY)(A;ID;FA;;;B' +
+    'A)(A;ID;0x1201a9;;;S-1-5-21-759405821-1666520105-3629554393-284743)(A;ID;0x1201f' +
+    'f;;;S-1-5-21-759405821-1666520105-3629554393-466834)(A;ID;FA;;;S-1-5-21-40112447' +
+    '15-2238983014-1267932049-125909)');
+  {$ifdef OSWINDOWS}
+  Check(CryptoApi.SecurityDescriptorToText(pointer(bin), u2), 'winapi aclv3');
+  CheckEqual(u, u2);
+  {$endif OSWINDOWS}
+  u := sd.ToText('S-1-5-21-759405821-1666520105-3629554393'); // recognize G:DU
+  CheckEqual(u, 'O:BAG:DUD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1201a9;;;' +
+    'S-1-5-21-759405821-1666520105-3629554393-284743)(A;ID;0x1201ff;;;' +
+    'S-1-5-21-759405821-1666520105-3629554393-466834)(A;ID;FA;;;' +
+    'S-1-5-21-4011244715-2238983014-1267932049-125909)');
   // validate against some reference binary material
   for i := 0 to high(SD_B64) do
   begin
@@ -8463,7 +9002,7 @@ begin
     Check(sd.FromBinary(bin));
     Check(sd.Dacl <> nil, 'dacl');
     Check(scSelfRelative in sd.Flags);
-    Check((sd.Sacl = nil) = (i in [2 .. 7]) , 'sacl');
+    Check((sd.Sacl = nil) = (i in [2 .. 7, 9]) , 'sacl');
     CheckEqual(sd.ToText, SD_TXT[i], 'ToText');
     Check(sd.Dacl[0].Opaque = '');
     Check(sd.Dacl[0].ConditionalExpression = '');
@@ -10420,11 +10959,20 @@ finally
   end;
 end;
 
+type
+  TNotifyTask = record
+    Name: string;
+    Payload: RawJson;
+    Active: boolean;
+  end;
+  TNotifyTaskDynArray = array of TNotifyTask;
+
 procedure TTestCoreBase._TSynQueue;
 var
   o, i, j, k, n: integer; // not PtrInt
   f: TSynQueue;
   u, v: RawUtf8;
+  r1, r2: TNotifyTask;
   savedint: TIntegerDynArray;
   savedu: TRawUtf8DynArray;
 begin
@@ -10552,6 +11100,37 @@ begin
       check(f.Capacity > 0);
     end;
     check(Length(savedu) = length(savedint));
+  finally
+    f.Free;
+  end;
+  f := TSynQueue.Create(TypeInfo(TNotifyTaskDynArray));
+  try
+    checkEqual(f.Count, 0);
+    check(not f.Pending);
+    for i := 1 to 100 do
+    begin
+      r1.Name := IntToStr(i);
+      r1.Active := i and 3 = 0;
+      r1.Payload := Make(['{"int":', i, '}']);
+      checkNotEqual(f.Count, i);
+      f.Push(r1);
+      checkEqual(f.Count, i);
+      check(f.Pending);
+    end;
+    for i := 1 to 100 do
+    begin
+      check(f.Pending);
+      RecordZero(@r2, TypeInfo(TNotifyTask));
+      Check(r2.Name = '');
+      Check(not r2.Active);
+      Check(r2.Payload = '');
+      Check(f.Pop(r2));
+      Check(r2.Name = IntToStr(i));
+      Check(r2.Active = (i and 3 = 0));
+    end;
+    checkEqual(f.Count, 0);
+    Check(not f.Pop(r2));
+    checkEqual(f.Count, 0);
   finally
     f.Free;
   end;
