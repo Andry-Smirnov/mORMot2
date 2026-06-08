@@ -168,7 +168,7 @@ function JsonUnicodeEscape(const s: RawUtf8): RawUtf8;
 function JsonUnicodeUnEscape(const s: RawUtf8): RawUtf8;
 
 /// encode one \u#### JSON escaped UTF-16 codepoint into Dest
-procedure Utf16ToJsonUnicodeEscape(var B: PUtf8Char; c: PtrUint; tab: PByteToWord);
+procedure Utf16ToJsonUnicodeEscape(var B: PUtf8Char; c: PtrUInt; tab: PByteToWord);
   {$ifdef HASINLINE} inline; {$endif}
 
 /// test if the supplied buffer is a "string" value or a numerical value
@@ -4123,9 +4123,9 @@ begin
     begin
       c := PInteger(Value)^;
       if c = TRUE_LOW then
-        Value := pointer(SmallUInt32Utf8[1]) // normalize true -> 1
+        Value := @UINT_999[1].TextLo // normalize true -> 1
       else if c = FALSE_LOW then
-        Value := pointer(SmallUInt32Utf8[0]) // normalize false -> 0
+        Value := @UINT_999[0].TextLo // normalize false -> 0
       else
         exit;
       ValueLen := 1; // result = '0' or '1'
@@ -4382,7 +4382,7 @@ var
   B: PUtf8Char;
   parser: TJsonParser;
 begin
-  result := '';
+  FastAssignNew(result);
   if P = nil then
     exit;
   B := GotoNextNotSpace(P);
@@ -6824,12 +6824,12 @@ begin
     save := VARIANT_JSONSAVE[vt];
     if Assigned(save) then
     begin
-      save(@v^.VAny, ctxt);
+      save(@v^.VAny, ctxt); // direct output up to varOleUInt
       exit;
     end;
   end;
-  if vt = varString then
-    AddText(RawByteString(v^.VString), Escape)
+  if vt = varString then // most common first
+    AddText(RawByteString(v^.VString), Escape) // assume normalized as RawUtf8
   else
   case vt of
     varOleStr {$ifdef HASVARUSTRING}, varUString{$endif}:
@@ -9042,7 +9042,7 @@ function JsonDecode(Json: PUtf8Char; const aName: RawUtf8;
 var
   info: TGetJsonField;
 begin
-  result := '';
+  FastAssignNew(result);
   if Json = nil then
     exit;
   while Json^ <> '{' do
@@ -9259,7 +9259,7 @@ var
 begin
   result := 0;
   if (self = nil) or
-     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) or // no entry
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) or  // no entry
      (fSafe.Padding[DIC_TIMESEC].VInteger = 0) then // nothing in fTimeOut[]
     exit;
   if tix64 = 0 then
@@ -9304,7 +9304,8 @@ end;
 
 procedure TSynDictionary.DeleteAll;
 begin
-  if self = nil then
+  if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) then // no entry
     exit;
   fSafe.Lock; // = RWLock(cWrite);
   try
@@ -9422,7 +9423,10 @@ begin
     ESynDictionary.RaiseUtf8('%.Values: % items are not dynamic arrays',
       [self, fValues.Info.Name]);
   if aAction = iaFind then
-    fSafe.ReadLock
+    if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then // no entry
+      exit
+    else
+      fSafe.ReadLock
   else
     fSafe.Lock; // other actions may need to write the internal data
   try
@@ -9469,16 +9473,19 @@ function TSynDictionary.FindKeyFromValue(const aValue;
 var
   ndx: PtrInt;
 begin
+  result := false;
+  if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) then // no entry
+    exit;
   fSafe.ReadLock; // cReadOnly is good enough for SetTimeoutAtIndex()
   try
     ndx := fValues.IndexOf(aValue); // use fast RTTI for value search
     result := ndx >= 0;
-    if result then
-    begin
-      fKeys.ItemCopyAt(ndx, @aKey);
-      if aUpdateTimeOut then
-        SetTimeoutAtIndex(ndx); // no cWrite lock needed
-    end;
+    if not result then
+      exit;
+    fKeys.ItemCopyAt(ndx, @aKey);
+    if aUpdateTimeOut then
+      SetTimeoutAtIndex(ndx); // no cWrite lock needed
   finally
     fSafe.ReadUnLock;
   end;
@@ -9580,7 +9587,8 @@ var
   ndx: PtrInt;
 begin
   result := false;
-  if self = nil then
+  if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) then // no entry
     exit;
   fSafe.ReadLock;
   {$ifdef HASFASTTRYFINALLY}
@@ -9608,7 +9616,8 @@ var
   ndx: PtrInt;
 begin
   result := -1;
-  if self = nil then
+  if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) then // no entry
     exit;
   tim := ComputeNextTimeOut;
   if tim = 0 then
@@ -9630,6 +9639,7 @@ var
 begin
   result := false;
   if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) or // no entry
      (aSeconds <= 0) then
     exit;
   tim := ComputeNextTimeOut;
@@ -9651,7 +9661,8 @@ var
   ndx: PtrInt;
 begin
   result := false;
-  if self = nil then
+  if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) then // no entry
     exit;
   fSafe.ReadWriteLock;
   try
@@ -9677,7 +9688,8 @@ end;
 function TSynDictionary.Exists(const aKey): boolean;
 begin
   result := false;
-  if self = nil then
+  if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) then // no entry
     exit;
   fSafe.ReadLock;
   {$ifdef HASFASTTRYFINALLY}
@@ -9697,7 +9709,8 @@ function TSynDictionary.ExistsValue(
   const aValue; aCompare: TDynArraySortCompare): boolean;
 begin
   result := false;
-  if self = nil then
+  if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) then // no entry
     exit;
   fSafe.ReadLock;
   try
@@ -9724,6 +9737,9 @@ var
   i, n, ks, vs: PtrInt;
 begin
   result := 0;
+  if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) then // no entry
+    exit;
   if MayModify then
     fSafe.ReadWriteLock
   else
@@ -9760,12 +9776,15 @@ var
   k, v: PAnsiChar;
   i, n, ks, vs: PtrInt;
 begin
+  result := 0;
+  if (self = nil) or
+     (fSafe.Padding[DIC_KEYCOUNT].VInteger = 0) then // no entry
+    exit;
   if MayModify then
     fSafe.ReadWriteLock
   else
     fSafe.ReadLock;
   try
-    result := 0;
     if (not Assigned(OnMatch)) or
        (not (Assigned(KeyCompare) or
              Assigned(ValueCompare))) then
@@ -9844,7 +9863,7 @@ function TSynDictionary.SaveValuesToJson(EnumSetsAsText: boolean;
 begin
   if self = nil then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   fSafe.ReadLock;
@@ -9949,7 +9968,7 @@ var
   tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   W: TBufferWriter;
 begin
-  result := '';
+  FastAssignNew(result);
   if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then
     exit;
   W := TBufferWriter.Create(tmp{%H-});
@@ -10918,7 +10937,7 @@ var
 begin
   if length(Values) = 0 then
     if WithoutBraces then
-      result := ''
+      FastAssignNew(result)
     else
       result := '[]'
   else
@@ -10991,7 +11010,7 @@ var
 begin
   nfo := Rtti.RegisterTypeFromName(TypeName);
   if nfo = nil then
-    result := ''
+    FastAssignNew(result)
   else
     SaveJson(Value, nfo.Cache.Info, Options, result);
 end;
@@ -11074,7 +11093,7 @@ begin
   DynArray.Init(TypeInfo, Value);
   try
     if DynArray.LoadFrom(BlobValue, PAnsiChar(BlobValue) + BlobLen) = nil then
-      result := ''
+      FastAssignNew(result)
     else
       with TJsonWriter.CreateOwnedStream(temp) do
       try
@@ -11743,6 +11762,7 @@ begin
   CLASS_RTTI[vcRawUtf8List]   := TRawUtf8List;
   Rtti.RegisterTypes([TypeInfo(TRawUtf8DynArray), TypeInfo(TIntegerDynArray)]);
   // prepare some JSON wrappers
+  DefaultJsonWriter := TJsonWriter;
   GetDataFromJson := _GetDataFromJson;
   InitializeVariantsJson; // from mormot.core.variants
   {$ifdef FPC} // we need to call it once so that it is linked to the executable
@@ -11754,7 +11774,6 @@ end;
 
 initialization
   InitializeUnit;
-  DefaultJsonWriter := TJsonWriter;
 
 end.
 

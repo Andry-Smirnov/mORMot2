@@ -1129,6 +1129,7 @@ var
   O: TSynMonitorTime;
   v: TRawUtf8DynArray;
   v64: Int64;
+  sl: TStrings;
   timer: TPrecisionTimer;
 
   procedure TestBinDictionary;
@@ -1167,6 +1168,16 @@ begin
     end;
     for i := 0 to MAX do
       Check(TSynMonitorTime(L.Objects[i]).MicroSec = i);
+    sl := L.ToStrings;
+    Check(sl is TVirtualStringList);
+    CheckEqual(sl.Count, L.Count);
+    CheckEqual(sl.Capacity, L.Count);
+    for i := 0 to MAX do
+    begin
+      Check(StrToInt(sl[i]) = i);
+      Check(TSynMonitorTime(sl.Objects[i]).MicroSec = i);
+    end;
+    sl.Free;
     timer.Start;
     Check(L.IndexOf('') < 0);
     for i := MAX downto MAX - 99 do // O(n) worst case: appear at the end
@@ -1187,6 +1198,7 @@ begin
     Check(not L.Exists('6'));
     L.Clear;
     Check(L.Count = 0);
+    Check(L.IndexOf('5') < 0);
     Check(L.Add('toto') = 0);
     Check(L.Count = 1);
     Check(L.IndexOf('titi') < 0);
@@ -1558,6 +1570,7 @@ begin
   R := TPipeThread.Create({suspended=}true, nil, nil, TSynLog, 'rd');
   W := TPipeThread.Create({suspended=}true, nil, nil, TSynLog, 'wr');
   try
+    P.Options := [psoCheckThread];
     R.Pipe := P;
     R.Expected := length(S) * THREAD_ITER;
     R.Start;
@@ -1577,6 +1590,8 @@ begin
     CheckEqual(P.Size, R.Expected);
     CheckEqual(P.Position, R.Expected);
     CheckEqual(P.Seek(0, soFromCurrent), R.Expected);
+    CheckEqual(P.Size, R.Expected);
+    CheckEqual(P.ExpectedSize, -1);
   finally
     W.Free;
     R.Free;
@@ -1586,21 +1601,39 @@ begin
   timer.Start;
   P := TPipeStream.Create(SizeOf(tmp));
   try
+    CheckEqual(P.ExpectedSize, -1);
+    P.ExpectedSize := 777;
+    CheckEqual(P.Position, 0);
+    CheckEqual(P.Size, 777, 'ExpectedSize before');
+    CheckEqual(P.ExpectedSize, 777);
     ps := pointer(S);
-    n := SizeOf(tmp); // always try whole 1K buffer first
-    c := length(S) div SizeOf(tmp); // loop 97 times
+    c := length(S) div SizeOf(tmp); // loop c=97 times
     for i := 1 to c do
     begin
+      // try variable Write+Read (1..1024 bytes)
+      if i and 31 = 7 then
+        n := SizeOf(tmp) // whole 1K buffer once in a while
+      else if i and 31 = 0 then
+        n := 1 // another very intriguing number
+      else
+        n := Random32(SizeOf(tmp)) + 1; // good enough
+      // verify Write/Read data roundtrip
       crc := crc32c(0, ps, n);
       CheckEqual(P.Write(ps^, n), n, 'write all');
       inc(ps, n);
       FillCharFast(tmp, n, 0);
       CheckEqual(P.Read(tmp, SizeOf(tmp)), n, 'read trunc');
       CheckEqual(crc, crc32c(0, @tmp, n), 'crc');
-      n := Random32(SizeOf(tmp)) + 1; // variable Write+Read (1..1024 bytes)
+      CheckEqual(P.Pending, 0, 'pipe should be empty after full read');
     end;
-    n := ps - pointer(S);
+    n := ps - pointer(S); // compute final length: around half of length(S)
     Check(n <= length(S), 'ps overflow');
+    CheckEqual(P.Position, n, 'Position');
+    CheckEqual(P.Size, 777, 'ExpectedSize after');
+    CheckEqual(P.ExpectedSize, 777);
+    P.ExpectedSize := -1;
+    CheckEqual(P.Size, n, 'ExpectedSize reset');
+    CheckEqual(P.Position, n, 'Position unchanged');
   finally
     P.Free;
   end;
@@ -1637,7 +1670,7 @@ begin
       W.Expected := length(s);
       W.Start;
       SleepHiRes(50);
-      P.Close;
+      P.Abort;
       W.WaitFor;
       CheckEqual(W.Bytes, 0, 'close');
     finally
@@ -4197,12 +4230,15 @@ begin
 end;
 
 function crc32creference(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
+var
+  tab: PCrc32tab;
 begin
+  tab := crc32ctab; // retrieve the lookup table once
   result := not crc;
   if buf <> nil then
     while len > 0 do
     begin
-      result := crc32ctab[0, ToByte(result xor ord(buf^))] xor (result shr 8);
+      result := tab[0, ToByte(result xor ord(buf^))] xor (result shr 8);
       dec(len);
       inc(buf);
     end;
@@ -4301,19 +4337,22 @@ end;
 procedure crcblockreference(crc128, data128: PBlock128);
 var
   c: cardinal;
+var
+  tab: PCrc32tab;
 begin
+  tab := crc32ctab; // retrieve the lookup table once
   c := crc128^[0] xor data128^[0];
-  crc128^[0] := crc32ctab[3, byte(c)] xor crc32ctab[2, byte(c shr 8)] xor
-                crc32ctab[1, byte(c shr 16)] xor crc32ctab[0, c shr 24];
+  crc128^[0] := tab[3, byte(c)] xor tab[2, byte(c shr 8)] xor
+                tab[1, byte(c shr 16)] xor tab[0, c shr 24];
   c := crc128^[1] xor data128^[1];
-  crc128^[1] := crc32ctab[3, byte(c)] xor crc32ctab[2, byte(c shr 8)] xor
-                crc32ctab[1, byte(c shr 16)] xor crc32ctab[0, c shr 24];
+  crc128^[1] := tab[3, byte(c)] xor tab[2, byte(c shr 8)] xor
+                tab[1, byte(c shr 16)] xor tab[0, c shr 24];
   c := crc128^[2] xor data128^[2];
-  crc128^[2] := crc32ctab[3, byte(c)] xor crc32ctab[2, byte(c shr 8)] xor
-                crc32ctab[1, byte(c shr 16)] xor crc32ctab[0, c shr 24];
+  crc128^[2] := tab[3, byte(c)] xor tab[2, byte(c shr 8)] xor
+                tab[1, byte(c shr 16)] xor tab[0, c shr 24];
   c := crc128^[3] xor data128^[3];
-  crc128^[3] := crc32ctab[3, byte(c)] xor crc32ctab[2, byte(c shr 8)] xor
-                crc32ctab[1, byte(c shr 16)] xor crc32ctab[0, c shr 24];
+  crc128^[3] := tab[3, byte(c)] xor tab[2, byte(c shr 8)] xor
+                tab[1, byte(c shr 16)] xor tab[0, c shr 24];
 end;
 
 procedure TTestCoreBase._crc32c;
@@ -4358,6 +4397,7 @@ var
 var
   i, j: integer;
   c1, c2: cardinal;
+  p: PAnsiChar;
   crc1, crc2: THash128;
   crcs: THash512Rec;
   digest: THash256;
@@ -4470,11 +4510,12 @@ begin
       LecuyerEncrypt(i, s2);
       CheckEqual(s2, S, 'LecuyerEncrypt');
     end;
-  Check(crc32fast(0, @crc32tab, 5) = $DF4EC16C, 'crc32a');
-  Check(crc32fast(0, @crc32tab, 1024) = $6FCF9E13, 'crc32b');
-  Check(crc32fast(0, @crc32tab, 1024 - 5) = $70965738, 'crc32c');
-  Check(crc32fast(0, pointer(PtrInt(@crc32tab) + 1), 2) = $41D912FF, 'crc32d');
-  Check(crc32fast(0, pointer(PtrInt(@crc32tab) + 3), 1024 - 5) = $E5FAEC6C, 'crc32e');
+  p := pointer(crc32tab);
+  Check(crc32fast(0, p, 5) = $DF4EC16C, 'crc32a');
+  Check(crc32fast(0, p, 1024) = $6FCF9E13, 'crc32b');
+  Check(crc32fast(0, p, 1024 - 5) = $70965738, 'crc32c');
+  Check(crc32fast(0, p + 1, 2) = $41D912FF, 'crc32d');
+  Check(crc32fast(0, p + 3, 1024 - 5) = $E5FAEC6C, 'crc32e');
   Test(crc32creference, 'pas');
   Test(crc32cinlined, 'inl');
   Test(crc32cfast, 'fast');
@@ -5977,6 +6018,18 @@ begin
   CheckEqual(OnlyChar('abcdz', ['d', 'z']), 'dz');
   CheckEqual(OnlyChar('abzcd', ['z']), 'z');
   CheckEqual(OnlyChar('zabzcdz', ['z']), 'zzz');
+  CheckEqual(TrimOneChar('abcda', 'a'), 'bcd');
+  CheckEqual(TrimOneChar('abcda', 'b'), 'acda');
+  CheckEqual(TrimOneChar('abcda', 'd'), 'abca');
+  CheckEqual(TrimOneChar('', 'a'), '');
+  CheckEqual(TrimOneChar('a', 'a'), '');
+  CheckEqual(TrimOneChar('aa', 'a'), '');
+  CheckEqual(TrimOneChar('aaa', 'a'), '');
+  CheckEqual(TrimOneChar('baaa', 'a'), 'b');
+  CheckEqual(TrimOneChar('aaab', 'a'), 'b');
+  CheckEqual(TrimOneChar('aaaba', 'a'), 'b');
+  CheckEqual(TrimOneChar('aaabaa', 'a'), 'b');
+  CheckEqual(TrimOneChar('a'#13#10'b'#13#10, #13), 'a'#10'b'#10);
   // + on RawByteString seems buggy on FPC - at least inconsistent with Delphi
   rb2 := ARawSetString;
   rb1 := rb2 + RawByteString('test');

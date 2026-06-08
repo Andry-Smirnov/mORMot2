@@ -1588,6 +1588,8 @@ type
     // any nested custom variant types (e.g. TDocVariant) will be stored as JSON
     function ToRawUtf8DynArray: TRawUtf8DynArray; overload;
       {$ifdef HASINLINE}inline;{$endif}
+    /// save a document into a TStrings list of encoded JSON
+    procedure ToStrings(Dest: TStrings; ClearDest: boolean = false);
     /// save a document as an CSV of UTF-8 encoded JSON
     // - will expect the document to be a dvArray - otherwise, will raise a
     // EDocVariant exception
@@ -3367,6 +3369,7 @@ type
     /// returns all IDocDict kind of elements of this IDocList
     // - the list should consist e.g. of a JSON array of JSON objects
     // - will just ignore any element of the IDocList which is not a IDocDict
+    // - returned IDocDict instances are weak references to this IDocList
     function ObjectsDicts: IDocDicts;
     /// removes the element at the specified position, and returns it
     // - raise an EDocList on invalid supplied position
@@ -4096,11 +4099,7 @@ begin
           goto clr; // varError/varDispatch
     end // note: varVariant/varUnknown are not handled because should not appear
     else if vt = varString then
-      {$ifdef FPC}
       FastAssignNew(V^.VAny)
-      {$else}
-      RawUtf8(V^.VAny) := ''
-      {$endif FPC}
     else if vt < varByRef then // varByRef has no refcount -> nothing to clear
       {$ifdef HASVARUSTRING}
       if vt = varUString then
@@ -5116,7 +5115,7 @@ var
   handler: TSynInvokeableVariantType;
   v, tmp: TVarData; // PVarData wouldn't store e.g. RowID/count
   vt: cardinal;
-  n: ShortString;
+  n: ShortString; // local temporary variable to end with #0
 begin
   TSynVarData(Dest).VType := varEmpty; // left to Unassigned if not found
   v := Instance;
@@ -5129,7 +5128,7 @@ begin
   repeat
     if vt < varFirstCustom then
       exit; // we need a complex type to lookup
-    GetNextItemShortString(FullName, @n, PathDelim); // n will end with #0
+    GetNextItemShortString(FullName, @n, PathDelim);
     if n[0] = #0 then
       exit;
     handler := self;
@@ -5890,7 +5889,7 @@ begin
       result := ToCsv
     else if IsObject or
             not VariantToText(DocVariantOrString, result) then
-      result := '';
+      FastAssignNew(result);
 end;
 
 function ObjectToVariant(Value: TObject; EnumSetsAsText: boolean): variant;
@@ -9635,7 +9634,7 @@ end;
 
 function TDocVariantData.GetItemAsText(aIndex: integer): RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   if cardinal(aIndex) < cardinal(VCount) then
     VariantToUtf8(VValue[aIndex], result)
   else
@@ -9836,7 +9835,6 @@ end;
 function TDocVariantData.GetValueOrItem(const aNameOrIndex: variant): variant;
 var
   ndx: integer;
-  wasString: boolean;
   name: TTempUtf8; // no memory allocation most of the time
 begin
   if VariantToInteger(aNameOrIndex, ndx) then
@@ -9847,9 +9845,9 @@ begin
   else
   begin
     ndx := -1;
-    if VName <> nil then
+    if VName <> nil then // locate by name as variant text
     begin
-      VariantToTempUtf8(aNameOrIndex, name, wasString);
+      VariantToTempUtf8(aNameOrIndex, name, [vfNoComplex, vfNullAsVoid]);
       if name.Text <> nil then
         ndx := FindNonVoid[Has(dvoNameCaseSensitive)](pointer(VName),
           name.Text, name.Len, VCount);
@@ -9961,7 +9959,7 @@ begin
   if (cardinal(VType) <> DocVariantVType) or
      not IsArray then
   begin
-    result := '';
+    FastAssignNew(result);
     exit;
   end;
   if VCount = 0 then
@@ -10035,6 +10033,12 @@ end;
 function TDocVariantData.ToRawUtf8DynArray: TRawUtf8DynArray;
 begin
   ToRawUtf8DynArray(result);
+end;
+
+procedure TDocVariantData.ToStrings(Dest: TStrings; ClearDest: boolean);
+begin
+  if Dest <> nil then
+    AddRawUtf8ToStringList(ToRawUtf8DynArray, Dest, ClearDest);
 end;
 
 function TDocVariantData.ToCsv(const Separator: RawUtf8): RawUtf8;
@@ -10149,7 +10153,7 @@ var
 begin
   v := GetPVariantByName(aName);
   if PVarData(v)^.VType <= varNull then // default VariantToUtf8(null)='null'
-    result := ''
+    FastAssignNew(result)
   else
     VariantToUtf8(v^, result, wasString);
 end;
@@ -11211,14 +11215,13 @@ function EvaluateVariantExpression(Comp: TVariantCompare;
   const A, B: variant; Match: TCompareOperator): boolean;
 var
   au, bu: TTempUtf8; // almost never allocated
-  dummy: boolean;
 begin // same logic than EvaluateTextExpression() in mormot.core.unicode
   if Match < coEqualCaseInsens then
     result := SortMatch(Comp(A, B), Match)
   else
   begin
-    VariantToTempUtf8(A, au, dummy);
-    VariantToTempUtf8(B, bu, dummy);
+    VariantToTempUtf8(A, au, [vfNullAsVoid]);
+    VariantToTempUtf8(B, bu, [vfNullAsVoid]);
     case Match of
       coEqualCaseInsens, coNotEqualCaseInsens:
         result := (Match = coEqualCaseInsens) =

@@ -3415,7 +3415,8 @@ begin
   else
   begin // other cases
     h^.AppendShort(_CMD_XXX[rfHttp10 in Context.ResponseFlags]);
-    h^.Append(SmallUInt32Utf8[MinPtrUInt(high(SmallUInt32Utf8), fRespStatus)]);
+    with UINT_999[MinPtrUInt(high(SmallUInt32Utf8), fRespStatus)] do
+      h^.Append(@TextLo, Header.length);
     h^.Append(' ');
     h^.Append(mormot.core.text.StatusCodeToText(fRespStatus)^); // need English
     h^.AppendCRLF;
@@ -4516,7 +4517,7 @@ end;
 function THttpServerSocketGeneric.ComputeWwwAuthenticate(Opaque: Int64): RawUtf8;
 begin
   // return the expected 'WWW-Authenticate: ####'#13#10 header content
-  result := '';
+  FastAssignNew(result);
   case fAuthorize of
     hraBasic:
       result := fAuthorizeBasicRealm; // includes trailing #13#10
@@ -6141,7 +6142,7 @@ end;
 
 function THttpPeerCacheSettings.GuessInterface(out Mac: TMacAddress): RawUtf8;
 begin
-  result := '';
+  FastAssignNew(result);
   if fInterfaceName <> '' then
   begin
     if not GetMainMacAddress(Mac, fInterfaceName, {UpAndDown=}true) then
