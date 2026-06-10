@@ -3738,7 +3738,7 @@ type
   TSynTempAdder = object
   {$endif USERECORDWITHMETHODS}
   private
-    procedure AddRealloc(new: integer);
+    procedure AddRealloc(new: PtrInt);
   public
     /// direct access to the internal 4KB temporary buffer
     Store: TSynTempBuffer;
@@ -3748,26 +3748,22 @@ type
     procedure Init(StartupCapacity: PtrInt); overload;
     /// prepare to append some bytes to the internal buffer
     // - returns the destination buffer where l bytes should be written
-    function Add(l: integer): pointer; overload;
+    function Add(l: PtrInt): pointer; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// append some bytes to the internal buffer
     // - making a buffer reallocation if needed
     procedure Add(p: pointer; l: PtrInt); overload;
-      {$ifdef HASINLINE}inline;{$endif}
     /// append some bytes to the internal buffer
     // - making a buffer reallocation if needed
     procedure Add(const s: RawByteString); overload;
-      {$ifdef HASINLINE}inline;{$endif}
     /// add one AnsiChar to the internal buffer
     procedure Add(c: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// add one repeated AnsiChar to the internal buffer
     procedure AddChars(c: AnsiChar; n: PtrInt);
-      {$ifdef HASINLINE}inline;{$endif}
     /// append some bytes to the internal buffer
     // - making a buffer reallocation if needed
     procedure AddShort(const s: ShortString); overload;
-      {$ifdef HASINLINE}inline;{$endif}
     /// add one AnsiChar just after another Add() within trailing 16 bytes margin
     procedure AddDirect(c: AnsiChar); overload;
       {$ifdef HASINLINE}inline;{$endif}
@@ -9056,12 +9052,11 @@ var
   i: PtrInt;
   a: TPointerDynArray absolute aObjArray;
 begin
-  if a <> nil then
-  begin
-    for i := 0 to length(a) - 1 do
-      ObjArrayClear(a[i]);
-    a := nil;
-  end;
+  if a = nil then
+    exit;
+  for i := 0 to length(a) - 1 do
+    ObjArrayClear(a[i]);
+  a := nil;
 end;
 
 procedure ObjArraysClear(const aObjArray: array of pointer);
@@ -10143,7 +10138,7 @@ begin
     StartPos := 1;
   if (length(SepStr) = 1) and
      (StartPos <= 1) then
-    i := PosExChar(SepStr[1], Str) // may use SSE2 on i386/x86_64
+    i := PosExChar(SepStr[1], Str) // may use SSE2 or memchr()
   else
     i := PosEx(SepStr, Str, StartPos);
   if i > 0 then
@@ -12556,7 +12551,7 @@ begin
   Store.Init(StartupCapacity);
 end;
 
-procedure TSynTempAdder.AddRealloc(new: integer);
+procedure TSynTempAdder.AddRealloc(new: PtrInt);
 begin
   Store.len := NextGrow(new); // len is capacity here
   if Store.buf = @Store.tmp then
@@ -12568,9 +12563,9 @@ begin
     ReallocMem(Store.buf, Store.len + SYNTEMPTRAIL);
 end;
 
-function TSynTempAdder.Add(l: integer): pointer;
+function TSynTempAdder.Add(l: PtrInt): pointer;
 var
-  new: integer;
+  new: PtrInt;
 begin
   new := l + Store.added;
   if new > Store.len then // len is capacity here
@@ -12601,7 +12596,7 @@ end;
 
 procedure TSynTempAdder.Add(const s: RawByteString);
 var
-  l: TStrLen;
+  l: PtrInt;
 begin
   if pointer(s) = nil then
     exit;
@@ -12631,21 +12626,21 @@ procedure TSynTempAdder.AddU(v: PtrUInt);
 var
   t: TTemp24;
   P: PAnsiChar;
+  l: PtrInt;
 begin
   P := StrUInt32(@t[23], v);
-  Add(P, @t[23] - P);
+  l := @t[23] - P;
+  MoveFast(P^, Add(l)^, l);
 end;
 
 procedure TSynTempAdder.Add16BigEndian(v: cardinal);
 begin
-  v := bswap16(v);
-  Add(@v, 2);
+  PCardinal(Add(2))^ := bswap16(v);
 end;
 
 procedure TSynTempAdder.Add32BigEndian(v: cardinal);
 begin
-  v := bswap32(v);
-  Add(@v, 4);
+  PCardinal(Add(4))^ := bswap32(v);
 end;
 
 procedure TSynTempAdder.Done(var Dest; CodePage: cardinal);
@@ -12658,6 +12653,7 @@ procedure TSynTempAdder.CancelLastChar;
 begin
   dec(Store.added); // caller should have tested that Size = Store.added > 0
 end;
+
 
 procedure OrMemory(Dest, Source: PByteArray; Size: PtrInt);
 begin
@@ -13442,15 +13438,13 @@ begin
     varVariant:
       if cardinal(PVarData(TVarData(Source).VPointer)^.VType) in VTYPE_SIMPLE then
       begin
-        Dest := PVarData(TVarData(Source).VPointer)^;
+        Dest := PVarData(TVarData(Source).VPointer)^; // copy whole variant
         result := true;
       end;
-    varEmpty..varDate,
-    varBoolean,
-    varShortInt..varWord64:
+    varEmpty .. varDate, varBoolean, varShortInt .. varWord64: // VTYPE_SIMPLE
       begin
         PCardinal(@Dest)^ := typ;
-        Dest.VInt64 := PInt64(TVarData(Source).VAny)^;
+        Dest.VInt64 := PInt64(TVarData(Source).VAny)^; // copy any number
         result := true;
       end;
   end;
@@ -13458,7 +13452,7 @@ end;
 
 function SetVarDataUnRef(typ: cardinal; V: PVarData; var tmp: TVarData): PVariant;
 begin
-  PCardinal(@tmp)^ := typ and cardinal(not varByRef);
+  PCardinal(@tmp)^ := typ and cardinal(not varByRef); // store as original type
   tmp.VInt64 := PInt64(V^.VAny)^; // simple types or pointer types
   result := @tmp;
 end;

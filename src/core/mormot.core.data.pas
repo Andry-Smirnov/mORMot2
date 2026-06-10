@@ -723,6 +723,11 @@ function BinaryLoadBase64(Source: PAnsiChar; Len: PtrInt; Data: pointer;
   Info: PRttiInfo; UriCompatible: boolean; Kinds: TRttiKinds;
   WithCrc: boolean = true; TryCustomVariants: PDocVariantOptions = nil): boolean;
 
+// internal methods called for (dynamic) arrays with Data<>nil and n>0
+procedure BinaryLoadSeveral(Data: PAnsiChar; var Source: TFastReader;
+  Info: PRttiInfo; n, datasize: PtrInt);
+procedure BinarySaveSeveral(Data: PAnsiChar; Dest: TBufferWriter;
+  Info: PRttiInfo; n, datasize: PtrInt);
 
 /// check equality of two records by content
 // - will handle packed records, with binaries (byte, word, integer...) and
@@ -5268,9 +5273,6 @@ procedure DynArraySave(Data: PAnsiChar; ExternalCount: PInteger;
   Dest: TBufferWriter; Info: PRttiInfo);
 var
   n, itemsize: PtrInt;
-  sav: TRttiBinarySave;
-label
-  raw;
 begin
   Info := Info^.DynArrayItemType(itemsize); // nil if unmanaged
   Dest.Write1(0); // warning: store itemsize=0 (mORMot 1 ignores it anyway)
@@ -5286,19 +5288,7 @@ begin
       n := PDALen(Data - _DALEN)^ + _DAOFF;
     Dest.WriteVarUInt32(n);
     Dest.Write4(0); // warning: we don't store any Hash32 checksum any more
-    if Info = nil then
-raw:  Dest.Write(Data, itemsize * n)
-    else
-    begin
-      sav := RTTI_BINARYSAVE[Info^.Kind];
-      if Assigned(sav) then // paranoid check
-        repeat
-          inc(Data, sav(Data, Dest, Info));
-          dec(n);
-        until n = 0
-      else
-        goto raw;
-    end;
+    BinarySaveSeveral(Data, Dest, Info, n, itemsize * n);
   end;
 end;
 
@@ -5345,9 +5335,6 @@ function _BL_DynArray(Data: PAnsiChar; var Source: TFastReader; Info: PRttiInfo)
 var
   n, siz: PtrInt;
   nfo: PRttiInfo;
-  load: TRttiBinaryLoad;
-label
-  raw;
 begin
   nfo := Info^.DynArrayItemType(siz); // nil for unmanaged items
   n := DynArrayLoadHeader(Source, Info, nfo);
@@ -5356,20 +5343,7 @@ begin
   if n > 0 then
   begin
     DynArrayNew(pointer(Data), n, siz); // allocate zeroed  memory
-    Data := PPointer(Data)^; // point to first item
-    if nfo = nil then
-raw:  Source.Copy(Data, siz * n)
-    else
-    begin
-      load := RTTI_BINARYLOAD[nfo^.Kind];
-      if Assigned(load) then
-        repeat
-          inc(Data, load(Data, Source, nfo));
-          dec(n);
-        until n = 0
-      else
-        goto raw;
-    end;
+    BinaryLoadSeveral(PPointer(Data)^, Source, nfo, n, siz * n);
   end;
   result := SizeOf(pointer);
 end;
@@ -5622,47 +5596,17 @@ end;
 function _BS_Array(Data: PAnsiChar; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
 var
   n: PtrInt;
-  sav: TRttiBinarySave;
-label
-  raw;
 begin
-  Info := Info^.ArrayItemType(n, result);
-  if Info = nil then // unmanaged
-raw:Dest.Write(Data, result)
-  else
-  begin
-    sav := RTTI_BINARYSAVE[Info^.Kind];
-    if Assigned(sav) then // paranoid check
-      repeat
-        inc(Data, sav(Data, Dest, Info));
-        dec(n);
-      until n = 0
-    else
-      goto raw;
-  end;
+  Info := Info^.ArrayItemType(n, result); // nil if unmanaged
+  BinarySaveSeveral(Data, Dest, Info, n, result);
 end;
 
 function _BL_Array(Data: PAnsiChar; var Source: TFastReader; Info: PRttiInfo): PtrInt;
 var
   n: PtrInt;
-  load: TRttiBinaryLoad;
-label
-  raw;
 begin
-  Info := Info^.ArrayItemType(n, result);
-  if Info = nil then // unmanaged
-raw:Source.Copy(Data, result)
-  else
-  begin
-    load := RTTI_BINARYLOAD[Info^.Kind];
-    if Assigned(load) then // paranoid check
-      repeat
-        inc(Data, load(Data, Source, Info));
-        dec(n);
-      until n = 0
-    else
-      goto raw;
-  end;
+  Info := Info^.ArrayItemType(n, result); // nil if unmanaged
+  BinaryLoadSeveral(Data, Source, Info, n, result);
 end;
 
 function _BC_Array(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
@@ -5704,8 +5648,8 @@ end;
 
 const
   // 0 for unserialized VType, 255 for valOleStr
-  VARIANT_SIZE: array[varEmpty .. varWord64] of byte = (
-    0, 0, 2, 4, 4, 8, 8, 8, 255, 0, 0, 2, 0, 0, 0, 0, 1, 1, 2, 4, 8, 8);
+  VARIANT_SIZE: array[varEmpty .. varOleUInt] of byte = (
+    0, 0, 2, 4, 4, 8, 8, 8, 255, 0, 0, 2, 0, 0, 0, 0, 1, 1, 2, 4, 8, 8, 4, 4);
 
 function _BS_Variant(Data: PVarData; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
 var
@@ -5723,9 +5667,8 @@ begin
       else
         Dest.Write(@Data^.VInt64, vt); // simple types are stored as binary
   end
-  else if (vt = varString) and  // expect only RawUtf8
-          (Data^.vAny <> nil) then
-    Dest.WriteVar(Data^.vAny, PStrLen(PAnsiChar(Data^.VAny) - _STRLEN)^)
+  else if vt = varString then  // expect only RawUtf8
+    Dest.WriteVar(Data^.vAny, length(RawUtf8(Data^.vAny)))
   {$ifdef HASVARUSTRING}
   else if vt = varUString then
     Dest.WriteVar(Data^.vAny, length(UnicodeString(Data^.vAny)) * 2)
@@ -6197,6 +6140,44 @@ begin
     result := false;
 end;
 
+procedure BinaryLoadSeveral(Data: PAnsiChar; var Source: TFastReader;
+  Info: PRttiInfo; n, datasize: PtrInt);
+label
+  raw;
+var
+  load: TRttiBinaryLoad;
+begin // caller ensured Data<>nil and n>0
+  if Info = nil then
+    goto raw;
+  load := RTTI_BINARYLOAD[Info^.Kind];
+  if Assigned(load) then
+    repeat
+      inc(Data, load(Data, Source, Info));
+      dec(n);
+    until n = 0
+  else
+raw:Source.Copy(Data, datasize)
+end;
+
+procedure BinarySaveSeveral(Data: PAnsiChar; Dest: TBufferWriter;
+  Info: PRttiInfo; n, datasize: PtrInt);
+var
+  sav: TRttiBinarySave;
+label
+  raw;
+begin
+  if Info = nil then
+    goto raw;
+  sav := RTTI_BINARYSAVE[Info^.Kind];
+  if Assigned(sav) then // paranoid check
+    repeat
+      inc(Data, sav(Data, Dest, Info));
+      dec(n);
+    until n = 0
+  else
+raw:Dest.Write(Data, datasize);
+end;
+
 
 function RecordEquals(const RecA, RecB; TypeInfo: PRttiInfo; PRecSize: PInteger;
   CaseInSensitive: boolean): boolean;
@@ -6521,24 +6502,21 @@ end;
 function TDynArray.ItemCompare(A, B: pointer; CaseInSensitive: boolean): integer;
 var
   comp: TRttiCompare;
-  rtti: PRttiInfo;
 label
   raw;
 begin
   if Assigned(fCompare) then
-    result := fCompare(A^, B^)
-  else if not(rcfArrayItemManaged in fInfo.Flags) then
-     // fast binary comparison with length
-raw: result := MemCmp(A, B, fInfo.Cache.ItemSize)
-  else
   begin
-    rtti := fInfo.Cache.ItemInfoRaw;
-    comp := RTTI_COMPARE[CaseInsensitive, rtti.Kind];
-    if Assigned(comp) then
-      comp(A, B, rtti, result)
-    else
-      goto raw;
+    result := fCompare(A^, B^);
+    exit;
   end;
+  if not(rcfArrayItemManaged in fInfo.Flags) then
+    goto raw; // fast binary comparison with length
+  comp := RTTI_COMPARE[CaseInsensitive, fInfo.Cache.ItemInfoRaw.Kind];
+  if Assigned(comp) then
+    comp(A, B, fInfo.Cache.ItemInfoRaw, result)
+  else
+raw:result := MemCmp(A, B, fInfo.Cache.ItemSize)
 end;
 
 function TDynArray.Add(const Item): PtrInt;

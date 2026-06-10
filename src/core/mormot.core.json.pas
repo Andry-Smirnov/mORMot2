@@ -2253,17 +2253,11 @@ function JsonFileToObject(const JsonFile: TFileName; var ObjectInstance;
 // - will also register this class type, if needed, so RegisterClass() is
 // redundant to this method
 procedure AutoCreateFields(ObjectInstance: TObject);
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// should be called by T*AutoCreateFields destructors
 // - constructor should have called AutoCreateFields()
 procedure AutoDestroyFields(ObjectInstance: TObject);
   {$ifdef HASINLINE}inline;{$endif}
-
-/// internal function called by AutoCreateFields() when inlined
-// - do not call this internal function, but always AutoCreateFields()
-function DoRegisterAutoCreateFields(ObjectInstance: TObject): TRttiJson;
-
 
 type
   /// abstract TPersistent class, which will instantiate all its nested class
@@ -10301,8 +10295,7 @@ begin
     varBoolean:
       // rkInteger,rkBool,rkEnumeration,rkSet using VInt64 for unsigned 32-bit
       Dest.VInt64 := RTTI_FROM_ORD[Cache.RttiOrd](Data);
-    varWord64:
-      // rkInt64, rkQWord
+    varWord64: // rkInt64, rkQWord
       begin
         if not (rcfQWord in Cache.Flags) then
           TSynVarData(Dest).VType := varInt64; // fix VType
@@ -10314,34 +10307,29 @@ begin
     varDouble,
     varCurrency:
       Dest.VInt64 := PInt64(Data)^;
-    varString:
-      // rkString
+    varString: // rkString
       begin
         Dest.VAny := nil; // avoid GPF
         RawByteString(Dest.VAny) := PRawByteString(Data)^;
       end;
-    varOleStr:
-      // rkWString
+    varOleStr: // rkWString
       begin
         Dest.VAny := nil; // avoid GPF
         WideString(Dest.VAny) := PWideString(Data)^;
       end;
     {$ifdef HASVARUSTRING}
-    varUString:
-      // rkUString
+    varUString: // rkUString
       begin
         Dest.VAny := nil; // avoid GPF
         UnicodeString(Dest.VAny) := PUnicodeString(Data)^;
       end;
     {$endif HASVARUSTRING}
-    varVariant:
-      // rkVariant
+    varVariant: // rkVariant
       begin
         TSynVarData(Dest).VType := varEmpty; // for next line
         SetVariantByValue(PVariant(Data)^, PVariant(@Dest)^, {forcenoutf8=}true);
       end;
-    varUnknown:
-      // rkChar, rkWChar, rkSString converted into temporary RawUtf8
+    varUnknown: // rkChar, rkWChar, rkSString converted into temporary RawUtf8
       begin
         TSynVarData(Dest).VType := varString;
         Dest.VAny := nil; // avoid GPF
@@ -11361,16 +11349,11 @@ end;
 
 { ********************* Abstract Classes with Auto-Create-Fields }
 
-function DoRegisterAutoCreateFields(ObjectInstance: TObject): TRttiJson;
-begin // sub procedure for smaller code generation in AutoCreateFields/Create
-  result := Rtti.RegisterAutoCreateFieldsClass(PClass(ObjectInstance)^) as TRttiJson;
-end;
-
 procedure AutoCreateFields(ObjectInstance: TObject);
 var
-  p: PPRttiCustomProp;
-  n: integer;
-begin
+  p: pointer;
+  n: TDALen;
+begin // not inlined, since Create() are already slow and complex enough
   {$ifdef NOPATCHVMT}
   p := pointer(Rtti.FindType(PPointer(PPAnsiChar(ObjectInstance)^ + vmtTypeInfo)^));
   {$else}
@@ -11378,17 +11361,17 @@ begin
   {$endif NOPATCHVMT}
   if (p = nil) or
      not (rcfAutoCreateFields in TRttiJson(p).Flags) then
-    p := pointer(DoRegisterAutoCreateFields(ObjectInstance));
-  p := pointer(TRttiJson(p).fAutoCreateInstances);
+    p := Rtti.RegisterAutoCreateFieldsClass(PClass(ObjectInstance)^);
+  p := TRttiJson(p).fAutoCreateInstances;
   if p = nil then
     exit;
   // create all published class (or IDocList/IDocDict) fields
   n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // length(AutoCreateClasses)
-  repeat
-    with p^^ do // NewInterface() offset = NewInstance() offset for rkInterface
+  repeat // for rkInterface, NewInterface() and NewInstance() are at same offset
+    with PPRttiCustomProp(p)^^ do
       PPointer(PAnsiChar(ObjectInstance) + OffsetGet)^ :=
         TRttiCustomNewInstance(Value.Cache.NewInstance)(Value);
-    inc(p);
+    inc(PPRttiCustomProp(p));
     dec(n);
   until n = 0;
 end;
@@ -11398,7 +11381,7 @@ var
   r: TRttiJson;
   p: PPRttiCustomProp;
   v: pointer;
-  n: integer;
+  n: TDALen;
 begin
   {$ifdef NOPATCHVMT}
   r := pointer(Rtti.FindType(PPointer(PPAnsiChar(ObjectInstance)^ + vmtTypeInfo)^));

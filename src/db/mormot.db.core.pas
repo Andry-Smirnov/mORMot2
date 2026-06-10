@@ -114,7 +114,6 @@ type
   /// array of field/parameter/column types for abstract database access
   // - this array as a fixed size, ready to handle up to MAX_SQLFIELDS items
   TSqlDBFieldTypeArray = array[0..MAX_SQLFIELDS - 1] of TSqlDBFieldType;
-
   PSqlDBFieldTypeArray = ^TSqlDBFieldTypeArray;
 
   /// how TSqlVar may be processed
@@ -829,7 +828,7 @@ type
   TExtractInlineParameters = object
   {$endif USERECORDWITHMETHODS}
   public
-    /// Values[0..Count-1] contains the unquoted parameters raw values
+    /// Values[0 .. Count-1] contains the unquoted parameters raw values
     Values: TRawUtf8DynArray;
     /// generic SQL statement with ? place holders for each inlined parameter
     GenericSql: RawUtf8;
@@ -839,7 +838,7 @@ type
     // - recognized types are sptInteger, sptFloat, sptUtf8Text, sptDateTime
     // (marked with '\uFFF1...' trailer) and sptBlob (with '\uFFF0...' trailer)
     // - store sptNull for NULL value
-    Types: array[0..MAX_SQLFIELDS - 1] of TSqlParamType;
+    Types: array[0 .. MAX_SQLPARAMS - 1] of TSqlParamType;
     /// parse and extract inlined :(1234): parameters
     // - fill Values[0..Count-1] Types[0..Count-1] Nulls and compute the
     // associated GenericSQL with ? place-holders
@@ -1522,7 +1521,7 @@ end;
 function TSqlDBFieldTypeToString(aType: TSqlDBFieldType): TShort16;
 begin
   if aType <= high(aType) then
-    result := TrimLeftLowerCaseToShort(ToText(aType))
+    TrimLeftLowerCaseToShort(ToText(aType), result)
   else
     FormatShort('#%', [ord(aType)], result);
 end;
@@ -2610,7 +2609,7 @@ begin
         until result^ > ' ';
       c := PWord(result)^;
       if c = ord('-') + ord('-') shl 8 then
-        // SQL comments
+        // SQL -- comments
         repeat
           inc(result)
         until result^ in [#0, #10]
@@ -2834,61 +2833,64 @@ end;
 
 procedure TExtractInlineParameters.Parse(const SQL: RawUtf8);
 var
-  i: PtrInt;
-  P, Gen: PUtf8Char;
+  first: PtrInt;
+  s, d: PUtf8Char;
 begin
   Count := 0;
-  i := PosEx(RawUtf8(':('), SQL, 1);
-  if (i = 0) or
-     (PosEx(RawUtf8('):'), SQL, i + 2) = 0) then
+  first := PosExChar(':', SQL); // faster pass with SSE-2 or memchr()
+  if first <> 0 then
+    first := PosEx(RawUtf8(':('), SQL, first);
+  if (first = 0) or
+     (PosEx(RawUtf8('):'), SQL, first + 2) = 0) then
   begin
     // SQL code with no valid :(...): internal parameters -> leave Count=0
     GenericSQL := SQL;
     exit;
   end;
   // compute GenericSql from SQL, converting :(...): into ?
-  P := FastSetString(GenericSQL, length(SQL)); // private copy
-  dec(i);
-  MoveFast(pointer(SQL)^, P^, i);
-  Gen := P + i;   // Gen^ just before :(
-  P := @PUtf8Char(pointer(SQL))[i + 2];  // P^ just after :(
+  d := FastSetString(GenericSQL, length(SQL)); // private copy
+  dec(first);
+  MoveFast(pointer(SQL)^, d^, first);
+  inc(d, first);   // d^ just before :(
+  s := @PUtf8Char(pointer(SQL))[first + 2];  // s^ just after :(
   repeat
-    if Count = high(Types) then
+    if Count = high(Types) then // MAX_SQLPARAMS hard limit
       ESynDBException.RaiseUtf8('Too many parameters in %', [SQL]);
-    Gen^ := '?'; // replace :(...): by ?
-    inc(Gen);
-    if length(Values) <= Count then
+    d^ := '?'; // replace :(...): by ?
+    inc(d);
+    if Count >= length(Values) then
       SetLength(Values, Count + 16);
-    P := ParseNext(P);
-    if P = nil then
+    s := ParseNext(s);
+    if s = nil then
     begin
       Count := 0;
       GenericSQL := SQL;
       exit; // any invalid parameter -> try direct SQL
     end;
-    while (P^ <> #0) and
-          (PWord(P)^ <> Ord(':') + Ord('(') shl 8) do
+    while (s^ <> #0) and
+          ((s^ <> ':') or
+           (s[1] <> '(')) do
     begin
-      Gen^ := P^;
-      inc(Gen);
-      inc(P);
+      d^ := s^; // only a few chars (typically ',' or ', ')
+      inc(s);
+      inc(d);
     end;
-    if P^ = #0 then
+    if s^ = #0 then
       break;
-    inc(P, 2);
+    inc(s, 2); // s^ just after :(
     inc(Count);
   until false;
   // return generic SQL statement, with ? place-holders and params in Values[]
-  FakeLength(GenericSQL, Gen);
+  FakeLength(GenericSQL, d);
   inc(Count);
 end;
 
 function TExtractInlineParameters.ParseNext(P: PUtf8Char): PUtf8Char;
 var
-  PBeg: PAnsiChar;
   L: integer;
   c: cardinal;
   v: pointer;
+  beg: PUtf8Char;
   spt: TSqlParamType;
 begin
   result := nil; // indicates parsing error
@@ -2910,7 +2912,7 @@ begin
         L := length(RawUtf8(v)) - 3;
         if L > 0 then
         begin
-          c := PInteger(v)^ and $00ffffff;
+          c := PInteger(v)^ and $00ffffff; // recognize UTF-8 encoded patterns
           if c = JSON_BASE64_MAGIC_C then
           begin
             // ':("\uFFF0base64encodedbinary"):' format -> decode
@@ -2930,46 +2932,40 @@ begin
     '+',
     '0'..'9': // allow 0 or + in SQL
       begin
-        // check if P^ is a true numerical value
-        PBeg := pointer(P);
+        // detect the exact sptInteger/sptFloat numerical type of P^
         spt := sptInteger;
+        beg := pointer(P);
         repeat
           inc(P)
         until not (P^ in ['0'..'9']); // check digits
         if P^ = '.' then
         begin
           inc(P);
-          if P^ in ['0'..'9'] then
-          begin
-            spt := sptFloat;
-            repeat
-              inc(P)
-            until not (P^ in ['0'..'9']); // check fractional digits
-          end
-          else
-            exit;
+          if not (P^ in ['0'..'9']) then
+            exit; // not a valid number
+          spt := sptFloat;
+          repeat
+            inc(P)
+          until not (P^ in ['0'..'9']); // check fractional digits
         end;
         if byte(P^) and $DF = ord('E') then
         begin
           spt := sptFloat;
           inc(P);
-          if P^ = '+' then
-            inc(P)
-          else if P^ = '-' then
+          if P^ in ['+', '-'] then
             inc(P);
           while P^ in ['0'..'9'] do
             inc(P);
         end;
-        FastSetString(Values[Count], PBeg, P - PBeg);
+        FastSetString(Values[Count], beg, P - beg);
       end;
     'n':
-      if PInteger(P)^ = NULL_LOW then
       begin
+        if PInteger(P)^ <> NULL_LOW then
+          exit; // invalid content (only :(null): expected)
         spt := sptNull;
         inc(P, 4);
-      end
-      else
-        exit; // invalid content (only :(null): expected)
+      end;
   else
     exit; // invalid content
   end;

@@ -1378,9 +1378,9 @@ var
   // - filled with statically allocated UINT_999[] constant values at startup
   // - noticeable when RawUtf8 strings are used as array indexes (e.g. in BSON)
   // - is defined globally, since may be used from an inlined function
-  SmallUInt32Utf8: array[0..999] of RawUtf8;
+  SmallUInt32Utf8: array[0 .. 999] of RawUtf8;
   /// raw pre-allocated SmallUInt32Utf8[] values as L1-friendly constants
-  UINT_999: array[0..999] of TStrRecConst;
+  UINT_999: array[0 .. 999] of TStrRecConst;
 
 /// fast RawUtf8 version of 32-bit IntToStr()
 function Int32ToUtf8(Value: PtrInt): RawUtf8; overload;
@@ -1908,7 +1908,7 @@ function FormatUtf8(const Format: RawUtf8; const Args: array of const): RawUtf8;
 /// fast Format() function replacement, optimized for RawUtf8
 // - overloaded function, which avoid a temporary RawUtf8 instance on stack
 procedure FormatUtf8(const Format: RawUtf8; const Args: array of const;
-  out Result: RawUtf8); overload;
+  var Result: RawUtf8); overload;
 
 /// raw FormatUtf8() function process, using an existing TTextWriterStackBuffer
 procedure FormatUtf8Raw(const Format: RawUtf8; Args: PVarRec; ArgsCount: PtrInt;
@@ -2276,7 +2276,7 @@ type
     /// retrieve a cookie value from its name
     // - should always previously check "if not ###Parsed then Parse()"
     // - consider FindCookie() if you don't really require a transient RawUtf8
-    procedure RetrieveCookie(const CookieName: RawUtf8; out DestValue: RawUtf8);
+    procedure RetrieveCookie(const CookieName: RawUtf8; var DestValue: RawUtf8);
       {$ifdef HASINLINE} inline; {$endif}
     {$ifdef HASINLINE} { Delphi 7 should use GetCookie() or RetrieveCookie() }
     /// retrieve an incoming HTTP cookie value
@@ -2343,6 +2343,9 @@ function StatusCodeIsSuccess(Code: integer): boolean;
 /// check the supplied HTTP header to contain only #13#10 EOL
 // - to avoid unexpected HTTP body injection, e.g. from unsafe business code
 function IsInvalidHttpHeader(const Headers: RawUtf8): boolean;
+
+/// check if the supplied text start with 'http://' or 'https://'
+function IsHttp(const text: RawUtf8): boolean;
 
 
 { **************** Hexadecimal Text And Binary Conversion }
@@ -5640,23 +5643,11 @@ end;
 
 procedure TTextWriter.AddTrimLeftLowerCase(Text: PShortString);
 var
-  P: PUtf8Char;
+  P: PAnsiChar;
   L: PtrInt;
 begin
-  L := ord(Text^[0]);
-  P := @Text^[1];
-  while (L > 0) and
-        (P^ in ['a'..'z']) do
-  begin
-    inc(P);
-    dec(L);
-  end;
-  if L = 0 then
-  begin
-    L := ord(Text^[0]);
-    P := @Text^[1];
-  end;
-  AddShort(P, L);
+  L := TrimLeftLowerCaseP(Text, P);
+  AddShort(pointer(P), L);
 end;
 
 procedure TTextWriter.AddTrimSpaces(const Text: RawUtf8);
@@ -8336,7 +8327,7 @@ begin
     else if vt and varByRef = 0 then
       // not recognizable vt -> seralize as JSON to handle also custom types
       _VariantSaveJson(V, twJsonEscape, result) // = mormot.core.variants.pas
-    else // varByRef values appear with Automation/COM
+    else // varByRef values appear with Automation/COM or DispInvoke()
       VariantToUtf8(SetVarDataUnRef(vt, vd, tmp)^, result, wasString);
   end;
 end;
@@ -8916,7 +8907,7 @@ n:    if vfNullAsVoid in Flags then
         Res.Text := pointer(Res.TempRawUtf8);
         Res.Len := length(RawUtf8(Res.TempRawUtf8));
       end
-      else // varByRef values appear with Automation/COM
+      else // varByRef values appear with Automation/COM or DispInvoke()
         VariantToTempUtf8(SetVarDataUnRef(vt, vd, tmp)^, Res, Flags);
     end;
   end;
@@ -9398,7 +9389,7 @@ begin
 end;
 
 procedure FormatUtf8(const Format: RawUtf8; const Args: array of const;
-  out Result: RawUtf8);
+  var Result: RawUtf8);
 var
   f: TFormatUtf8;
 begin
@@ -9411,7 +9402,9 @@ begin
   begin
     f.Parse(Format, @Args[0], length(Args)); // handle all supplied Args[]
     if f.L <> 0 then
-      f.WriteAll(FastSetString(Result, f.L), @f.blocks);
+      f.WriteAll(FastSetString(Result, f.L), @f.blocks)
+    else
+      FastAssignNew(Result);
   end;
 end;
 
@@ -10290,6 +10283,15 @@ begin
   result := true;
 end;
 
+function IsHttp(const text: RawUtf8): boolean;
+begin
+  result := (length(text) > 5) and
+            (PCardinal(text)^ and $dfdfdfdf = HTTP_32) and
+            ((text[5] = ':') or
+             ((text[5] in ['s', 'S']) and
+              (text[6] = ':')));
+end;
+
 
 { THttpCookies }
 
@@ -10354,13 +10356,15 @@ begin
 end;
 
 procedure THttpCookies.RetrieveCookie(const CookieName: RawUtf8;
-  out DestValue: RawUtf8);
+  var DestValue: RawUtf8);
 var
   c: PHttpCookie;
 begin
   c := FindCookie(CookieName);
   if c <> nil then
-    FastSetString(DestValue, c^.ValueStart, c^.ValueLen);
+    FastSetString(DestValue, c^.ValueStart, c^.ValueLen)
+  else
+    FastAssignNew(DestValue);
 end;
 
 function CookieFromHeaders(Headers: PUtf8Char; const Name: RawUtf8;
@@ -11430,7 +11434,7 @@ begin
     B4[i + (ord('a') - ord('A'))] := v shl 4;
     inc(v);
   end;
-  PInt64(@tmp[8])^ := 0;
+  PInt64(@tmp[8])^ := 0; // FastSetConst() copy 8 bytes - up to 7 may be 0
   for i := 0 to high(SmallUInt32Utf8) do // 0..999 into '0'..'999' RawUtf8
   begin
     P := StrUInt32(@tmp[8], i);

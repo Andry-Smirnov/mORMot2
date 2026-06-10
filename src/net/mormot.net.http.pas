@@ -219,9 +219,6 @@ function IsOptions(const method: RawUtf8): boolean;
 function IsUrlFavIcon(P: PUtf8Char): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// check if the supplied text start with 'http://' or 'https://'
-function IsHttp(const text: RawUtf8): boolean;
-
 /// true if the supplied text is case-insensitive 'none'
 // - as in THttpRequestExtendedOptions.Proxy field
 function IsNone(const text: RawUtf8): boolean;
@@ -3001,15 +2998,6 @@ begin
         (P[12] = #0);
 end;
 
-function IsHttp(const text: RawUtf8): boolean;
-begin
-  result := (length(text) > 5) and
-            (PCardinal(text)^ and $dfdfdfdf = HTTP_32) and
-            ((text[5] = ':') or
-             ((text[5] in ['s', 'S']) and
-              (text[6] = ':')));
-end;
-
 function IsNone(const text: RawUtf8): boolean;
 begin
   result := (length(text) = 4) and
@@ -4024,7 +4012,7 @@ function THttpRequestContext.ContentToOutput(
   aStatus: integer; aOutStream: TStream): integer;
 var
   date: TShort31;
-begin
+begin // from THttpClientSocket.Request
   if (aStatus = HTTP_SUCCESS) and
      (ContentLength = 0) then
     aStatus := HTTP_NOCONTENT;
@@ -4064,6 +4052,7 @@ function THttpRequestContext.CompressContentAndFinalizeHead(
   MaxSizeAtOnce: integer): PRawByteStringBuffer;
 var
   date: TShort31;
+  P: PUtf8Char;
 begin
   // DoRequest will use Head buffer by default (and send the body separated)
   result := @Head;
@@ -4123,8 +4112,9 @@ begin
     result^.AppendShort(date);
     result^.AppendCRLF;
   end;
-  if (ContentType <> '') and
-     (ContentType[1] <> '!') and
+  P := pointer(ContentType);
+  if (P <> nil) and
+     (P^ <> '!') and
      not (hhContentType in HeadCustom) then
   begin
     result^.AppendShort('Content-Type: ');
