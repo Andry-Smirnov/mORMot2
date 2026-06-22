@@ -599,6 +599,8 @@ type
     function Init(aAlgo: THashAlgo): boolean;
     /// hash the supplied memory buffer
     procedure Update(aBuffer: pointer; aLen: integer); overload;
+    /// hash the supplied memory buffer with uppercase ASCII conversion
+    procedure UpdateUpper(aBuffer: pointer; aLen: PtrInt);
     /// hash the supplied string content
     procedure Update(const aBuffer: RawByteString); overload;
       {$ifdef HASINLINE}inline;{$endif}
@@ -3613,6 +3615,10 @@ var
   // - but more standard CryptCertOpenSsl[] will be stored here if available
   CryptCert: array[TCryptAsymAlgo] of TCryptCertAlgo;
 
+  /// global shared instances as set by InitNetTlsContextSelfSignedServer()
+  // - defined here to be properly released before the OpenSSL library unloading
+  CryptCertOpenSslSelfSigned: array[TCryptAsymAlgo] of ICryptCert;
+
 
   (* ICryptStore factories *)
 
@@ -4096,6 +4102,20 @@ begin
     else
       PSha3(@ctxt)^.Update(aBuffer, aLen);
     end;
+end;
+
+procedure TSynHasher.UpdateUpper(aBuffer: pointer; aLen: PtrInt);
+var
+  up: TByteToAnsiChar; // normalize aBuffer content into uppercase ASCII
+  l: PtrInt;
+begin
+  while aLen > 0 do // normalize on stack until all input buffer is hashed
+  begin
+    l := UpperCopy255Buf(@up, aBuffer, MinPtrInt(192, aLen)) - PAnsiChar(@up);
+    Update(@up, l);
+    inc(PByte(aBuffer), l);
+    dec(aLen, l);
+  end
 end;
 
 procedure TSynHasher.Update(const aBuffer: RawByteString);
@@ -4941,7 +4961,7 @@ begin
   if (info <> nil) and
      (result in mcfValid) and
      (P <> nil) then
-    FastSetString(info^, pointer(hash), P - pointer(hash));
+    FastSetString(info^, pointer(hash), P);
 end;
 
 function ModularCryptHash(format: TModularCryptFormat; const password: RawUtf8;
