@@ -1108,8 +1108,7 @@ function ToText({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 // - computed from CpuFeatures set for Intel/AMD or ARM 32-bit/64-bit
 // - contains the Flags: or Features: value of Linux /proc/cpuinfo otherwise
 // (less accurate than our CpuFeatures set on older kernel)
-var
-  CpuFeaturesText: RawUtf8;
+function CpuFeaturesText: RawUtf8;
 
 /// retrieve information about all mounted disk partitions as single line of text
 // - returns e.g. under Linux
@@ -3348,6 +3347,8 @@ var
   id: TSynMonitorUsageID;
   g: TSynMonitorUsageGranularity;
 begin
+  if fPrevious.Value = 0 then
+    exit; // nothing was tracked yet - nothing to save
   id.FromTimeLog(fPrevious.Value);
   Save(id, mugHour, Scope); // always save current minutes values
   for g := mugDay to mugYear do
@@ -3634,6 +3635,30 @@ function ToText({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
 begin
   result := FeaturesToText(
     TypeInfo(TArm64HwCaps), @aArm64CPUFeatures, Sep);
+end;
+
+var
+  _CpuFeaturesText: RawUtf8;
+
+procedure SetCpuFeaturesText;
+begin
+  {$ifdef HASCPUFEATURES}
+  // CpuFeatures: TIntelCpuFeatures/TArm32HwCaps/TArm64HwCaps
+  _CpuFeaturesText := LowerCase(ToText(CpuFeatures, ' '));
+  if _CpuFeaturesText = '' then
+  {$endif HASCPUFEATURES}
+    {$ifdef OSLINUXANDROID}
+    _CpuFeaturesText := LowerCase(CpuInfoFeatures); // from /proc/cpuinfo
+    {$endif OSLINUXANDROID}
+  if _CpuFeaturesText = '' then
+    _CpuFeaturesText := CPU_ARCH_TEXT; // not void
+end;
+
+function CpuFeaturesText: RawUtf8;
+begin
+  if _CpuFeaturesText = '' then
+    SetCpuFeaturesText;
+  result := _CpuFeaturesText;
 end;
 
 function SystemInfoJson: RawUtf8;
@@ -4801,7 +4826,7 @@ begin
             until s[0] = 0;
           inc(PByte(s));
           if length(info.Oem) <> c then
-            SetLength(info.Oem, c);
+            SetLength(info.Oem, c); // skipped 'Default string' or ''
           continue;
         end;
       16: // Physical Memory Array (type 16)
@@ -5031,23 +5056,6 @@ begin
   result := obj;
 end;
 
-
-procedure InitializeUnit;
-begin
-  {$ifdef HASCPUFEATURES}
-  // CpuFeatures: TIntelCpuFeatures/TArm32HwCaps/TArm64HwCaps
-  CpuFeaturesText := LowerCase(ToText(CpuFeatures, ' '));
-  if CpuFeaturesText = '' then
-  {$endif HASCPUFEATURES}
-  begin
-    {$ifdef OSLINUXANDROID}
-    CpuFeaturesText := LowerCase(CpuInfoFeatures); // fallback to /proc/cpuinfo
-    {$endif OSLINUXANDROID}
-  end;
-end;
-
-initialization
-  InitializeUnit;
 
 end.
 

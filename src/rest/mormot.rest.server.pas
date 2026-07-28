@@ -31,6 +31,7 @@ uses
   variants,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security, // for SymmetricEncrypt()
   mormot.core.buffers,
   mormot.core.unicode,
   mormot.core.text,
@@ -3550,8 +3551,8 @@ begin
   end;
   if TServiceFactoryServer(Service).ResultAsXMLObjectIfAcceptOnlyXML and
      FindNameValue(Call^.InHead, 'ACCEPT:', fTemp) and
-     (PropNameEquals(fTemp, 'application/xml') or
-      PropNameEquals(fTemp, 'text/xml')) then
+     (IdemPChar(pointer(fTemp), 'APPLICATION/XML') or
+      IdemPChar(pointer(fTemp), 'TEXT/XML')) then
     ForceServiceResultAsXMLObject := true;
   try
     InternalExecuteSoaByInterfaceComputeResult;
@@ -5278,9 +5279,9 @@ begin
   if Executable.Version.Major <> 0 then
   begin
     if saoFullServerVersion in fOptions then
-      vers := Executable.Version.DetailedOrVoid
+      vers := Executable.Version.Detailed // '3.1.2.3'
     else
-      vers := Executable.Version.Main;
+      vers := Executable.Version.Main;    // '3.1'
     body.AddValue('version', StringToVariant(vers));
   end;
   if Assigned(fServer.Services) and
@@ -6874,7 +6875,7 @@ begin
     'nowutc',    now.Text(true, ' '),
     'timestamp', now.Value,
     'exe',       Executable.ProgramName,
-    'version',   Executable.Version.DetailedOrVoid,
+    'version',   Executable.Version.DetailedOrVoid, // '3.1.2.3'
     'host',      Executable.Host,
     {$ifdef OSWINDOWS}
     'cpuhist',   TSystemUse.CurrentHistoryText(0, 15, @mem),

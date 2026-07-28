@@ -191,7 +191,7 @@ type
     destructor Destroy; override;
     /// used by the published methods to run a test assertion
     // - condition must equals TRUE to pass the test
-    procedure Check(condition: boolean; const msg: string = '');
+    function Check(condition: boolean; const msg: string = ''): boolean;
       {$ifdef HASSAFEINLINE}inline;{$endif} // Delphi 2007 has trouble inlining this
     /// used by the published methods to run a test assertion
     // - condition must equals TRUE to pass the test
@@ -700,7 +700,7 @@ var
   id: RawUtf8;
   s: string;
   methods: TPublishedMethodInfoDynArray;
-  i: integer;
+  i: PtrInt;
 begin
   inherited Create; // may have been overriden
   if Ident <> '' then
@@ -839,41 +839,27 @@ begin
   fOwner.DoLog(LEV[condition], '%', [msg], {notify=}not condition);
 end;
 
-procedure TSynTestCase.Check(condition: boolean; const msg: string);
+function TSynTestCase.Check(condition: boolean; const msg: string): boolean;
 begin
+  result := condition;
   if self = nil then
     exit;
   inc(fAssertions);
   if (msg <> '') and
      (tcoLogEachCheck in fOptions) then
-    AddLog(condition, msg);
-  if not condition then
+    AddLog(result, msg);
+  if not result then
     TestFailed(msg);
 end;
 
 function TSynTestCase.CheckFailed(condition: boolean; const msg: string): boolean;
 begin
-  if self = nil then
-  begin
-    result := false;
-    exit;
-  end;
-  inc(fAssertions);
-  if (msg <> '') and
-     (tcoLogEachCheck in fOptions) then
-    AddLog(condition, msg);
-  if condition then
-    result := false
-  else
-  begin
-    TestFailed(msg);
-    result := true;
-  end;
+  result := not Check(condition, msg);
 end;
 
 function TSynTestCase.CheckNot(condition: boolean; const msg: string): boolean;
 begin
-  result := CheckFailed(not condition, msg);
+  result := not Check(not condition, msg);
 end;
 
 procedure TSynTestCase.DoCheckUtf8(condition: boolean; const msg: RawUtf8;
@@ -1035,7 +1021,7 @@ end;
 function TSynTestCase.CheckSameTime(const Value1, Value2: TDateTime;
   const msg: string): boolean;
 begin
-  result := CheckSame(Value1, Value2, SecsPerDate);
+  result := CheckSame(Value1, Value2, SecsPerDate * 2, msg);
 end;
 
 function TSynTestCase.CheckMatchAny(const Value: RawUtf8; const Values: array of RawUtf8;
@@ -1569,7 +1555,7 @@ var
 begin
   result := true;
   if Executable.Command.Option('multithread')
-     {$ifdef OSWINDOWS} and not IsWow64Emulation {$endif} then
+     {$ifdef OSWINDOWS} and not (wsFavorFewThreads in WindowsSpecs) {$endif} then
     fMultiThread := CpuThreads > 2; // enabled with 3 cores
   if Executable.Command.Option('&methods') then
   begin

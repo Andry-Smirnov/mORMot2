@@ -1606,6 +1606,10 @@ function SetValueObject(Instance: TObject; const Path: RawUtf8;
 // - check nested TRttiCustom.Props and TRttiCustom.ValueIterateCount
 function IsObjectDefaultOrVoid(Value: TObject): boolean;
 
+/// returns TRUE on a nil record instance or if all its properties are default/0
+// - check nested TRttiCustom.Props so our RTTI properties, not binary level
+function IsRecordDefaultOrVoid(Value: pointer; Info: PRttiInfo): boolean;
+
 /// will reset all the object properties to their default
 // - strings will be set to '', numbers to 0
 // - if FreeAndNilNestedObjects is the default FALSE, will recursively reset
@@ -2544,6 +2548,8 @@ type
     /// retrieve all List[] items as text
     procedure AsText(out Result: RawUtf8; IncludePropType: boolean;
       const Prefix, Suffix: RawUtf8);
+    /// check if Data is nil or all List[] properties are void
+    function IsVoid(Data: PAnsiChar): boolean;
     /// finalize and fill with zero all properties of this class instance
     // - it will individually fill the properties, not the whole memory
     // as TRttiCustom.FinalizeAndClear would on a record
@@ -2892,8 +2898,7 @@ type
     // store PRttiInfo/TRttiCustom pairs by Name - protected by RegisterSafe
     fHashName: array of TPointerDynArray;
     fLastHashName: TRttiCustom; // speedup search by name e.g. from a loop
-    // used to release memory used by registered customizations
-    fInstances: array of TRttiCustom;
+    fInstances: array of TRttiCustom; // of Count length - released in Destroy
     fGlobalClass: TRttiCustomClass;
     fOwnedRtti: array of TRttiCustom; // for SetPropsFromText(NoRegister=true)
     function GetByClass(ObjectClass: TClass): TRttiCustom;
@@ -2905,7 +2910,7 @@ type
     procedure SetGlobalClass(RttiClass: TRttiCustomClass); // ensure Count=0
   public
     /// how many TRttiCustom instances have been registered
-    Count: integer;
+    Count: PtrInt;
     /// a global lock shared for high-level RTTI registration process
     // - is used e.g. to protect DoRegister() or TRttiCustom.PrivateSlot
     // - should be a reentrant lock, even if seldom called
@@ -6024,25 +6029,23 @@ end;
 function IsObjectDefaultOrVoid(Value: TObject): boolean;
 var
   rc: TRttiCustom;
-  p: PRttiCustomProp;
-  i: integer;
 begin
   result := Value = nil;
   if result then
     exit;
-  // check e.g. TObjectList.Count or TCollection.Count > 0
   rc := Rtti.RegisterClass(Value);
   if (rc.ValueRtlClass <> vcNone) and
      (rc.ValueIterateCount(@Value) > 0) then
-    exit;
-  // a class instance is void if all its published properties are void
-  p := pointer(rc.Props.List);
-  for i := 1 to rc.Props.Count do
-    if p^.ValueIsVoid(Value) then
-      inc(p)
-    else
-      exit;
-  result := true;
+    exit; // e.g. TObjectList.Count or TCollection.Count > 0 = not void
+  result := rc.Props.IsVoid(pointer(Value)); // check object properties
+end;
+
+function IsRecordDefaultOrVoid(Value: pointer; Info: PRttiInfo): boolean;
+var
+  rc: TRttiCustom;
+begin
+  rc := Rtti.RegisterType(Info);
+  result := (rc <> nil) and rc.Props.IsVoid(Value); // check record fields
 end;
 
 function SetValueFromExecutableCommandLine(var Value; ValueInfo: PRttiInfo;
@@ -8871,6 +8874,23 @@ begin
   end;
 end;
 
+function TRttiCustomProps.IsVoid(Data: PAnsiChar): boolean;
+var
+  p: PRttiCustomProp;
+  i: integer;
+begin
+  p := pointer(List);
+  result := (p = nil) or (Data = nil);
+  if result then
+    exit;
+  for i := 1 to Count do
+    if p^.ValueIsVoid(Data) then
+      inc(p)
+    else
+      exit;
+  result := true;
+end;
+
 procedure TRttiCustomProps.FinalizeAndClearPublishedProperties(Instance: TObject);
 var
   pp: PRttiCustomProp;
@@ -9013,7 +9033,7 @@ begin
   // set vmtAutoTable slot for efficient Find(TClass) - to be done asap
   vmt := pointer(PAnsiChar(aClass) + vmtAutoTable);
   if vmt^ = nil then
-    PatchCodePtrUInt(pointer(vmt), PtrUInt(self));
+    PatchPointer(pointer(vmt), PtrUInt(self));
   if vmt^ <> self then
     ERttiException.RaiseUtf8(
       '%.SetValueClass(%): vmtAutoTable set to %', [self, aClass, vmt^]);
@@ -10039,7 +10059,7 @@ var
   k: PRttiCustomListPairs;
   h: PtrUInt;
   p: PPointerArray; // ^TPointerDynArray
-begin
+begin // vmtAuto: 8894966/31321/1265 NOPATCHVMT: 10137568/312233/14624
   {$ifndef NOPATCHVMT}
   if Info^.Kind <> rkClass then
   begin
@@ -10049,14 +10069,14 @@ begin
     // try latest found RTTI for this slot of type definition (very effective)
     result := k^.LastInfo;
     if (result <> nil) and
-       (result.Info = Info) then // happens e.g. 12,612,097 times during tests
+       (result.Info = Info) then // happens 99.6% (96% NOPATCH) during tests
       exit;
     // O(1) hash of the PRttiInfo pointer using RTTI-specific hashing
     h := RttiPointerMix(PtrUInt(Info));
     // try latest found RTTI for this hash slot
     result := k^.LastHash[h];
     if (result <> nil) and
-       (result.Info = Info) then // happens e.g. 1280 times during tests
+       (result.Info = Info) then // happens e.g. 0.35% (3% NOPATCH) during tests
     begin
       k^.LastInfo := result; // for faster lookup next time
       exit; // avoid most ReadLock/ReadUnLock and LockedFind() search
@@ -10067,7 +10087,7 @@ begin
     if p <> nil then
       result := LockedFind(p, @p[PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF], Info);
     k^.Safe.UnLock;
-    if result <> nil then // happens e.g. around 500 times during tests
+    if result <> nil then // happens e.g. 0.01% 82us (0.14% 494us NOPATCH)
     begin
       k^.LastInfo := result;   // aligned pointers are atomically accessed
       k^.LastHash[h] := result;
@@ -10232,15 +10252,12 @@ begin
   end;
   RegisterSafe.Lock;
   try
-    result := FindType(Info);  // search again (within RegisterSafe context)
-    if result <> nil then
-      exit; // already registered in the background
-    // initialize a new TRttiCustom/TRttiJson instance for this type
-    result := GlobalClass.Create;
-    // register ASAP to avoid endless recursion in FromRtti
-    AddToPairs(result, Info);
-    // now we can parse and process the RTTI
-    result.FromRtti(Info);
+    result := FindType(Info);
+    if result <> nil then // unlikely race condition but better safe than sorry
+      exit;
+    result := GlobalClass.Create;  // initialize a new TRttiCustom/TRttiJson
+    AddToPairs(result, Info); // register ASAP avoids endless FromRtti recursion
+    result.FromRtti(Info);    // now we can parse and process the RTTI
   finally
     RegisterSafe.UnLock;
   end;
@@ -10335,15 +10352,13 @@ begin
   k^.Safe.Lock; // needed when resizing k^.HashInfo[]
   try
     AddPair(k^.HashInfo[RttiPointerMix(PtrUInt(Info))], Instance, Info);
-    {$ifdef FPC} // FPC extended RTTI generates no name for nested plain records
-    if Info^.RawName[0] <> #0 then
-    {$endif FPC}
-    ObjArrayAddCount(fInstances, Instance, Count); // to release memory
+    ObjArrayAdd(fInstances, Instance); // to be released in Destroy
+    inc(Count);
     inc(Counts[Info^.Kind]); // Instance.Kind is not available from DoRegister
   finally
     k^.Safe.UnLock;
   end;
-  if (Info^.RawName[0] <> #0) and
+  if (Info^.RawName[0] <> #0) and // e.g. FPC extended RTTI of nested records
      (PosExChar('$', Instance.Name) = 0) then // e.g. 'TArray$1$crcA5831B1D'
     AddPair(fHashName[RttiHashName(@Info.RawName[1], ord(Info.RawName[0]))], Instance, Info);
 end;
@@ -11129,7 +11144,6 @@ begin
   DoubleToCurrency(Value, P);
 end;
 
-
 procedure InitializeUnit;
 begin
   RTTI_FROM_ORD[roSByte]         := @FromRttiOrdSByte;
@@ -11304,12 +11318,12 @@ begin
   {$ifdef FPC_CPUX64}
   RedirectRtl;
   {$endif FPC_CPUX64}
+  PatchCodeProtectBack; // restore back all RWX sections to the original RX
 end;
 
 
 initialization
   InitializeUnit;
-
 
 end.
 

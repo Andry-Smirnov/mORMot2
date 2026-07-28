@@ -41,11 +41,7 @@ uses
   mormot.rest.client;
 
 const
-  {$ifdef OSWINDOWS}
-  HTTP_DEFAULTPORT = '888';
-  {$else}
-  HTTP_DEFAULTPORT = '8888'; // under Linux, port<1024 needs root user
-  {$endif OSWINDOWS}
+  HTTP_DEFAULTPORT = '8888'; // under Linux/Wine port<1024 needs root user
 
 
 {$ifdef FPC_EXTRECORDRTTI}
@@ -1105,6 +1101,32 @@ var
   sl: TStrings;
   timer: TPrecisionTimer;
 
+  procedure TestSort;
+  begin
+    L.Clear;
+    Check(L.Count = 0);
+    Check(L.IndexOf('5') < 0);
+    Check(L.Add('toto') = 0);
+    Check(L.Count = 1);
+    Check(L.IndexOf('titi') < 0);
+    Check(L.IndexOf('toto') = 0);
+    CheckEqual(L.Text, 'toto');
+    L.Sort;
+    CheckEqual(L.Text, 'toto');
+    Check(L.AddObject('titi', TObject.Create) = 1);
+    CheckEqual(L.IndexOf('toto'), 0);
+    CheckEqual(L.IndexOf('titi'), 1);
+    Check(L.Objects[0] = nil);
+    Check(L.Objects[1] <> nil);
+    CheckEqual(L.GetText(','), 'toto,titi');
+    L.Sort;
+    CheckEqual(L.GetText(','), 'titi,toto');
+    Check(L.Objects[0] <> nil);
+    Check(L.Objects[1] = nil);
+    CheckEqual(L.IndexOf('toto'), 1);
+    CheckEqual(L.IndexOf('titi'), 0);
+  end;
+
   procedure TestBinDictionary;
   var
     i, len: PtrInt; // @len = PPtrInt
@@ -1169,13 +1191,7 @@ begin
     Check(L.IndexOf('6') < 0);
     Check(L.Exists('5'));
     Check(not L.Exists('6'));
-    L.Clear;
-    Check(L.Count = 0);
-    Check(L.IndexOf('5') < 0);
-    Check(L.Add('toto') = 0);
-    Check(L.Count = 1);
-    Check(L.IndexOf('titi') < 0);
-    Check(L.IndexOf('toto') = 0);
+    TestSort;
   finally
     L.Free;
   end;
@@ -1217,17 +1233,7 @@ begin
     for i := 1 to MAX do
       Check((L.IndexOf(v[i]) >= 0) = (i and 127 <> 0));
     DeleteFile(WorkDir + 'utf8list.txt');
-    L.Clear;
-    Check(L.Count = 0);
-    Check(L.Add('toto') = 0);
-    Check(L.Count = 1);
-    Check(L.IndexOf('titi') < 0);
-    Check(L.IndexOf('toto') = 0);
-    Check(L.IndexOf('') < 0);
-    Check(L.Add('') = 1);
-    Check(L.Count = 2);
-    Check(L.IndexOf('') = 1);
-    Check(L.IndexOf('toto') = 0);
+    TestSort;
   finally
     L.Free;
   end;
@@ -1465,7 +1471,7 @@ begin
     j := ACities.FindHashed(N);
     if i and 127 = 0 then
       Check(j < 0, 'deteled')
-    else if not CheckFailed(j >= 0, N) then
+    else if Check(j >= 0, N) then
     begin
       Check(Cities[j].Name = N);
       CheckSame(Cities[j].Latitude, i * 3.14);
@@ -2108,7 +2114,7 @@ begin
   W.SetText(U);
   CheckHash(U, $1D682EF8, 'hash32f');
   P := pointer(U);
-  if not CheckFailed(P^ = '[') then
+  if Check(P^ = '[') then
     inc(P);
   for i := 0 to 1000 do
   begin
@@ -2247,7 +2253,7 @@ begin
   {$endif HASEXTRECORDRTTI}
   ARP.Clear;
   Check(ARP.LoadFromJson(pointer(U)) <> nil);
-  if not CheckFailed(ARP.Count = 1001) then
+  if Check(ARP.Count = 1001) then
     for i := 0 to 1000 do
       with AR[i] do
       begin
@@ -3492,7 +3498,7 @@ procedure TTestCoreBase._ParseCommandArgs;
       Check(StrComp(pointer(a[i]), pointer(expected[i])) = 0);
     Check(a[n] = nil, 'last param should be nil');
     Check(ExtractCommandArgs(cmd, p, posix) = flags);
-    if not CheckFailed(n = length(p)) then
+    if Check(n = length(p)) then
       for i := 0 to n - 1 do
         CheckEqual(p[i], expected[i]);
   end;
@@ -5020,6 +5026,38 @@ begin
   CheckEqualShort(TwoDigits(0.0551), '0.06');
   CheckEqualShort(TwoDigits(0.0015), '0');
   CheckEqualShort(TwoDigits(0.0055), '0.01');
+  UInt32DigitsToUtf8(94287082, 10, s);
+  CheckEqual(s, '0094287082');
+  UInt32DigitsToUtf8(94287082, 8, s);
+  CheckEqual(s, '94287082');
+  UInt32DigitsToUtf8(94287082, 6, s);
+  CheckEqual(s, '287082');
+  UInt32DigitsToUtf8(94287082, 4, s);
+  CheckEqual(s, '7082');
+  for i := 0 to 8 do
+  begin
+    UInt32DigitsToUtf8(i, 0, s);
+    CheckEqual(s, '');
+    UInt32DigitsToUtf8(111111111, i, s);
+    CheckEqual(length(s), i);
+    for j := 1 to i do
+      Check(s[i] = '1');
+    UInt32DigitsToUtf8(7, i, s);
+    CheckEqual(length(s), i);
+    if i = 0 then
+      continue;
+    for j := 1 to i - 1 do
+      Check(s[j] = '0');
+    Check(s[i] = '7');
+  end;
+  UInt32DigitsToUtf8(7, 20, s);
+  CheckEqual(s, '00000000000000000007');
+  UInt32DigitsToUtf8(7, 23, s);
+  CheckEqual(s, '00000000000000000000007');
+  UInt32DigitsToUtf8(7, 24, s);
+  CheckEqual(s, '00000000000000000000007');
+  UInt32DigitsToUtf8(7, 25, s);
+  CheckEqual(s, '00000000000000000000007');
   n := 100000;
   Timer.Start;
   crc := 0;
@@ -6670,6 +6708,18 @@ begin
   until len < 0;
   for i := 1 to length(su) do
     Check(SU[i] = #0);
+  fn := 'test.htdigest';
+  Check(PosExtString(pointer(fn))^ = 'h');
+  fn := PathDelim + 'test.htdigest';
+  Check(PosExtString(pointer(fn))^ = 'h');
+  fn := '.htdigest';
+  Check(PosExtString(pointer(fn)) = nil);
+  fn := PathDelim + '.htdigest';
+  Check(PosExtString(pointer(fn)) = nil);
+  fn := 'htdigest';
+  Check(PosExtString(pointer(fn)) = nil);
+  fn := PathDelim + 'htdigest';
+  Check(PosExtString(pointer(fn)) = nil);
   for i := 0 to 1000 do
   begin
     len := i * 5;
@@ -6984,7 +7034,7 @@ begin
   U[3] := #$B3;
   U[4] := #$92;
   Utf8ToSynUnicode(U, SU);
-  if not CheckFailed(length(SU) = 2) then
+  if Check(length(SU) = 2) then
     Check(PCardinal(SU)^ = $DCD2D863);
   CheckEqual(StrLenW(pointer(SU)), length(SU));
   Check(Utf8ToUnicodeLength(Pointer(U)) = 2);
@@ -6993,13 +7043,13 @@ begin
   if CheckEqual(Utf8ToWideChar(WU, pointer(U), SizeOf(WU), length(U), false), 4) then
     Check(PCardinal(@WU)^ = $DCD2D863);
   U := SynUnicodeToUtf8(SU);
-  if not CheckFailed(length(U) = 4) then
+  if Check(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
   CheckEqual(StrLenW(pointer(SU)), length(SU));
   TSynAnsiConvert.Engine(CP_UTF8).UnicodeBufferToAnsiVar(
     pointer(SU), length(SU), RawByteString(U));
   Check(length(U) = 4);
-  if not CheckFailed(length(U) = 4) then
+  if Check(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
   SetLength(res, 10);
   PB := pointer(res);
@@ -7011,6 +7061,17 @@ begin
   PB := pointer(res);
   FromVarString(PB, U2);
   check(U2 = U);
+  U := HexTobin('2800541D251D541D2900'); // a nice Unicode mORMot glyph
+  {$ifdef HASCODEPAGE}
+  CheckEqual(GetCodePage(U), CP_RAWBYTESTRING);
+  {$endif HASCODEPAGE}
+  FastSynUnicode(SU, pointer(U), length(U) shr 1);
+  U := HexToUtf8('28E1B594E1B4A5E1B59429');
+  {$ifdef HASCODEPAGE}
+  CheckEqual(GetCodePage(U), CP_UTF8);
+  {$endif HASCODEPAGE}
+  CheckEqual(SynUnicodeToUtf8(SU), U);
+  Check(Utf8ToSynUnicode(U) = SU);
   for i := 0 to high(UTF8_UCS4) do
   begin
     RawUcs4ToUtf8(@UTF8_UCS4[i], 1, U);
@@ -7372,7 +7433,8 @@ procedure TTestCoreBase.Charsets;
     {$endif HASCODEPAGE}
     {$ifdef OSWINDOWS}
     // skip old Windows (XP/Vista/Seven) which may miss some/most encodings
-    if OSVersion < wTen then
+    if (OSVersion < wTen) or
+       (wsWine in WindowsSpecs) then // Wine/ICU also behind
       exit; // seems not available without a specific language pack
     {$endif OSWINDOWS}
     // validate mORMot conversion
@@ -7389,8 +7451,8 @@ procedure TTestCoreBase.Charsets;
       {$ifdef OSDARWIN}
       exit;  // MacOS ICU seems to be not as expected with escape chars
       {$else}
-      if not CheckFailed(a <> '', 'kr1') then
-        if not CheckFailed(PCardinal(a)^ = 1126769691, 'kr2') then
+      if Check(a <> '', 'kr1') then
+        if Check(PCardinal(a)^ = 1126769691, 'kr2') then
           delete(a, 1, 4); // delete IEC 2022 escape char
       {$endif OSDARWIN}
     {$endif OSPOSIX}
@@ -8145,29 +8207,21 @@ begin
     '1492-10-12T16:00:00');
 end;
 
-function LocalTimeToUniversal(LT: TDateTime; TZOffset: Integer): TDateTime;
-begin
-  result := EncodeTime(Abs(TZOffset) div 60, Abs(TZOffset) mod 60, 0, 0);
-  if TZOffset > 0 then
-    result := LT - result
-  else if TZOffset < 0 then
-    result := LT + result
-  else
-    result := LT;
-end;
-
-{$R ..\src\mormot.tz.res} // validate our Win10-generated resource file
+{$R ..\src\mormot.tz.res} // validate our Win11-generated resource file
 
 procedure TTestCoreBase.TimeZonesSlow(Context: TObject);
 var
   tz: TSynTimeZone;
+  st, stl: TSystemTime;
+  t: TSynSystemTime;
   d: TTimeZoneData;
   i, bias: integer;
   m: word;
   hdl, reload: boolean;
+  endtix: Int64;
   buf: RawByteString;
-  dt: TDateTime;
-  local: TDateTime;
+  dt, dtl: TDateTime;
+  ut: TUnixTime;
   s31: TShort31;
 
   procedure testBias(year, expected: integer);
@@ -8326,22 +8380,40 @@ begin
   finally
     tz.Free;
   end;
-  // validate NowUtc / TimeZoneLocalBias
+  // validate mormot.core.os time conversions
   dt := NowUtc;
-  CheckSame(LocalTimeToUniversal(Now(), TimeZoneLocalBias), dt, 0.01,
-    'NowUtc should not shift nor truncate time in respect to RTL Now');
-  sleep(200);
-  Check(not SameValue(dt, NowUtc),
-    'NowUtc should not truncate time (e.g. to 5 sec resolution)');
+  dtl := UtcToLocal(dt);
+  CheckSameTime(dtl, Now(), 'RTL Now should match mormot.core.os');
+  ut := UnixTimeUtc;
+  t.FromNow({localtime=}true);
+  GetLocalTime(stl);
+  //writeln(#10'utc=',DateTimeToSql(dt),#10'loc=',DateTimeToSql(dtl));
+  CheckSameTime(UtcToLocal(dt), dtl, 'UtcToLocal');
+  CheckSameTime(LocalToUtc(dtl), dt, 'LocalToUtc');
+  CheckSameTime(UnixTimeToLocal(ut), dtl, 'UnixTimeToLocal');
+  Check(abs(LocalToUnixTime(dtl) - ut) < 2, 'LocalToUnixTime');
+  UnixTimeToLocal(ut, st);
+  {$ifndef POSIXDELPHI} // SystemTimeToDateTime() not available on Delphi POSIX
+  CheckSameTime(SystemTimeToDateTime(st), SystemTimeToDateTime(stl), 'UnixTimeToLocal');
+  {$endif POSIXDELPHI}
+  {$ifdef VER3_2_4}
+  CheckSameTime(LocalTimeToUniversal(dtl), dt, 'LocalTimeToUniversal');
+  CheckSameTime(UniversalTimeToLocal(dt), dtl, 'UniversalTimeToLocal');
+  {$endif VER3_2_4}
+  endtix := GetTickCount64 + 100; // 16ms resolution at worst on Windows
+  repeat
+    sleep(10); // likely to be executed in a background thread
+  until CheckFailed(GetTickCount64 < endtix,
+          'NowUtc should not truncate time within 100ms period') or
+        (NowUtc > dt);
   // validate zones taken from Windows registry or mormot.tz.res on POSIX
   tz := TSynTimeZone.Default;
-  local := tz.UtcToLocal(dt, 'UTC');
-  check(SameValue(local, dt));
+  CheckSameTime(tz.UtcToLocal(dt, 'UTC'), dt);
   check(tz.GetBiasForDateTime(dt, 'UTC', bias, hdl));
   check(bias = 0);
   check(not hdl);
-  local := tz.UtcToLocal(dt, 'Romance Standard Time');
-  check(not SameValue(local, dt), 'Perfide Albion never matches the continent');
+  dtl := tz.UtcToLocal(dt, 'Romance Standard Time');
+  check(not SameValue(dtl, dt,SecsPerDate), 'Perfide Albion');
   check(tz.GetBiasForDateTime(dt, 'Romance Standard Time', bias, hdl));
   check(hdl);
   check(bias < 0, 'Paris is always ahead of London');
@@ -8349,11 +8421,11 @@ begin
   tz := TSynTimeZone.Create;
   try
     tz.LoadFromBuffer(buf);
-    CheckSame(local, tz.UtcToLocal(dt, 'Romance Standard Time'));
+    CheckSameTime(dtl, tz.UtcToLocal(dt, 'Romance Standard Time'));
   finally
     tz.Free;
   end;
-  CheckSame(local, UtcToLocal(dt, 'Romance Standard Time'));
+  CheckSameTime(dtl, UtcToLocal(dt, 'Romance Standard Time'));
 end;
 
 const
@@ -8522,6 +8594,7 @@ var
   err: integer;
   txt: RawUtf8;
   ss: TShort63;
+  s7: TShort7;
 begin
   // some cross-platform Windows/Linux/BSD error detection
   CheckEqual(SystemError(seSuccess), 0);
@@ -8541,58 +8614,62 @@ begin
     CheckNotEqual(txt, '');
     Check(PosEx(txt, ShortStringToUtf8(ss)) > 0);
   end;
-  Check(WinErrorConstant(NO_ERROR)^ = 'SUCCESS', 'weca');
-  Check(WinErrorConstant(995)^ = 'OPERATION_ABORTED', 'wecb1');
-  Check(WinErrorConstant(1150)^ = 'OLD_WIN_VERSION', 'wecb2');
-  Check(WinErrorConstant(1450)^ = 'NO_SYSTEM_RESOURCES', 'wecb3');
-  Check(WinErrorConstant(1907)^ = 'PASSWORD_MUST_CHANGE', 'wecb4');
-  Check(WinErrorConstant(1200)^ = 'BAD_DEVICE', 'wecc');
-  Check(WinErrorConstant(234)^ = 'MORE_DATA', 'wecd');
-  Check(WinErrorConstant(5)^ = 'ACCESS_DENIED', 'wece');
-  Check(WinErrorConstant(12002)^ = 'TIMEOUT', 'wecf');
-  Check(WinErrorConstant($800b010a)^ = 'CERT_E_CHAINING', 'wecg');
-  Check(WinErrorConstant($800b010c)^ = 'CERT_E_REVOKED', 'wecG');
-  Check(WinErrorConstant($800b010d)^[0] = #0, 'wech');
-  Check(WinErrorConstant($80092002)^ = 'CRYPT_E_BAD_ENCODE', 'wecH');
-  Check(WinErrorConstant(1229)^  = 'CONNECTION_INVALID', 'weci');
-  Check(WinErrorConstant(122)^ = 'INSUFFICIENT_BUFFER', 'wecj');
-  Check(WinErrorConstant(12152)^ = 'INVALID_SERVER_RESPONSE', 'weck');
-  Check(WinErrorConstant(87)^ = 'INVALID_PARAMETER', 'wecl');
-  Check(WinErrorConstant(1315)^ = 'INVALID_ACCOUNT_NAME', 'wecm');
-  Check(WinErrorConstant(1331)^ = 'ACCOUNT_DISABLED', 'wecn');
-  Check(WinErrorConstant(1342)^ = 'SERVER_NOT_DISABLED', 'weco');
-  Check(WinErrorShort(0) = '0 ERROR_SUCCESS', 'w0');
-  Check(WinErrorShort(5) = '5 ERROR_ACCESS_DENIED', 'wa');
-  Check(WinErrorShort(12002) = '12002 ERROR_WINHTTP_TIMEOUT', 'w1');
-  Check(WinErrorShort($800b010a) = '800b010a CERT_E_CHAINING', 'w2');
-  Check(WinErrorShort($80000003) = '80000003 EXCEPTION_BREAKPOINT', 'w3');
-  Check(WinErrorShort(1722) = '1722 RPC_S_SERVER_UNAVAILABLE', 'w4');
-  Check(WinErrorShort(12152) = '12152 ERROR_WINHTTP_INVALID_SERVER_RESPONSE', 'w5');
-  Check(WinErrorShort($c00000fd) = 'c00000fd EXCEPTION_STACK_OVERFLOW', 'w6');
-  Check(WinErrorShort($80090330) = '80090330 SEC_E_DECRYPT_FAILURE', 'w7');
-  Check(WinErrorShort($00090321) = '590625 SEC_I_RENEGOTIATE', 'w8');
-  Check(WinErrorShort(244, {noint=}false) = '244', '244w');
-  Check(WinErrorShort(245, {noint=}true) = '', '245w');
-  BsdErrorShort(1, @ss);
-  Check(ss = '1 EPERM', '1bsd');
-  BsdErrorShort(5, @ss);
-  Check(ss = '5 EIO', '5bsd');
-  BsdErrorShort(40, @ss);
-  Check(ss = '40 EMSGSIZE', '40bsd');
-  BsdErrorShort(81, @ss);
-  Check(ss = '81 ENEEDAUTH', '81bsd');
-  BsdErrorShort(82, @ss);
-  Check(ss = '82', '82bsd');
-  LinuxErrorShort(1, @ss);
-  Check(ss = '1 EPERM', '1lin');
-  LinuxErrorShort(5, @ss);
-  Check(ss = '5 EIO', '5lin');
-  LinuxErrorShort(124, @ss);
-  Check(ss = '124 EMEDIUMTYPE', '124');
-  LinuxErrorShort(125, @ss);
-  Check(ss = '125', '125');
-  Check(OsErrorShort(244, {noint=}false) = '244', '244a');
-  Check(OsErrorShort(244, {noint=}true) = '', '244b');
+  CheckEqualShort(WinErrorConstant(NO_ERROR)^, 'SUCCESS', 'weca');
+  CheckEqualShort(WinErrorConstant(995)^, 'OPERATION_ABORTED', 'wecb1');
+  CheckEqualShort(WinErrorConstant(1150)^, 'OLD_WIN_VERSION', 'wecb2');
+  CheckEqualShort(WinErrorConstant(1450)^, 'NO_SYSTEM_RESOURCES', 'wecb3');
+  CheckEqualShort(WinErrorConstant(1907)^, 'PASSWORD_MUST_CHANGE', 'wecb4');
+  CheckEqualShort(WinErrorConstant(1200)^, 'BAD_DEVICE', 'wecc');
+  CheckEqualShort(WinErrorConstant(234)^, 'MORE_DATA', 'wecd');
+  CheckEqualShort(WinErrorConstant(5)^, 'ACCESS_DENIED', 'wece');
+  CheckEqualShort(WinErrorConstant(12002)^, 'TIMEOUT', 'wecf');
+  CheckEqualShort(WinErrorConstant($800b010a)^, 'CERT_E_CHAINING', 'wecg');
+  CheckEqualShort(WinErrorConstant($800b010c)^, 'CERT_E_REVOKED', 'wecG');
+  CheckEqualShort(WinErrorConstant($800b010d)^[0], #0, 'wech');
+  CheckEqualShort(WinErrorConstant($80092002)^, 'CRYPT_E_BAD_ENCODE', 'wecH');
+  CheckEqualShort(WinErrorConstant(1229)^ , 'CONNECTION_INVALID', 'weci');
+  CheckEqualShort(WinErrorConstant(122)^, 'INSUFFICIENT_BUFFER', 'wecj');
+  CheckEqualShort(WinErrorConstant(12152)^, 'INVALID_SERVER_RESPONSE', 'weck');
+  CheckEqualShort(WinErrorConstant(87)^, 'INVALID_PARAMETER', 'wecl');
+  CheckEqualShort(WinErrorConstant(1315)^, 'INVALID_ACCOUNT_NAME', 'wecm');
+  CheckEqualShort(WinErrorConstant(1331)^, 'ACCOUNT_DISABLED', 'wecn');
+  CheckEqualShort(WinErrorConstant(1342)^, 'SERVER_NOT_DISABLED', 'weco');
+  CheckEqualShort(WinErrorShort(0), '0 ERROR_SUCCESS', 'w0');
+  CheckEqualShort(WinErrorShort(5), '5 ERROR_ACCESS_DENIED', 'wa');
+  CheckEqualShort(WinErrorShort(12002), '12002 ERROR_WINHTTP_TIMEOUT', 'w1');
+  CheckEqualShort(WinErrorShort($800b010a), '800b010a CERT_E_CHAINING', 'w2');
+  CheckEqualShort(WinErrorShort($80000003), '80000003 EXCEPTION_BREAKPOINT', 'w3');
+  CheckEqualShort(WinErrorShort(1722), '1722 RPC_S_SERVER_UNAVAILABLE', 'w4');
+  CheckEqualShort(WinErrorShort(12152), '12152 ERROR_WINHTTP_INVALID_SERVER_RESPONSE', 'w5');
+  CheckEqualShort(WinErrorShort($c00000fd), 'c00000fd EXCEPTION_STACK_OVERFLOW', 'w6');
+  CheckEqualShort(WinErrorShort($80090330), '80090330 SEC_E_DECRYPT_FAILURE', 'w7');
+  CheckEqualShort(WinErrorShort($00090321), '590625 SEC_I_RENEGOTIATE', 'w8');
+  CheckEqualShort(WinErrorShort(244, {noint=}false), '244', '244w');
+  CheckEqualShort(WinErrorShort(245, {noint=}true), '', '245w');
+  WinErrorShortVar($80092012, ss);
+  CheckEqualShort(ss, '80092012 CRYPT_E_NO_REVOCATION_CHECK', 'winrevoc');
+  WinErrorShortVar($80092012, s7);
+  CheckEqualShort(s7, '8009201', 'trunc to string[7]');
+  BsdErrorShortVar(1, ss);
+  CheckEqualShort(ss, '1 EPERM', '1bsd');
+  BsdErrorShortVar(5, ss);
+  CheckEqualShort(ss, '5 EIO', '5bsd');
+  BsdErrorShortVar(40, ss);
+  CheckEqualShort(ss, '40 EMSGSIZE', '40bsd');
+  BsdErrorShortVar(81, ss);
+  CheckEqualShort(ss, '81 ENEEDAUTH', '81bsd');
+  BsdErrorShortVar(82, ss);
+  CheckEqualShort(ss, '82', '82bsd');
+  LinuxErrorShortVar(1, ss);
+  CheckEqualShort(ss, '1 EPERM', '1lin');
+  LinuxErrorShortVar(5, ss);
+  CheckEqualShort(ss, '5 EIO', '5lin');
+  LinuxErrorShortVar(124, ss);
+  CheckEqualShort(ss, '124 EMEDIUMTYPE', '124');
+  LinuxErrorShortVar(125, ss);
+  CheckEqualShort(ss, '125', '125');
+  CheckEqualShort(OsErrorShort(244, {noint=}false), '244', '244a');
+  CheckEqualShort(OsErrorShort(244, {noint=}true), '', '244b');
 end;
 
 procedure TTestCoreBase._SID;
@@ -9037,8 +9114,11 @@ begin
     Check(SecurityDescriptorToText(bin, u), 'sdtt1');
     CheckEqual(u, SD_TXT[i]);
     {$ifdef OSWINDOWS} // validate against the OS API
-    Check(CryptoApi.SecurityDescriptorToText(pointer(bin), u), 'winapi1');
-    CheckEqual(u, SD_TXT[i], 'winapi2');
+    if not (wsWine in WindowsSpecs) then
+    begin
+      Check(CryptoApi.SecurityDescriptorToText(pointer(bin), u), 'winapi1');
+      CheckEqual(u, SD_TXT[i], 'winapi2');
+    end;
     {$endif OSWINDOWS}
     // TSecurityDescriptor binary load and export as SDDL or binary
     sd.Clear;
@@ -9056,8 +9136,11 @@ begin
     Check(SecurityDescriptorToText(saved, u), 'sdtt2');
     CheckEqual(u, SD_TXT[i]);
     {$ifdef OSWINDOWS}
-    Check(CryptoApi.SecurityDescriptorToText(pointer(saved), u), 'winapi3');
-    CheckEqual(u, SD_TXT[i], 'winapi4');
+    if not (wsWine in WindowsSpecs) then
+    begin
+      Check(CryptoApi.SecurityDescriptorToText(pointer(saved), u), 'winapi3');
+      CheckEqual(u, SD_TXT[i], 'winapi4');
+    end;
     {$endif OSWINDOWS}
     if i in [1, 2, 8] then
       // serialization offsets are not consistent between XP or later
@@ -9245,7 +9328,7 @@ begin
     Check(length(sd.Dacl) in [1, 2]);
     CheckEqual(length(sd.Sacl), 0);
     Check(sd.Dacl[0].AceType = satCallbackAccessAllowed);
-    if not CheckFailed(sd.Dacl[0].Opaque <> '') then
+    if Check(sd.Dacl[0].Opaque <> '') then
     begin
       u := sd.Dacl[0].ConditionalExpression;
       Check(u <> '');
@@ -9669,11 +9752,14 @@ begin
   for i := 1 to 100 do
   begin
     s := DateTimeToIso8601(Now / 20 + rnd.NextDouble * 20, true);
-    t := UrlEncode(s);
+    t := UrlEncode(s); // e.g. '1906-05-18T02%3A02%3A22'
     CheckEqual(UrlDecode(t), s);
     d := 'seleCT=' + t + '&where=' + Int32ToUtf8(i);
     Check(UrlDecodeNeedParameters(pointer(d), 'where,select'));
     Check(not UrlDecodeNeedParameters(pointer(d), 'foo,select'));
+    Check(not UrlDecodeNeedParameters(pointer(d), 'wher,select'));
+    Check(not UrlDecodeNeedParameters(pointer(d), 'where,selected'));
+    Check(not UrlDecodeNeedParameters(pointer(d), 'wheres,select'));
     Check(UrlDecodeValue(pointer(d), 'SELECT=', t, @U));
     CheckEqual(t, s, 'UrlDecodeValue');
     Check(IdemPChar(U, 'WHERE='), 'Where');
@@ -9956,7 +10042,7 @@ begin
     CheckEqual(ct, BIN_MIME[i]);
   end;
   for i := 0 to high(HEX) do
-  if not CheckFailed(length(HEX[i]) shr 1 < length(s)) then
+  if Check(length(HEX[i]) shr 1 < length(s)) then
   begin
     Check(mormot.core.text.HexToBin(pointer(HEX[i]), pointer(s), length(HEX[i]) shr 1));
     CheckEqual(GetMimeContentType(s), HEX_MIME[i]);
@@ -10024,6 +10110,12 @@ begin
   Check(not IsContentTypeJsonU('application/vnd.mysoft.v1+'));
   Check(IsContentTypeJsonU('application/+json'));
   Check(not IsContentTypeJsonU('application/xml'));
+  Check(not IsContentTypeJsonU(XML_CONTENT_TYPE));
+  Check(IsContentTypeJsonU('anything/json'));
+  Check(IsContentTypeJsonU('something/JSON'));
+  Check(not IsContentTypeJsonU('something/SON'));
+  Check(not IsContentTypeJsonU('something/iSON'));
+  Check(not IsContentTypeJsonU('something/JS0N'));
   Check(IsContentTypeTextU('text/plain'));
   Check(IsContentTypeTextU('text/xml'));
   Check(IsContentTypeTextU('text/css'));
@@ -10031,6 +10123,7 @@ begin
   Check(IsContentTypeTextU('application/json'));
   Check(IsContentTypeTextU('APPLICATION/JSON'));
   Check(IsContentTypeTextU('application/xml'));
+  Check(IsContentTypeTextU(XML_CONTENT_TYPE));
   Check(not IsContentTypeTextU('application/octet-stream'));
   Check(IsContentTypeTextU('application/javascript'));
   Check(IsContentTypeTextU('application/VND.API+JSON'));
@@ -10249,8 +10342,8 @@ begin
     islinux := false;
     for ld := succ(low(ld)) to high(ld) do
       if os in LINUX_DIST[ld] then
-        if not CheckFailed(not islinux, 'os twice') then
-          if not CheckFailed(LinuxDistribution(os) = ld, 'ld') then
+        if Check(not islinux, 'os twice') then
+          if Check(LinuxDistribution(os) = ld, 'ld') then
             islinux := true;
     Check((os in OS_LINUX) = islinux, 'islinux');
     Check(islinux = not (os in LINUX_DIST[ldNotLinux]));
@@ -10894,7 +10987,8 @@ begin
     json := dict.SaveToJson;
     Check(IsValidUtf8(json));
     Check(IsValidJson(json));
-    CheckHash(json, $F67B5FA8, 'dict.savetojson');
+    if MAX = 10000 then
+      CheckHash(json, $F67B5FA8, 'dict.savetojson');
     for i := 1 to MAX do
     begin
       i64 := i;
@@ -10907,7 +11001,8 @@ begin
   dict := TSynDictionary.Create(TypeInfo(TInt64DynArray), TypeInfo(tvalues));
   try
     check(dict.LoadFromJson(json));
-    CheckHash(json, $F67B5FA8, 'untouched after loadfromjson');
+    if MAX = 10000 then
+      CheckHash(json, $F67B5FA8, 'untouched after loadfromjson');
     checkEqual(json, dict.SaveToJson);
     for i := 1 to MAX do
     begin

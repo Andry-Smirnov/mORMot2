@@ -367,8 +367,10 @@ type
       rawError: PNetErrorInt = nil): TNetResult;
     /// low-level UDP sending to an address of some data
     function SendTo(Buf: pointer; len: integer; const addr: TNetAddr): TNetResult;
-    /// low-level UDP receiving from an address of some data
-    function RecvFrom(Buf: pointer; len: integer; out addr: TNetAddr): integer;
+    /// low-level UDP receiving from an address of some data into a buffer
+    function RecvFrom(Buf: pointer; len: integer; out addr: TNetAddr): integer; overload;
+    /// low-level UDP receiving from an address of some data into a RawByteString
+    function RecvFrom(out addr: TNetAddr): RawByteString; overload;
     /// wait for the socket to a given set of receiving/sending state
     // - using poll() on POSIX (as required), and select() on Windows
     // - ms < 0 means an infinite timeout (blocking until events happen)
@@ -882,11 +884,13 @@ procedure RegisterDnsAddress(const DnsResolver: RawUtf8);
 var
   /// if manually set, GetDomainNames() will return this value
   // - e.g. 'ad.mycompany.com'
+  // - you could also set USERDNSDOMAIN on Windows before calling the executable
   ForcedDomainName: RawUtf8;
 
 /// retrieve the AD Domain Name addresses known by the Operating System
 // - on POSIX, return all "search" from /etc/resolv.conf unless usePosixEnv is set
-// - on Windows, calls GetNetworkParams API from iphlpapi to retrieve a single item
+// - on Windows, calls GetNetworkParams API from iphlpapi to retrieve a single
+// item, and if none if found, will check the USERDNSDOMAIN environment variable
 // - a 64 seconds cache is used for this function on POSIX
 // - you can force for a given value using ForcedDomainName, e.g. if the
 // machine is not actually registered for / part of the domain, but has access
@@ -1004,7 +1008,10 @@ type
     ClientCertificateAuthentication: boolean;
     /// input: if two-way TLS client should be verified only once on the server
     // - to be used with OnEachPeerVerify callback
-    // - on OpenSSL client or server, set SSL_VERIFY_CLIENT_ONCE mode
+    // - on OpenSSL server, set SSL_VERIFY_CLIENT_ONCE mode, i.e. do not ask for
+    // a client certificate again during renegotiation or post-authentication
+    // if a certificate was requested during the initial handshake
+    // - ignored on OpenSSL client (documented by OpenSSL man page as a bug)
     // - not used on SChannel
     ClientVerifyOnce: boolean;
     /// input: allow legacy insecure renegotiation for unpatched/unsafe servers
@@ -1081,7 +1088,7 @@ type
     /// input: preferred Cipher List
     // - not used on SChannel
     CipherList: RawUtf8;
-    /// input: a CSV list of host names to be validated
+    /// input: a CSV list of host names to be validated by AfterConnection
     // - e.g. 'smtp.example.com,example.com'
     // - not used on SChannel
     HostNamesCsv: RawUtf8;
@@ -1172,7 +1179,7 @@ type
     /// check if there are some input data within the TLS buffers
     // - may be the case even with no data any more at TCP/socket level
     // - returns -1 if there is no TLS connection opened
-    // - returns the number of bytes in the internal buffer
+    // - returns the number of bytes in the internal TLS buffer
     // - returns 0 if the internal buffer is void - but there may be some
     // data ready to be unciphered at socket level
     function ReceivePending: integer;
@@ -2171,7 +2178,8 @@ type
     function SockInReadLn(Buffer: PAnsiChar; Size: PtrInt): PtrInt;
     /// returns the number of bytes in SockIn^.Buffer or pending in the OS stack
     // - it first checks and quickly returns any length pending in SockIn^.Buffer
-    // - if buffer is void, will call InputSock to fill it or check the socket API
+    // - if buffer is void, will call InputSock to fill the buffer or check the
+    // socket API within aTimeOutMS - SockInPending(-1) will only check the buffer
     // - returns -1/-2 in case of a socket error (e.g. broken/closed connection)
     // - returns the number of bytes available in input buffers (SockIn or TLS):
     // there may be more waiting at the socket level
@@ -2238,13 +2246,19 @@ type
     function SockReceivePending(TimeOutMS: integer;
       loerr: PNetErrorInt = nil): TCrtSocketPending;
     /// return how many pending bytes are in the receiving socket or INetTls queue
-    // - returns 0 if no data is available, or if the connection is broken: call
-    // SockReceivePending() to check for the actual state of the connection
+    // - returns 0 if no data is available, or if the connection is broken
+    // - on TLS use rather SockReceivePending() to check also the socket state
     function SockReceiveHasData: integer;
-    /// returns the socket input stream as a string
+    /// returns the socket input stream as a RawByteString
     // - returns up to 64KB from the OS or TLS buffers within TimeOut
+    // - returns '' on nrTimeout or nrClosed
     function SockReceiveString(NetResult: PNetResult = nil;
       RawError: PNetErrorInt = nil): RawByteString;
+    /// append the socket input stream to a RawByteString Buffer
+    // - append up to 64KB from the OS or TLS buffers within TimeOut
+    // - returns false on nrTimeout or nrClosed, or true on success
+    function SockReceiveStringAppend(var Buffer: RawByteString;
+      NetResult: PNetResult = nil; RawError: PNetErrorInt = nil): boolean;
     /// fill the Buffer with Length bytes
     // - use TimeOut milliseconds wait for incoming data
     // - bypass the SockIn^.Buffer
@@ -3667,6 +3681,17 @@ begin
   end;
 end;
 
+function TNetSocketWrap.RecvFrom(out addr: TNetAddr): RawByteString;
+var
+  len: PtrInt;
+  tmp: TBuffer4K; // big enough for most UDP frames
+begin
+  len := RecvFrom(@tmp, SizeOf(tmp), addr);
+  if len < 0 then
+    len := 0; // return '' on error
+  FastSetRawByteString(result, @tmp, len);
+end;
+
 function TNetSocketWrap.RecvPending(out pending: integer): TNetResult;
 begin
   pending := 0;
@@ -3840,7 +3865,7 @@ end;
 { ******************** Mac and IP Addresses Support }
 
 const // should be local for better code generation
-  HexCharsLower: array[0..15] of AnsiChar = '0123456789abcdef';
+  HexCharsLower: TTemp16 = '0123456789abcdef';
 
 function IsPublicIP(ip4: TNetIP4): boolean;
 begin
@@ -7265,14 +7290,13 @@ function TCrtSocket.SockInPending(aTimeOutMS: integer): integer;
 var
   backup: PtrInt;
 begin
-  if aTimeOutMS < 0 then
-    DoRaise('SockInPending(-1)');
   // first try in SockIn^.Buffer
   result := 0;
   if SockIn <> nil then
     with PTextRec(SockIn)^ do
       result := BufEnd - BufPos;
-  if result <> 0 then
+  if (result <> 0) or
+     (aTimeOutMS < 0) then // SockInPending(-1) to check only SockIn^.Buffer
     exit;
   // no data in SockIn^.Buffer, so try if some pending at socket/TLS level
   case SockReceivePending(aTimeOutMS) of // check both TLS and socket levels
@@ -7653,6 +7677,18 @@ begin
     FastSetRawByteString(result, @tmp, read)
   else
     FastAssignNew(result);
+end;
+
+function TCrtSocket.SockReceiveStringAppend(var Buffer: RawByteString;
+  NetResult: PNetResult; RawError: PNetErrorInt): boolean;
+var
+  read: integer;
+  tmp: TBuffer64K; // big enough for INetTls or the socket API
+begin
+  read := SizeOf(tmp);
+  result := TrySockRecv(@tmp, read, {StopBeforeLength=}true, NetResult, RawError);
+  if result then
+    AppendBufferToUtf8(@tmp, read, RawUtf8(Buffer));
 end;
 
 function TCrtSocket.TrySockRecv(Buffer: pointer; var Length: integer;

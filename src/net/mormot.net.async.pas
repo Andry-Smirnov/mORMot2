@@ -31,6 +31,7 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.core.data,
   mormot.core.unicode,
   mormot.core.text,
@@ -1035,9 +1036,8 @@ type
   /// implement HTTP async client requests
   // - reusing the threads pool and sockets polling of an associated
   // TAsyncConnections instance (typically a THttpAsyncServer)
-  THttpAsyncClientConnections = class(TSynPersistent)
+  THttpAsyncClientConnections = class(TObjectLightLock)
   protected
-    fLock: TLightLock;
     fOwner: TAsyncConnections;
     fConnectionTimeoutMS: integer;
     fUserAgent: RawUtf8;
@@ -1196,6 +1196,7 @@ type
   // is accessed, so that the cache is always flushed after HttpHeadCacheSec
   // - hpoClientIgnoreTlsError will ignore any HTTPS issue
   // - hpoClientAlllowWinApi will be used for THttpProxyUrl.RemoteClientHead()
+  // - hpoClientAllowRedirect enable 30x HTTP redirections (disabled by default)
   // - hpoClientNoCacheDirect disable caching of dynamic pages < HttpDirectGetKB
   // - hpoClientLowerCaseUri will force remote http://... to be in lowercase
   // - hpoClientNormalizeCaseHash to compute the local hash from uppercase URI
@@ -1213,6 +1214,7 @@ type
     hpoClientHeadNoRefresh,
     hpoClientIgnoreTlsError,
     hpoClientAlllowWinApi,
+    hpoClientAllowRedirect,
     hpoClientNoCacheDirect,
     hpoClientLowerCaseUri,
     hpoClientNormalizeCaseHash,
@@ -4848,6 +4850,7 @@ begin
         end;
       hrpWait: // not yet available (rfProgressiveStatic mode)
         begin
+          fServer.fExecuteEvent.SetEvent; // wake up the write thread
           result := soWaitWrite;
           exit;
         end;
@@ -5422,7 +5425,7 @@ var
   ms: integer;
   {$endif USE_WINIOCP}
   tix64: Int64;
-  tix, lasttix: cardinal;
+  tix, lasttix, idle, lastidle: cardinal;
   msidle, mscallbacks: integer;
 begin
   // call ProcessIdleTix - and POSIX Send() output packets in the background
@@ -5435,6 +5438,7 @@ begin
       IdleEverySecond; // initialize idle process (e.g. fHttpDateNowUtc)
       tix := GetTickSec shr 6; // delay=500 after 64s idle
       lasttix := tix;
+      lastidle := 0;
       mscallbacks := 0;
       if fCallbackSendDelay <> nil then
         mscallbacks := fCallbackSendDelay^;
@@ -5452,14 +5456,18 @@ begin
         {$endif USE_WINIOCP}
         begin
           // no socket/poll/epoll API nedeed (most common case)
-          if (mscallbacks <> 0) and // typically = 10ms
-             (tix = lasttix) then
-            msidle := mscallbacks   // delayed SendFrames gathering
+          idle := mormot.core.os.GetTickCount64 shr 6;
+          if lastidle = idle then
+            msidle := 10                 // WaitFor(10) up to 64ms
+          else if (mscallbacks <> 0) and // typically = 10ms
+                  (tix = lasttix) then
+            msidle := mscallbacks        // delayed SendFrames gathering
           else if (fAsync.fGC1.Count = 0) or
                   (fAsync.fKeepConnectionInstanceMS > 500 * 2) then
-            msidle := 500 // idle server
-          else // default fKeepConnectionInstanceMS is 100ms
+            msidle := 500                // idle server
+          else         // default fKeepConnectionInstanceMS = 100ms
             msidle := fAsync.fKeepConnectionInstanceMS shr 1; // follow GC pace
+          lastidle := idle;
           fExecuteEvent.WaitFor(msidle);
           if fShutdownInProgress or
              Terminated or
@@ -5578,11 +5586,11 @@ begin
   if ext = nil then
     exit;
   case PCardinal(ext)^ of
-    ord('m') + ord('d') shl 8 + ord('5') shl 16:
+    MD5_LO:
       hf := hfMd5;
-    ord('s') + ord('h') shl 8 + ord('a') shl 16 + ord('1') shl 24:
+    SHA_LO + ord('1') shl 24:
       hf := hfSHA1;
-    ord('s') + ord('h') shl 8 + ord('a') shl 16 + ord('2') shl 24:
+    SHA_LO + ord('2') shl 24:
       hf := hfSHA256;
   else
     exit;
@@ -5630,7 +5638,8 @@ begin
   client := TSimpleHttpClient.Create(
     not (hpoClientAlllowWinApi in fSettings.Options));
   fRemoteClient := client;
-  client.Options^.RedirectMax := 0; // no automatic redirection
+  if not (hpoClientAllowRedirect in fSettings.Options) then
+    client.Options^.RedirectMax := 0; // no automatic redirection by default
   if hpoClientIgnoreTlsError in fSettings.Options then
     client.Options^.TLS.IgnoreCertificateErrors := true;
   if Assigned(fSettings.OnRemoteClient) then
@@ -5674,7 +5683,7 @@ begin // this method is protected by fOsSafe.Lock
   if StatusCodeIsSuccess(status) then // 2xx..3xx range
     GetHeaderInfo(fRemoteClient.Headers, cache.Size, d);
   cache.TimeMS := d * MilliSecsPerSec;
-  cache.HashDigest := hfSHA1; // not SHA-1 but 160-bit trunc of safer SHA-256
+  cache.HashDigest := hfSHA256_160; // SHA-256 truncated to 160-bit
   HttpRequestHashBase32(Uri, @cache.HashB32, pointer(fRemoteClient.Headers),
     @cache.Hash160, hpoClientNormalizeCaseHash in fSettings.Options);
   cache.PurgedHeaders := PurgeHeaders(fRemoteClient.Headers, false,
@@ -6321,7 +6330,7 @@ begin // folder timestamp check is called every 17 minutes, and may be slow
       n := 0;
       size := 0;
       ok := DirectoryDeleteOlderFiles(cache.Path,
-        cache.TimeoutSec / SecsPerDay, FILES_ALL,
+        cache.TimeoutSec * SecsPerDate, FILES_ALL,
         {recursive=}hpoClientCacheSubFolder in one^.fSettings.Options, @size);
       if (n <> 0) or
          not ok then // something changed on disk

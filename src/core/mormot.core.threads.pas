@@ -1557,9 +1557,8 @@ type
   // - in respect to TSynThreadPool, threads will be created and released on need
   // - tasks should better take at least some dozen milliseconds to leverage the
   // cost of creating a thread by the Operating System
-  TLoggedWorker = class(TSynPersistent)
+  TLoggedWorker = class(TObjectLightLock)
   protected
-    fSafe: TLightLock;
     fRunning: integer;
     fMaxRunning: integer;
     fPending: array of TLoggedWork; // pending Run() if ForcedThreaded
@@ -4232,16 +4231,17 @@ end;
 procedure TNotifiedThread.SetServerThreadsAffinityPerSocket(
   const log: ISynLog; const threads: TThreadDynArray);
 var
-  sock, persock, i: cardinal;
+  sock, persock, i, socks: cardinal;
   ok: boolean;
 begin
+  socks := CpuSockets; // retrieve once the Linux/Android function result
   if (threads = nil) or
-     (CpuSockets <= 1) then
+     (socks <= 1) then
     exit;
   // with multiple CPU sockets, group threads by closest HW socket
-  persock := cardinal(length(threads)) div CpuSockets;
+  persock := cardinal(length(threads)) div socks;
   if Assigned(log) then
-    log.Log(sllTrace, 'Create: CpuSockets=% persock=%', [CpuSockets, persock], self);
+    log.Log(sllTrace, 'Create: CpuSockets=% persock=%', [socks, persock], self);
   sock := 0;
   SetThreadSocketAffinity(self, sock); // AW with R0 and lower R# threads
   for i := 0 to high(threads) do
@@ -4250,7 +4250,7 @@ begin
     if Assigned(log) then
       log.Log(sllTrace, 'Create: SetThreadSocketAffinity(#%,%)=%',
         [i, sock, BOOL_STR[ok]], self);
-    if (sock < CpuSockets - 1) and
+    if (sock < socks - 1) and
        (i mod persock = 0) then
       inc(sock); // e.g. 0,0,0,0,1,1,1,1,1 for 9 threads and 2 sockets
   end;
@@ -4966,7 +4966,7 @@ end;
 procedure ThreadCountAdjust(var aThreadPoolCount: integer);
 begin
   {$ifdef OSWINDOWS}
-  if IsWow64Emulation then
+  if wsFavorFewThreads in WindowsSpecs then
     if aThreadPoolCount > 4 then
       aThreadPoolCount := 4; // Windows PRISM does not like too many threads
   {$endif OSWINDOWS}

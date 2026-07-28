@@ -796,6 +796,9 @@ type
     /// returns the current position, and move ahead the specified bytes
     function NextSafe(out Data: pointer; DataLen: PtrInt): boolean;
       {$ifdef HASINLINE}inline;{$endif}
+    /// read the next #0 terminated text into a ShortString
+    procedure NextAsciiz(var s: ShortString);
+      {$ifdef FPC}inline;{$endif} // Delphi can't inline var ShortString :(
     /// copy data from the current position, and move ahead the specified bytes
     procedure Copy(Dest: pointer; DataLen: PtrInt);
       {$ifdef HASINLINE}inline;{$endif}
@@ -1408,8 +1411,8 @@ function Base58ToBin(const base58: RawUtf8): RawByteString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 const
-  b32encUpper: array[0..31] of AnsiChar = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  b32encLower: array[0..31] of AnsiChar = 'abcdefghijklmnopqrstuvwxyz234567';
+  b32encUpper: TTemp32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  b32encLower: TTemp32 = 'abcdefghijklmnopqrstuvwxyz234567';
 
 /// compute the length resulting of Base32 encoding of a binary buffer
 // - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O 1I 8B
@@ -1595,10 +1598,10 @@ function UrlEncode(const Text: RawUtf8): RawUtf8; overload;
 /// encode a string as URI parameter encoding, i.e. ' ' as '+'
 function UrlEncode(Text: PUtf8Char): RawUtf8; overload;
 
-/// append a string as URI parameter encoding, i.e. ' ' as '+'
+/// append a string as URI parameter encoding, i.e. ' ' as '+' to TTextWriter
 procedure UrlEncode(W: TTextWriter; Text: PUtf8Char; TextLen: PtrInt); overload;
 
-/// append a string as URI parameter encoding, i.e. ' ' as '+'
+/// append a string as URI parameter encoding, i.e. ' ' as '+' to TTextWriter
 procedure UrlEncode(W: TTextWriter; const Text: RawUtf8); overload;
 
 /// encode a string as URI network name encoding, i.e. ' ' as %20
@@ -1609,13 +1612,16 @@ function UrlEncodeName(const Text: RawUtf8): RawUtf8; overload;
 // - only parameters - i.e. after '?' - should replace spaces by '+'
 function UrlEncodeName(Text: PUtf8Char): RawUtf8; overload;
 
-/// append a string as URI network name encoding, i.e. ' ' as %20
+/// append a string as URI network name encoding, i.e. ' ' as %20 to TTextWriter
 // - only parameters - i.e. after '?' - should replace spaces by '+'
 procedure UrlEncodeName(W: TTextWriter; Text: PUtf8Char; TextLen: PtrInt); overload;
 
-/// append a string as URI network name encoding, i.e. ' ' as %20
+/// append a string as URI network name encoding, i.e. ' ' as %20 to TTextWriter
 // - only parameters - i.e. after '?' - should replace spaces by '+'
 procedure UrlEncodeName(W: TTextWriter; const Text: RawUtf8); overload;
+
+/// append URI name (space2plus=48) or parameter (space2plus=32) to a TSynTempAdder
+procedure UrlEncodeAdder(var W: TSynTempAdder; Text: pointer; TextLen: PtrInt; space2plus: cardinal);
 
 type
   /// some options for UrlEncode()
@@ -1623,6 +1629,7 @@ type
     ueTrimLeadingQuestionMark,
     ueEncodeNames,
     ueStarNameIsCsv,
+    ueEqualNameIsDirect,
     ueSkipVoidString,
     ueSkipVoidValue);
 
@@ -2113,7 +2120,7 @@ function EscapeBuffer(s: PAnsiChar; slen: PtrInt; d: PAnsiChar; dmax: PtrInt): P
 
 type
   /// 512 bytes buffer to be allocated on stack when using LogEscape()
-  TLogEscape = array[0..511] of AnsiChar;
+  TLogEscape = TTemp512;
 
 /// fill TLogEscape stack buffer with the (hexadecimal) chars of the input binary
 // - up to 512 bytes will be escaped and appended to a local temp: TLogEscape
@@ -3612,6 +3619,17 @@ begin
     inc(P, DataLen);
     result := true;
   end;
+end;
+
+procedure TFastReader.NextAsciiz(var s: ShortString);
+var
+  l: PtrInt;
+begin
+  l := ByteScanIndex(pointer(P), Last - P, 0);
+  if l < 0 then
+    ErrorOverflow;
+  SetString(s, P, l);
+  inc(P, l + 1);
 end;
 
 procedure TFastReader.Copy(Dest: pointer; DataLen: PtrInt);
@@ -6158,7 +6176,7 @@ procedure ResourceToRawByteString(const ResName: string; ResType: PChar;
 var
   res: TExecutableResource;
 begin
-  if res.Open(ResName, ResType, Instance) then
+  if res.Open(PChar(ResName), ResType, Instance) then
   begin
     FastSetRawByteString(buf, res.Buffer, res.Size);
     res.Close;
@@ -6170,7 +6188,7 @@ procedure ResourceSynLZToRawByteString(const ResName: string;
 var
   res: TExecutableResource;
 begin
-  if res.Open(ResName, PChar(10), Instance) then
+  if res.Open(PChar(ResName), PChar(10), Instance) then
   begin
     AlgoSynLZ.Decompress(res.Buffer, res.Size, buf);
     res.Close;
@@ -8101,13 +8119,23 @@ end;
 
 procedure _UrlEncodeW(W: TTextWriter; Text: pointer; TextLen: PtrInt; space2plus: cardinal);
 begin
-  if (Text = nil) or
-     (W = nil) then
+  if (W = nil) or
+     (Text = nil) then
     exit;
-  TextLen := TextLen * 3; // worse case would fit most of the time
-  if TextLen > W.BEnd - W.B then // need to compute exact length (seldom needed)
+  TextLen := TextLen * 3;        // worse case would fit most of the time
+  if TextLen > W.BEnd - W.B then // better compute exact length (seldom)
     TextLen := _UrlEncode_ComputeLen(Text, @TEXT_BYTES, space2plus);
   inc(W.B, _UrlEncode_Write(Text, W.AddPrepare(TextLen), @TEXT_BYTES, space2plus));
+end;
+
+procedure UrlEncodeAdder(var W: TSynTempAdder; Text: pointer; TextLen: PtrInt; space2plus: cardinal);
+begin
+  if Text = nil then
+    exit;
+  TextLen := TextLen * 3;               // worse case would fit most of the time
+  if TextLen > W.Capacity - W.Size then // better compute exact length (seldom)
+    TextLen := _UrlEncode_ComputeLen(Text, @TEXT_BYTES, space2plus);
+  inc(W.Store.Added, _UrlEncode_Write(Text, W.Prepare(TextLen), @TEXT_BYTES, space2plus));
 end;
 
 function UrlEncode(const Text: RawUtf8): RawUtf8;
@@ -8178,92 +8206,97 @@ var
   a, n: PtrInt;
   name, value, one: RawUtf8;
   p: PVarRec;
-  w: TTextWriter;
   csv: PUtf8Char;
-  flags: set of (possibleDirect, valueDirect, valueIsCsv, hasContent);
-  tmp: TTextWriterStackBuffer;
+  flags: set of (possibleDirect, valueDirect, valueIsCsv, valueRaw, hasContent);
+  w: TSynTempAdder;
 begin
   flags := [];
   if DefaultJsonWriter <> TTextWriter then
     include(flags, possibleDirect);
-  w := DefaultJsonWriter.CreateOwnedStream(tmp);
-  try
-    if PrefixFmt <> '' then
-      w.Add(PrefixFmt, PrefixArgs);
-    n := high(NameValuePairs);
-    if (n > 0) and
-       (n and 1 = 1) then // n should be = 1,3,5,7,..
-      for a := 0 to n shr 1 do
+  w.Init;
+  if PrefixFmt <> '' then
+    FormatAdder(w, PrefixFmt, PrefixArgs);
+  n := high(NameValuePairs);
+  if (n > 0) and
+     (n and 1 = 1) then // n should be = 1,3,5,7,..
+    for a := 0 to n shr 1 do
+    begin
+      p := @NameValuePairs[a * 2];
+      VarRecToUtf8(p, name);
+      if name = '' then
+        continue;
+      flags := flags - [valueDirect, valueIsCsv, valueRaw];
+      if (ueStarNameIsCsv in Options) and
+         (name[1] = '*') then // "explode"
       begin
-        p := @NameValuePairs[a * 2];
-        VarRecToUtf8(p, name);
-        if name = '' then
-          continue;
-        flags := flags - [valueDirect, valueIsCsv];
-        if (ueStarNameIsCsv in Options) and
-           (name[1] = '*') then
-        begin
-          include(flags, valueIsCsv);
-          delete(name, 1, 1);
-        end;
-        if not IsUrlValid(pointer(name)) then
-          if ueEncodeNames in Options then
-            name := UrlEncodeName(name)
-          else
-            continue; // just skip invalid names
-        inc(p);
-        if (possibleDirect in flags) and
-           (not (valueIsCsv in flags)) and
-           (byte(p^.VType) in vtNotString) then
-          include(flags, valuedirect);
-        if (ueSkipVoidValue in Options) and
-           VarRecIsVoid(p) then
-          continue // skip e.g. '' or 0
-        else if p^.VType = vtObject then // no VarRecToUtf8(vtObject)=ClassName
-          value := ObjectToJson(p^.VObject, [])
-        else if not (valueDirect in flags) then
-        begin
-          VarRecToUtf8(p, value);
-          if (ueSkipVoidString in Options) and
-             (value = '') then
-            continue; // skip ''
-        end;
-        if hasContent in flags then
-          w.AddDirect('&')
-        else
-        begin
-          include(flags, hasContent);
-          if not (ueTrimLeadingQuestionMark in Options) then
-            w.AddDirect('?');
-        end;
-        if valueIsCsv in flags then
-        begin
-          csv := pointer(value); // '*tag', 't1,"t2",t3'
-          repeat
-            GetNextItem(csv, ',', '"', one);
-            if (ueSkipVoidString in Options) and
-               (one = '') then
-              continue;
-            if not (valueIsCsv in flags) then
-              w.AddDirect('&'); // ? or & has been written before the first item
-            exclude(flags, valueIsCsv);
-            w.AddString(name); // 'tag=t1&tag=t2&tag=t3'
-            w.AddDirect('=');
-            _UrlEncodeW(w, pointer(one), length(one), 32);
-          until csv = nil;
-          continue;
-        end;
-        w.AddString(name);
-        w.AddDirect('=');
-        if valueDirect in flags then
-          w.AddVarRec(p) // direct vtNotString numbers writing
-        else
-          _UrlEncodeW(w, pointer(value), length(value), 32); // need UrlEncode()
+        include(flags, valueIsCsv);
+        delete(name, 1, 1);
+      end
+      else if (ueEqualNameIsDirect in Options) and
+              (name[1] = '=') then // "deepObject"
+      begin
+        include(flags, valueRaw);
+        delete(name, 1, 1);
       end;
-    w.SetText(result);
-  finally
-    w.Free;
-  end;
+      if not IsUrlValid(pointer(name)) then
+        if ueEncodeNames in Options then
+          name := UrlEncodeName(name)
+        else
+          continue; // just skip invalid names
+      inc(p);
+      if (possibleDirect in flags) and
+         (flags * [valueRaw, valueIsCsv] = []) and
+         (byte(p^.VType) in vtNotString) then
+        include(flags, valueDirect);
+      if (ueSkipVoidValue in Options) and
+         VarRecIsVoid(p) then
+        continue // skip e.g. '' or 0
+      else if p^.VType = vtObject then // no VarRecToUtf8(vtObject)=ClassName
+        value := ObjectToJson(p^.VObject, [])
+      else if flags * [valueRaw, valueDirect] = [] then
+      begin
+        VarRecToUtf8(p, value);
+        if (ueSkipVoidString in Options) and
+           (value = '') then
+          continue; // skip ''
+      end;
+      if hasContent in flags then
+        w.AddDirect('&')
+      else
+      begin
+        include(flags, hasContent);
+        if not (ueTrimLeadingQuestionMark in Options) then
+          w.AddDirect('?');
+      end;
+      if valueIsCsv in flags then
+      begin
+        csv := pointer(value); // '*tag', 't1,"t2",t3'
+        repeat
+          GetNextItem(csv, ',', '"', one);
+          if (ueSkipVoidString in Options) and
+             (one = '') then
+            continue;
+          if not (valueIsCsv in flags) then
+            w.AddDirect('&'); // ? or & has been written before the first item
+          exclude(flags, valueIsCsv);
+          w.Add(name); // 'tag=t1&tag=t2&tag=t3'
+          w.AddDirect('=');
+          UrlEncodeAdder(w, pointer(one), length(one), 32);
+        until csv = nil;
+        continue;
+      end else if valueRaw in flags then
+      begin
+        VarRecToAdder(w, p); // append already encoded deepObject URI parameters
+        continue;
+      end;
+      w.Add(name);
+      w.AddDirect('=');
+      if valueDirect in flags then
+        VarRecToAdder(w, p) // direct vtNotString numbers writing
+      else
+        UrlEncodeAdder(w, pointer(value), length(value), 32); // need encoding
+    end;
+  w.Done(result);
 end;
 
 function IsUrlValid(P: PUtf8Char): boolean;
@@ -9117,7 +9150,12 @@ begin
        ord('i') + ord('c') shl 8 + ord('a') shl 16 + ord('t') shl 24) or
      (PCardinalArray(ContentType)[2] or $00202020 <>
        ord('i') + ord('o') shl 8 + ord('n') shl 16 + ord('/') shl 24) then
-    exit; // not application/*
+  begin // not application/*
+    result := (ContentType[ContentTypeLen + (12 - 5)] = '/') and
+              (PCardinal(@ContentType[ContentTypeLen + (12 - 4)])^ or $20202020 =
+                 ord('j') + ord('s') shl 8 + ord('o') shl 16 + ord('n') shl 24);
+    exit; // consider '*/json' as JSON
+  end;
   case PCardinalArray(ContentType)[3] or $20202020 of
     ord('j') + ord('s') shl 8 + ord('o') shl 16 + ord('n') shl 24:
       ; // found

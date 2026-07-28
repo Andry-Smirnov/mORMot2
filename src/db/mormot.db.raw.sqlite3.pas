@@ -5587,7 +5587,7 @@ implementation
 function SqlVarToSQlite3Context(const Res: TSqlVar;
   Context: TSqlite3FunctionContext): boolean;
 var
-  tmp: array[0 .. 31] of AnsiChar;
+  tmp: TTemp32;
 begin
   case Res.VType of
     ftNull:
@@ -6685,7 +6685,7 @@ begin
     json := sqlite3.value_text(argv[0]);
     doc.InitJsonInPlace(tmp.Init(json), JSON_FAST_FLOAT);
     tmp.Done;
-    v := doc.GetPVariantByPath(sqlite3.value_text(argv[1]));
+    v := doc.GetPVariantByPathP(sqlite3.value_text(argv[1]));
     if v <> nil then
     begin
       // update the field, then return whole JSON

@@ -33,8 +33,7 @@
 // serialization) - left undefined by default to ensure minimal impact
 
 {.$define FPCUSEVERSIONINFO}
-// link low-level fileinfo/machoreader/elfreader for TFileVersion/TExeVersion
-// from mormot.core.os.pas => disabled by default, to preserve code size
+// link POSIX fileinfo/machoreader/elfreader units to retrieve more information
 
 {.$define NOSETTHREADNAME}
 // Delphi Wintel only: if defined, SetThreadName() would not raise the "thread
@@ -150,7 +149,7 @@
     OSWINDOWS OSWINTEL OSWINARM
     OSPOSIX OSBSD OSDARWIN OSBSDDARWIN OSOPENBSD OSFREEBSD
     OSLINUX OSANDROID OSLINUXINTEL OSLINUXX64 OSLINUXX86
-    OSLINUXANDROID OSANDROIDARM64
+    OSLINUXANDROID OSANDROIDARM64 OSELF
     PUREMORMOT2
 
   FPC only:
@@ -160,8 +159,8 @@
     FPC_X64MM
 
   Delphi only:
-    ISDELPHI ISDELPHIxxx WIN32DELPHI WIN64DELPHI WINTELDELPHI WINARMDELPHI
-    DISPINVOKEBYVALUE
+    ISDELPHI ISDELPHIUNICODE ISDELPHIxxx
+    WIN32DELPHI WIN64DELPHI WINTELDELPHI WINARMDELPHI DELPHIPOSIX
 
 ********************** Conditionals **********************)
 
@@ -684,12 +683,12 @@
     {$ifend}
     {$if CompilerVersion >= 24.0} // = Delphi XE3
       {$define ISDELPHIXE3}
+      {$define ASMAESNI}
+      {$define ASMALIGN}          // .align ### inline assembler directive
     {$ifend}
     {$if CompilerVersion >= 25.0} // = Delphi XE4
       {$define ISDELPHIXE4}
       {$define FPC_OR_DELPHIXE4}  // circumvent Internal Error: C2130 on XE3
-      {$define ASMAESNI}
-      {$define ASMALIGN}          // .align ### inline assembler directive
     {$ifend}
     {$if CompilerVersion >= 26.0} // = Delphi XE5
       {$define ISDELPHIXE5}
@@ -785,8 +784,11 @@
     {$endif CPUARM64}
   {$else}
     {$define POSIXDELPHI}
-    {$define NOASMBLOCK}    // no "asm .. end" blocks support by LLVM compilers
-    {$define NOEXCEPTIONINTERCEPT}  // TODO: interception for Delphi POSIX
+    {$define NOASMBLOCK}             // no "asm" block support by LLVM compilers
+    {$define NOEXCEPTIONINTERCEPT}   // TODO: interception for Delphi POSIX
+    {$ifdef CPUX64}
+      {$define DISPINVOKE_SYSVAMD64} // use SysV AMD64 va_list layout
+    {$endif CPUX64}                  // TODO: check aarch64 ABI on Delphi
   {$endif OSWINDOWS}
   {$ifdef CPU32}
     {$define HASSLOWMUL64}  // Delphi 32-bit has slow 64-bit mul: favor shl
@@ -895,7 +897,7 @@
     {$undef FPC_CPUX64}
     {$undef FPC_PICX64}
     {$undef FPC_CPUAARCH64}
-    // the vmtAutoTable tricks seems to fail
+    // the vmtAutoTable tricks seems to fail - TODO: check again
     {$define NOPATCHVMT}
     // no static linking
     {$define NOLIBCSTATIC}
@@ -920,6 +922,7 @@
   {$endif CPU32}
   {$ifdef OSLINUX}
     {$define OSLINUXANDROID}
+    {$define OSELF}
     {$ifdef ABIX86}
       {$define OSLINUXINTEL}
       {$define OSLINUXX86}
@@ -937,6 +940,7 @@
   {$endif OSLINUX}
   {$ifdef OSANDROID}
     {$define OSLINUXANDROID}
+    {$define OSELF}
     {$ifdef ABIA64}
       {$define OSANDROIDARM64}
     {$endif ABIA64}
@@ -946,6 +950,7 @@
   {$endif OSDARWIN}
   {$ifdef OSBSD}
     {$define OSBSDDARWIN}     // OSBSDDARWIN = OSBSD or OSDARWIN
+    {$define OSELF}           // OSX has its own macho executable format
   {$endif OSBSD}
 {$endif OSWINDOW}
 
@@ -1026,9 +1031,10 @@
     // there is a linking bug with Delphi XE4 on Win64
     {$ifdef CPUX64}
       {$if (CompilerVersion = 23.0) or
+           (CompilerVersion = 24.0) or
            (CompilerVersion = 25.0) or
            (CompilerVersion = 28.0) or
-           (CompilerVersion = 29.0)}  // exactly XE2/XE4/XE7/XE8 are known to GPF
+           (CompilerVersion = 29.0)}  // exactly XE2/XE3/XE4/XE7/XE8 fail
         // other Win32/Win64 Delphi platforms "should work" (tm) as expected
         {$define NOSQLITE3STATIC}
       {$ifend}

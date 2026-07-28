@@ -498,7 +498,7 @@ type
   PSynDate = ^TSynDate;
 
   /// a cross-platform and cross-compiler TSystemTime 128-bit structure
-  // - FPC's TSystemTime in datih.inc does NOT match Windows TSystemTime fields!
+  // - on POSIX TSystemTime definition for Delphi or FPC do NOT match Windows'
   // - also used to store a Date/Time in TSynTimeZone internal structures, or
   // for fast conversion from TDateTime to its ready-to-display members
   // - DayOfWeek field is not handled by most methods by default, but could be
@@ -740,6 +740,10 @@ function DateTimeMSToString(HH, MM, SS, MS, Y, M, D: cardinal; Expanded: boolean
 // - if you care about timezones, dt value must be converted to UTC first
 // using TSynTimeZone.LocalToUtc, or tz should be properly set
 function DateTimeToHttpDate(dt: TDateTime; const tz: RawUtf8 = 'GMT'): RawUtf8; overload;
+
+/// convert some date/time to the "HTTP-date" format as defined by RFC 7231
+function DateTimeToHttpDateShort(dt: TDateTime; const tz: RawUtf8 = 'UTC'): TShort31;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// convert some "HTTP-date" format as defined by RFC 7231 into date/time
 // - wrapper around TSynSystemTime.FromHttpDate() conversion algorithm
@@ -1390,7 +1394,7 @@ begin
     AppendShortCardinal(Micro, result);
     AppendShortTwoChars(ord('u') + ord('s') shl 8, @result);
   end
-  else if Micro < 1000000 then
+  else if Micro < MicroSecsPerSec then
     AppendShortBy100(
       {$ifdef CPU32} PCardinal(@Micro)^ {$else} Micro {$endif} div 10, 'ms', result)
   else if Micro < 60000000 then
@@ -1399,11 +1403,11 @@ begin
   else if Micro < QWord(3600000000) then
     AppendShortTime(
       {$ifdef CPU32} PCardinal(@Micro)^ {$else} Micro {$endif} div 1000000, 'm', result)
-  else if Micro < QWord(86400000000 * 2) then
+  else if Micro < QWord(MicroSecsPerDay * 2) then
     AppendShortTime(Micro div 60000000, 'h', result)
   else
   begin
-    AppendShortCardinal(Micro div QWord(86400000000), result);
+    AppendShortCardinal(Micro div MicroSecsPerDay, result);
     AppendShortChar('d', @result);
   end;
 end;
@@ -1946,7 +1950,7 @@ end;
 procedure DateTimeToIso8601Var(D: TDateTime; Expanded, WithMS: boolean;
   FirstChar, QuotedChar: AnsiChar; var Result: RawUtf8);
 var
-  tmp: array[0 .. 31] of AnsiChar;
+  tmp: TTemp32;
 begin
   // D=0 is handled in DateTimeToIso8601Text()
   FastSetString(result, @tmp,
@@ -1961,11 +1965,6 @@ begin
   else
     result[0] := AnsiChar(DateTimeToIso8601(
                 @result[1], D, Expanded, FirstChar, WithMS, QuotedChar));
-end;
-
-function _DoDateTimeToText(dt: TDateTime): RawUtf8;
-begin // faster version to be injected in mormot.core.os.pas instead of RTL
-  DateTimeToIso8601Var(dt, {expanded=}true, {withms=}false, ' ', #0, result);
 end;
 
 function DateToIso8601(Date: TDateTime; Expanded: boolean): RawUtf8;
@@ -2116,7 +2115,7 @@ const
     -5, -6, -6, -7, -7, -8, -8, -9, -9,
     -10, -10, -10, -10, -11, -12, -12);
 
-  HTML_MONTH_NAMES_32: array[0..11] of array[0..3] of AnsiChar = (
+  HTML_MONTH_NAMES_32: array[0..11] of TTemp4 = (
     'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
     'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC');
 
@@ -2817,9 +2816,11 @@ begin
      (zone <> 0) then
   begin
     // need to apply some time zone shift
+    dt := ToDateTime;
+    if zone <> 0 then
+      dt := dt - zone div MinsPerDay;
     if tolocaltime then
-      dec(zone, TimeZoneLocalBias);
-    dt := ToDateTime - zone div MinsPerDay;
+      dt := UtcToLocal(dt);
     v := abs(zone mod MinsPerDay);
     if not TryEncodeTime(v div 60, v mod 60, 0, 0, t) then
       exit;
@@ -3252,6 +3253,19 @@ begin
   end;
 end;
 
+function DateTimeToHttpDateShort(dt: TDateTime; const tz: RawUtf8): TShort31;
+var
+  T: TSynSystemTime;
+begin
+  if dt = 0 then
+    result[0] := #0
+  else
+  begin
+    T.FromDateTime(dt);
+    T.ToHttpDateShort(result, tz);
+  end;
+end;
+
 function HttpDateToDateTime(const httpdate: RawUtf8; var datetime: TDateTime;
   tolocaltime: boolean): boolean;
 var
@@ -3472,7 +3486,7 @@ end;
 
 function DateTimeToUnixTime(const AValue: TDateTime): TUnixTime;
 begin
-  result := Round((AValue - UnixDateDelta) * SecsPerDay);
+  result := round((AValue - UnixDateDelta) * SecsPerDay);
 end;
 
 function UnixTimeToString(const UnixTime: TUnixTime; Expanded: boolean;
@@ -3539,7 +3553,7 @@ begin
   if AValue = 0 then
     result := 0
   else
-    result := Round((AValue - UnixDateDelta) * MilliSecsPerDay);
+    result := round((AValue - UnixDateDelta) * MilliSecsPerDay);
 end;
 
 function UnixMSTimeToString(const UnixMSTime: TUnixMSTime; Expanded: boolean;
@@ -3863,7 +3877,7 @@ end;
 
 procedure TTimeLogBits.SetText(var Dest: RawUtf8; Expanded: boolean; FirstTimeChar: AnsiChar);
 var
-  tmp: array[0..31] of AnsiChar;
+  tmp: TTemp32;
 begin
   if Value = 0 then
     FastAssignNew(Dest)
@@ -3902,7 +3916,7 @@ end;
 function TTimeLogBits.FullText(Expanded: boolean;
   FirstTimeChar, QuotedChar: AnsiChar): RawUtf8;
 var
-  tmp: array[0..31] of AnsiChar;
+  tmp: TTemp32;
 begin
   FastSetString(result, @tmp, FullText(tmp{%H-}, Expanded, FirstTimeChar, QuotedChar));
 end;
@@ -4337,7 +4351,7 @@ label
 begin
   // fast decode 00.020.006 at the end of the line
   tab := @ConvertHexToBin;
-  B := tab[P[0]];   // 00
+  B := tab[P[0]];   // 00 seconds
   if B > 9 then
     goto err;
   result := B;
@@ -4345,7 +4359,7 @@ begin
   if B > 9 then
     goto err;
   result := result * 10 + B;
-  B := tab[P[3]]; // 020
+  B := tab[P[3]]; // 020 milliseconds
   if B > 9 then
     goto err;
   result := result * 10 + B;
@@ -4357,7 +4371,7 @@ begin
   if B > 9 then
     goto err;
   result := result * 10 + B;
-  B := tab[P[7]]; // 006
+  B := tab[P[7]]; // 006 microseconds
   if B > 9 then
     goto err;
   result := result * 10 + B;
@@ -4438,7 +4452,6 @@ begin
 end;
 
 
-
 procedure InitializeUnit;
 begin
   // as expected by ParseMonth() to call FindShortStringListNoTrim()
@@ -4448,7 +4461,6 @@ begin
   // some mormot.core.text wrappers are implemented by this unit
   _VariantToUtf8DateTimeIso8601 := DateTimeToIso8601TextVar;
   _Iso8601ToDateTime            := Iso8601ToDateTime;
-  DoDateTimeToText              := _DoDateTimeToText;
 end;
 
 

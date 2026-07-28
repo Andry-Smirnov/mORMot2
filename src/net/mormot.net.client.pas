@@ -133,16 +133,34 @@ type
 type
   /// the supported authentication schemes which may be used by HTTP clients
   // - not supported by all classes (e.g. TWinINet won't support all schemes)
+  // - by design, wraNegotiatePasswordKeytab* modes only exist on POSIX/GSSAPI
+  // - serialized as its ordinal/integer value: do not change the order below
   THttpRequestAuthentication = (
     wraNone,
     wraBasic,
     wraDigest,
     wraNegotiate,
     wraNegotiateChannelBinding,
-    wraBearer);
+    wraBearer,
+    wraNegotiatePasswordKeytab,
+    wraNegotiatePasswordKeytabChannelBinding);
 
   /// pointer to some extended options for HTTP clients
   PHttpRequestExtendedOptions = ^THttpRequestExtendedOptions;
+
+  /// define THttpRequestExtendedOptions.Auth fields for HTTP clients
+  THttpRequestAuthOptions = record
+    /// the used authentication scheme
+    Scheme: THttpRequestAuthentication;
+    /// the credential user logon
+    UserName: RawUtf8;
+    /// the credential password
+    // - may be '' to use the current logged user for wraNegotiate
+    // - may be a local keytab/ccache file name for wraNegotiatePasswordKeytab*
+    Password: SpiUtf8;
+    /// the private header token value for wraBearer
+    Token: SpiUtf8;
+  end;
 
   /// a record to set some extended options for HTTP clients
   // - allow easy propagation e.g. from a TRestHttpClient* wrapper class to
@@ -168,12 +186,7 @@ type
     /// the timeout to be used for the whole connection, as supplied to Create()
     CreateTimeoutMS: integer;
     /// allow HTTP/HTTPS authentication to take place at server request
-    Auth: record
-      Scheme: THttpRequestAuthentication;
-      UserName: RawUtf8;
-      Password: SpiUtf8;
-      Token: SpiUtf8;
-    end;
+    Auth: THttpRequestAuthOptions;
     /// how many times THttpClientSocket/TWinHttp should redirect 30x responses
     // - TCurlHttp would only check for RedirectMax > 0 with no exact count
     // - TWinINet won't support this parameter
@@ -196,7 +209,11 @@ type
     /// setup web authentication using Kerberos via SSPI/GSSAPI and credentials
     // - if you want to authenticate with the current logged user, just set
     // ! Auth.Scheme := wraNegotiate;
-    procedure AuthorizeSspiUser(const UserName: RawUtf8; const Password: SpiUtf8);
+    // - wraNegotiate*ChannelBinding modes enable channel binding at TLS level
+    // - wraNegotiatePasswordKeytab* modes would expect Password to be
+    // StringToUtf8() of a local keytab/ccache full file name for authentication
+    procedure AuthorizeSspiUser(const UserName: RawUtf8; const Password: SpiUtf8;
+      NegotiateMode: THttpRequestAuthentication = wraNegotiate);
     /// setup web authentication using a given Bearer in the request headers
     procedure AuthorizeBearer(const Value: SpiUtf8);
     /// compare the Auth fields, depending on their scheme
@@ -219,6 +236,14 @@ type
     function InitFromUrl(const UrlParams: RawUtf8;
       const Secret: RawByteString = ''): boolean;
   end;
+
+const
+  /// all NEGOTIATE / Kerberos authentication modes
+  wraNegotiates =
+    [wraNegotiate,
+     wraNegotiateChannelBinding,
+     wraNegotiatePasswordKeytab,
+     wraNegotiatePasswordKeytabChannelBinding];
 
 function ToText(wra: THttpRequestAuthentication): PShortString; overload;
 
@@ -265,6 +290,8 @@ type
   THttpPartial = record
     /// genuine 31-bit positive number, 0 if empty/recyclable after ReleaseSlot
     ID: THttpPartialID;
+    /// the internal state of this partial download
+    Flags: set of (pFinished, pHash);
     /// the expected full size of this download
     FullSize: Int64;
     /// the timestamp to be affected to the file, when it is fully downloaded
@@ -273,8 +300,6 @@ type
     PartFile: TFileName;
     /// background HTTP requests which are waiting for data on this download
     HttpContext: array of PHttpRequestContext;
-    /// the internal state of this partial download
-    Flags: set of (pFinished, pHash);
     /// up to 512-bit of raw binary hash, prefixed by THashAlgo identifier
     // - actual file hash for THttpPeerCache, but URI hash for THttpProxyServer
     Digest: THashDigest;
@@ -437,7 +462,7 @@ type
     Alternate: IWGetAlternate;
     /// how Alternate should operate this file
     AlternateOptions: TWGetAlternateOptions;
-    /// how much time this connection should be kept alive
+    /// how much milliseconds time this connection should be kept alive
     // - as redirected to the internal Request() parameter
     KeepAlive: cardinal;
     /// allow to continue an existing .part file download
@@ -726,8 +751,9 @@ type
     /// setup web authentication using Kerberos via SSPI/GSSAPI for this instance
     // - will store the user/paswword credentials, and set OnAuthorizeSspi callback
     // - if Password is '', will search for an existing Kerberos token on UserName
-    // - set UserName='' and Password='FILE:/path/to/my.keytab' to use a keytab
-    // - an in-memory token will be used to authenticate the connection
+    // - wraNegotiate*ChannelBinding modes enable channel binding at TLS level
+    // - wraNegotiatePasswordKeytab* modes would expect Password to be
+    // StringToUtf8() of a local keytab/ccache full file name for authentication
     // - KerberosSpn could be only a 'MYDOMAIN.TLD' domain name - this method
     // will compute the full 'HTTP/server@MYDOMAIN.TLD' SPN
     // - if KerberosSpn is not set, 'HTTP/server@MYDOMAIN.TLD' will be used,
@@ -736,7 +762,8 @@ type
     // session-wide token (like kinit), not a transient token in memory - you
     // may prefer to load a proper libgssapi_krb5.dylib instead
     procedure AuthorizeSspiUser(const UserName: RawUtf8; const Password: SpiUtf8;
-      const KerberosSpn: RawUtf8 = '');
+      const KerberosSpn: RawUtf8 = '';
+      NegotiateMode: THttpRequestAuthentication = wraNegotiate);
     /// web authentication callback of the current logged user using Kerberos
     // - calling the Security Support Provider Interface (SSPI) API on Windows,
     // or GSSAPI on Linux (only Kerboros)
@@ -1506,6 +1533,8 @@ type
     /// returns an additional error message after the last Request() call
     // - is '' on success, or is typically an exception text with its message
     function LastError: string;
+    /// returns the last server URI from Connected() or Request()
+    function LastServer: TUri;
     /// returns the HTTP headers as returned by a previous call to Request()
     function Headers: RawUtf8;
     /// retrieve a HTTP header text value after the last Request() call
@@ -1524,6 +1553,7 @@ type
     fBody: RawByteString;
     fLastError: string;
     fStatus: integer;
+    fLastServer: TUri;
   public
     /// finalize the connection
     destructor Destroy; override;
@@ -1545,6 +1575,7 @@ type
     function Status: integer;
     function Headers: RawUtf8;
     function LastError: string;
+    function LastServer: TUri;
     function Header(const Name: RawUtf8; out Value: RawUtf8): boolean; overload;
     function Header(const Name: RawUtf8; out Value: Int64): boolean; overload;
   end;
@@ -1875,6 +1906,16 @@ type
       read fBaseUri write fBaseUri;
   end;
 
+var
+  /// default options for mormot.net.openapi client class constructors
+  OPENAPI_OPTIONS: TJsonClientOptions =
+    [jcoParseTolerant, jcoHttpErrorRaise];
+  /// default encoding for mormot.net.openapi client class constructors
+  OPENAPI_URLENCODER: TUrlEncoder =
+    [ueEncodeNames, ueSkipVoidString, ueSkipVoidValue,
+     ueStarNameIsCsv, ueEqualNameIsDirect];
+
+
 /// a simple wrapper to FindRawUtf8() which converts -1 into 0
 // - so could be used for the enums as generated by mormot.net.openapi,
 // which have the first item always being ##None as '', e.g. defined as
@@ -1882,6 +1923,9 @@ type
 // ! const ENUM1_TXT: array[TEnum1] of RawUtf8 = ('', 'one', 'and 2');
 function FindCustomEnum(const CustomText: array of RawUtf8;
   const Value: RawUtf8): integer;
+
+/// convert a record using RTTI into URI-encoded mormot.net.openapi "deepObject"
+function DeepObjectEncode(Value: pointer; Info: PRttiInfo; const Prefix: RawUtf8): RawUtf8;
 
 
 { ************** Cached HTTP Connection to a Remote Server }
@@ -2004,6 +2048,16 @@ type
   /// exception class raised by SendEmail() on raw SMTP process
   ESendEmail = class(ESynException);
 
+  /// how TLS should be applied when sending an email via SendEmail()
+  // - stlsNone: plain text connection (typically port 25)
+  // - stlsImplicit: TLS from the first byte of the connection (typically port 465)
+  // - stlsStartTls: plain connection upgraded to TLS via the STARTTLS command
+  // after EHLO (typically the submission port 587, as expected by most providers)
+  TSmtpTls = (
+    stlsNone,
+    stlsImplicit,
+    stlsStartTls);
+
 /// send an email using the SMTP protocol
 // - retry true on success
 // - the Subject is expected to be in plain 7-bit ASCII, so you could use
@@ -2012,11 +2066,15 @@ type
 // - you can optionally set another encoding charset or force TextCharSet='' to
 // expect the 'Content-Type:' to be set in Headers and Text to be the raw body
 // (e.g. a multi-part encoded message)
+// - set Tls to stlsImplicit for TLS-from-start (port 465) or stlsStartTls to
+// upgrade a plain connection via the STARTTLS command (port 587)
+// - optional TlsCtx could supply a TNetTlsContext to customize the TLS handshake
+// (e.g. TlsCtx^.IgnoreCertificateErrors), used for stlsImplicit and stlsStartTls
 function SendEmail(const Server, From, CsvDest, Subject: RawUtf8;
   const Text: RawByteString; const Headers: RawUtf8 = ''; const User: RawUtf8 = '';
   const Pass: RawUtf8 = ''; const Port: RawUtf8 = '25';
-  const TextCharSet: RawUtf8  =  'ISO-8859-1'; TLS: boolean = false;
-  TLSIgnoreCertError: boolean = false): boolean; overload;
+  const TextCharSet: RawUtf8  =  'ISO-8859-1'; Tls: TSmtpTls = stlsNone;
+  TlsCtx: PNetTlsContext = nil): boolean; overload;
 
 /// send an email using the SMTP protocol via a TSmtpConnection definition
 // - retry true on success
@@ -2026,11 +2084,12 @@ function SendEmail(const Server, From, CsvDest, Subject: RawUtf8;
 // - you can optionally set another encoding charset or force TextCharSet='' to
 // expect the 'Content-Type:' to be set in Headers and Text to be the raw body
 // (e.g. a multi-part encoded message)
-// - TLS will be forced if the port is either 465 or 587
+// - if Tls is left to stlsNone, it will be guessed from the port number:
+// stlsImplicit for port 465, or stlsStartTls for port 587
 function SendEmail(const Server: TSmtpConnection;
   const From, CsvDest, Subject: RawUtf8; const Text: RawByteString;
   const Headers: RawUtf8 = ''; const TextCharSet: RawUtf8  = 'ISO-8859-1';
-  TLS: boolean = false; TLSIgnoreCertError: boolean = false): boolean; overload;
+  Tls: TSmtpTls = stlsNone; TlsCtx: PNetTlsContext = nil): boolean; overload;
 
 /// convert a supplied subject text into an Unicode encoding
 // - will convert the text into UTF-8 and append '=?UTF-8?B?'
@@ -2354,7 +2413,7 @@ begin // optimized O(n) loop with aggressively inlined HashDigestEqual()
   if result = nil then
     exit;
   n := PDALen(PAnsiChar(result) - _DALEN)^ + _DAOFF;
-  l := HASH_SIZE[PHashAlgo(h)^] - (SizeOf(PtrInt) - 1);
+  l := HASH_SIZE[PHashAlgo(h)^] - (SizeOf(PtrInt) - SizeOf(THashAlgo));
   repeat
     if (result^.ID <> 0) and // not a recycled slot
        (pHash in result^.Flags) then
@@ -2863,20 +2922,18 @@ begin
   Create(fExtendedOptions.CreateTimeoutMS);
   if Assigned(aOnLog) then
     OnLog := aOnLog; // allow to debug ASAP
-  case fExtendedOptions.Auth.Scheme of
-    wraDigest:
-      begin
-        fOnAuthorize := OnAuthorizeDigest; // as AuthorizeDigest()
-        fAuthDigestAlgo := daMD5_Sess;
-      end;
-    wraNegotiate,
-    wraNegotiateChannelBinding:
-      {$ifdef DOMAINRESTAUTH}
-      fOnAuthorize := OnAuthorizeSspi;     // as AuthorizeSspiUser()
-      {$else}
-      EHttpSocket.RaiseUtf8('%.Open: unsupported wraNegotiate', [self]);
-      {$endif DOMAINRESTAUTH}
-  end;
+  if fExtendedOptions.Auth.Scheme = wraDigest then
+  begin
+    fOnAuthorize := OnAuthorizeDigest; // as AuthorizeDigest()
+    fAuthDigestAlgo := daMD5_Sess;
+  end
+  else if fExtendedOptions.Auth.Scheme in wraNegotiates then
+    {$ifdef DOMAINRESTAUTH}
+    fOnAuthorize := OnAuthorizeSspi;     // as AuthorizeSspiUser()
+    {$else}
+    EHttpSocket.RaiseUtf8('%.Open: unsupported AuthScheme=%',
+      [self, ToText(fExtendedOptions.Auth.Scheme)^]);
+    {$endif DOMAINRESTAUTH}
   TLS := fExtendedOptions.TLS;
   pu := GetSystemProxyUri(aUri.URI, fExtendedOptions.Proxy, temp);
   if pu <> nil then
@@ -3578,7 +3635,7 @@ begin
     parthash := params.Hasher.GetHashFileExt;
     if parthash <> '' then
     begin
-      parthash := url + parthash; // e.g. 'files/somefile.zip.md5'
+      parthash := Join([url, parthash]); // e.g. 'files/somefile.zip.md5'
       if Get(parthash, 5000) = 200 then
         // handle 'c7d8e61e82a14404169af3fa5a72be85 *file.name' format
         params.Hash := Split(TrimU(Http.Content), ' ');
@@ -3844,7 +3901,8 @@ var
   sc: TSecContext;
   bak: RawUtf8;
   unauthstatus: integer;
-  datain, dataout: RawByteString;
+  a: ^THttpRequestAuthOptions;
+  bin, bout: RawByteString;
   channelbindingtemp: THash512Rec;
 begin
   if (Sender = nil) or
@@ -3856,20 +3914,31 @@ begin
   try
     // Kerberos + TLS may require tls-server-end-point channel binding
     if Assigned(Sender.Secure) and
-       (Sender.AuthScheme = wraNegotiateChannelBinding) then
+       (Sender.AuthScheme in [wraNegotiateChannelBinding,
+                              wraNegotiatePasswordKeytabChannelBinding]) then
       KerberosChannelBinding(Sender.Secure, sc, channelbindingtemp);
     // main Kerberos loop
     repeat
-      FindNameValue(Sender.Http.Headers, pointer(InHeaderUp), RawUtf8(datain));
-      datain := Base64ToBin(TrimU(datain));
-      if Sender.fExtendedOptions.Auth.Password <> '' then // from AuthorizeSspiUser()
-        ClientSspiAuthWithPassword(sc, datain, Sender.fExtendedOptions.Auth.UserName,
-          Sender.fExtendedOptions.Auth.Password, Sender.AuthorizeSspiSpn, dataout)
-      else                               // use current logged user
-        ClientSspiAuth(sc, datain, Sender.AuthorizeSspiSpn, dataout);
-      if dataout = '' then
+      FindNameValue(Sender.Http.Headers, pointer(InHeaderUp), RawUtf8(bin));
+      bin := Base64ToBin(TrimU(bin));
+      a := @Sender.fExtendedOptions.Auth;
+      if a^.Password <> '' then
+        // from AuthorizeSspiUser()
+        {$ifdef OSPOSIX}
+        if Sender.AuthScheme in [wraNegotiatePasswordKeytab,
+                                 wraNegotiatePasswordKeytabChannelBinding] then
+          ClientSspiAuthWithPassword(sc, bin, a^.UserName, '',
+            Sender.AuthorizeSspiSpn, bout, nil, {local=}Utf8ToString(a^.Password))
+        else
+        {$endif OSPOSIX}
+          ClientSspiAuthWithPassword(sc, bin, a^.UserName, a^.Password,
+            Sender.AuthorizeSspiSpn, bout)
+      else
+        // no password supplied: try current logged user
+        ClientSspiAuth(sc, bin, Sender.AuthorizeSspiSpn, bout);
+      if bout = '' then
         break;
-      Context.header := OutHeader + BinToBase64(dataout);
+      Context.header := OutHeader + BinToBase64(bout);
       if bak <> '' then
         Append(Context.header, #13#10, bak);
       Sender.RequestInternal(Context);
@@ -3895,13 +3964,14 @@ begin
 end;
 
 procedure THttpClientSocket.AuthorizeSspiUser(const UserName: RawUtf8;
-  const Password: SpiUtf8; const KerberosSpn: RawUtf8);
+  const Password: SpiUtf8; const KerberosSpn: RawUtf8;
+  NegotiateMode: THttpRequestAuthentication);
 begin
   if not InitializeDomainAuth then
     EHttpSocket.RaiseUtf8('%.AuthorizeSspiUser: no % available on this system',
       [self, SECPKGNAMEAPI]);
   fOnAuthorize := nil;
-  fExtendedOptions.AuthorizeSspiUser(UserName, Password);
+  fExtendedOptions.AuthorizeSspiUser(UserName, Password, NegotiateMode);
   fOnAuthorize := OnAuthorizeSspi;
   // prepare a Service Principal Name (SPN) - maybe partial
   if KerberosSpn <> '' then
@@ -4026,7 +4096,7 @@ begin
   Auth.Password := Password;
   Auth.Token := '';
   if (UserName = '') and
-     not (Scheme in [wraNegotiate, wraNegotiateChannelBinding]) then
+     not (Scheme in wraNegotiates) then
     Scheme := wraNone;
   Auth.Scheme := Scheme;
 end;
@@ -4044,9 +4114,10 @@ begin
 end;
 
 procedure THttpRequestExtendedOptions.AuthorizeSspiUser(
-  const UserName: RawUtf8; const Password: SpiUtf8);
+  const UserName: RawUtf8; const Password: SpiUtf8; NegotiateMode: THttpRequestAuthentication);
 begin
-  AuthorizeUserPassword(UserName, Password, wraNegotiate);
+  if NegotiateMode in wraNegotiates then
+    AuthorizeUserPassword(UserName, Password, NegotiateMode);
 end;
 
 procedure THttpRequestExtendedOptions.AuthorizeBearer(const Value: SpiUtf8);
@@ -4067,14 +4138,13 @@ begin
             (Auth.Scheme = Another^.Auth.Scheme);
   if result then
     case Auth.Scheme of
-      wraBasic,
-      wraDigest,
-      wraNegotiate,
-      wraNegotiateChannelBinding:
-        result := (Auth.UserName = Another^.Auth.UserName) and
-                  (Auth.Password = Another^.Auth.Password);
+      wraNone:
+        ;
       wraBearer:
         result := (Auth.Token = Another^.Auth.Token);
+    else
+      result := (Auth.UserName = Another^.Auth.UserName) and
+                (Auth.Password = Another^.Auth.Password);
     end;
 end;
 
@@ -4282,17 +4352,17 @@ function THttpRequest.Request(const url, method: RawUtf8; KeepAlive: cardinal;
   out OutHeader: RawUtf8; out OutData: RawByteString): integer;
 var
   data: RawByteString;
-  acceptEnc, contentEnc, aUrl: RawUtf8;
+  acceptEnc, contentEnc, u: RawUtf8;
   comp: PHttpSocketCompressRec;
   upload: boolean;
 begin
   if (url = '') or
      (url[1] <> '/') then
-    aUrl := '/' + url
+    u := Join(['/', url])
   else // need valid url according to the HTTP/1.1 RFC
-    aUrl := url;
+    u := url;
   fKeepAlive := KeepAlive;
-  InternalCreateRequest(method, aUrl); // should raise an exception on error
+  InternalCreateRequest(method, u); // should raise an exception on error
   try
     // common headers
     InternalAddHeader(InHeader);
@@ -5041,7 +5111,7 @@ procedure TCurlHttp.InternalCreateRequest(const aMethod, aUrl: RawUtf8);
 const
   CERT_PEM: RawUtf8 = 'PEM';
 begin
-  fIn.URL := fRootURL + aUrl;
+  fIn.URL := Join([fRootURL, aUrl]);
   if fExtendedOptions.RedirectMax > 0 then // url redirection (as TWinHttp)
     curl.easy_setopt(fHandle, coFollowLocation, 1);
   //curl.easy_setopt(fHandle,coTCPNoDelay,0); // disable Nagle
@@ -5113,6 +5183,8 @@ const
     [cauDigest],    // wraDigest
     [cauNegotiate], // wraNegotiate
     [cauNegotiate], // wraNegotiateChannelBinding
+    [cauNegotiate], // wraNegotiatePasswordKeytab
+    [cauNegotiate], // wraNegotiatePasswordKeytabChannelBinding
     [cauBearer]);   // wraBearer
 
 procedure TCurlHttp.InternalSendRequest(const aMethod: RawUtf8;
@@ -5261,6 +5333,11 @@ begin
   result := fLastError;
 end;
 
+function THttpClientAbstract.LastServer: TUri;
+begin
+  result := fLastServer;
+end;
+
 function THttpClientAbstract.Headers: RawUtf8;
 begin
   result := fHeaders;
@@ -5332,6 +5409,7 @@ end;
 
 procedure TSimpleHttpClient.RawConnect(const Server: TUri);
 begin
+  fLastServer := Server;
   {$ifdef USEHTTPREQUEST}
   if (Server.Https or
       (fConnectOptions.Proxy <> '')) and
@@ -5439,6 +5517,18 @@ begin
     result := FindRawUtf8(@CustomText[1], Value, high(CustomText), {casesens=}true) + 1
   else
     result := 0;
+end;
+
+function DeepObjectEncode(Value: pointer; Info: PRttiInfo; const Prefix: RawUtf8): RawUtf8;
+var
+  json: RawUtf8;
+begin
+  FastAssignNew(result);
+  if IsRecordDefaultOrVoid(Value, Info) then
+    exit;
+  SaveJson(Value^, Info, [twoForceJsonExtended, twoIgnoreDefaultInRecord], json);
+  result := UrlEncodeJsonObjectBuffer('', pointer(json), [], {include?=}false,
+    {deepObjectName=}Prefix);
 end;
 
 
@@ -5825,7 +5915,7 @@ begin
   Response.Method := Method;
   fSafe.Lock; // blocking thread-safe HTTP request
   try
-    fServerUri.Address := fBaseUri + a;
+    fServerUri.Address := Join([fBaseUri, a]);
     Response.Url := fServerUri.Root; // excluding ?parameters=...
     fHttp.Request(fServerUri, Method, h, b, t, fKeepAlive);
     Response.Status := fHttp.Status;
@@ -6032,29 +6122,43 @@ end;
 
 function SendEmail(const Server: TSmtpConnection;
   const From, CsvDest, Subject: RawUtf8; const Text: RawByteString;
-  const Headers, TextCharSet: RawUtf8; TLS, TLSIgnoreCertError: boolean): boolean;
+  const Headers, TextCharSet: RawUtf8; Tls: TSmtpTls; TlsCtx: PNetTlsContext): boolean;
 begin
+  if Tls = stlsNone then // guess the TLS mode from the well-known port numbers
+    if Server.Port = '465' then
+      Tls := stlsImplicit
+    else if Server.Port = '587' then
+      Tls := stlsStartTls;
   result := SendEmail(
     Server.Host, From, CsvDest, Subject, Text, Headers,
-    Server.User, Server.Pass, Server.Port, TextCharSet,
-    TLS or (Server.Port = '465') or (Server.Port = '587'), TLSIgnoreCertError);
+    Server.User, Server.Pass, Server.Port, TextCharSet, Tls, TlsCtx);
 end;
 
 function SendEmail(const Server, From, CsvDest, Subject: RawUtf8;
   const Text: RawByteString; const Headers, User, Pass, Port, TextCharSet: RawUtf8;
-  TLS, TLSIgnoreCertError: boolean): boolean;
+  Tls: TSmtpTls; TlsCtx: PNetTlsContext): boolean;
 var
   sock: TCrtSocket;
 
-  procedure Expect(const answer: RawUtf8);
+  // send the optional Command, read the whole (multi-line) answer, check the
+  // reply code, raise ESendEmail on mismatch, and return the full answer text
+  // - Command = '' is used to read the initial greeting or a previous send
+  function Exec(const Command, Answer: RawUtf8): RawUtf8;
   var
     res: RawUtf8;
   begin
+    if Command <> '' then
+    begin
+      sock.SockSend(Command);
+      sock.SockSendFlush;
+    end;
+    result := '';
     repeat
       sock.SockRecvLn(res);
+      Append(result, res, #13#10);
     until (Length(res) < 4) or
-          (res[4] <> '-'); // - indicates there are other headers following
-    if IdemPChar(pointer(res), pointer(answer)) then
+          (res[4] <> '-'); // '-' indicates there are other lines following
+    if IdemPChar(pointer(res), pointer(Answer)) then
       exit;
     if res = '' then
       res := 'Undefined Error';
@@ -6062,69 +6166,88 @@ var
       [User, Server, Port, res]);
   end;
 
-  procedure Exec(const Command, answer: RawUtf8);
-  begin
-    sock.SockSend(Command);
-    sock.SockSendFlush;
-    Expect(answer)
-  end;
-
 var
   P: PUtf8Char;
-  rec, ToList, head: RawUtf8;
+  rec, ToList, head, caps, subj, frm: RawUtf8;
 begin
   result := false;
   P := pointer(CsvDest);
   if P = nil then
     exit;
-  sock := SocketOpen(Server, Port, TLS, nil, nil, TLSIgnoreCertError);
+  sock := SocketOpen(Server, Port, {tls=}Tls = stlsImplicit, TlsCtx, nil);
   if sock <> nil then
   try
-    sock.CreateSockIn; // we use SockIn for buffered SockRecvLn() in Expect()
-    Expect('220');
+    sock.CreateSockIn; // we use SockIn for buffered SockRecvLn() in Exec()
+    Exec('', '220');
+    // EHLO is always sent first: needed for STARTTLS and AUTH capabilities
+    caps := Exec(Join(['EHLO ', Server]), '250');
+    if Tls = stlsStartTls then
+    begin
+      // upgrade the plain connection to TLS via the STARTTLS command
+      Exec('STARTTLS', '220');
+      if TlsCtx <> nil then
+        sock.TLS := TlsCtx^; // apply the caller TLS options before the handshake
+      sock.DoTlsAfter(cstaConnect); // perform the TLS handshake on this socket
+      caps := Exec(Join(['EHLO ',  Server]), '250'); // re-issue EHLO over TLS
+    end;
     if (User <> '') and
        (Pass <> '') then
-    begin
-      Exec('EHLO ' + Server, '25');
-      Exec('AUTH LOGIN', '334');
-      Exec(BinToBase64(User), '334');
-      Exec(BinToBase64(Pass), '235');
-    end
-    else
-      Exec('HELO ' + Server, '25');
+      if PosI('LOGIN', caps) <> 0 then
+      begin
+        Exec('AUTH LOGIN', '334');
+        Exec(BinToBase64(User), '334');
+        Exec(BinToBase64(Pass), '235');
+      end
+      else // AUTH PLAIN fallback: base64(#0 user #0 pass)
+        Exec(Join(['AUTH PLAIN ', BinToBase64(Join([#0, User, #0, Pass]))]), '235');
     sock.SockSendLine(['MAIL FROM:<', From, '>']);
     sock.SockSendFlush;
-    Expect('250');
+    Exec('', '250');
     repeat
       GetNextItem(P, ',', rec);
       TrimSelf(rec);
       if rec = '' then
         continue;
       if PosExChar('<', rec) = 0 then
-        rec := '<' + rec + '>';
-      Exec('RCPT TO:' + rec, '25');
+        rec := Join(['<', rec, '>']);
+      Exec(Join(['RCPT TO:', rec]), '25');
       if {%H-}ToList = '' then
         Join([#13#10'To: ', rec], ToList)
       else
         Append(ToList, ', ', rec);
     until P = nil;
     Exec('DATA', '354');
-    sock.SockSendLine([
-      'Subject: ', Subject, #13#10 +
-      'From: ', From, ToList]);
+    // merge the From/Subject parameters with any matching lines in Headers:
+    // a non-empty parameter wins (its header duplicate is removed), an empty
+    // parameter is filled from the corresponding header value
     head := trimU(Headers);
+    subj := Subject;
+    frm := From;
+    if subj = '' then
+      GetHeader(head, 'Subject', subj);
+    if frm = '' then
+      GetHeader(head, 'From', frm);
+    head := DeleteHeader(head, 'Subject');
+    head := DeleteHeader(head, 'From');
+    sock.SockSendLine(['Subject: ', subj, (#13#10 +
+                       'From: '), frm, ToList]);
     if (TextCharSet <> '') or
        (head = '') then
       sock.SockSend([
-        'Content-Type: text/plain;charset=', TextCharSet, #13#10 +
-        'Content-Transfer-Encoding: 8bit']);
+        'Content-Type: text/plain;charset=', TextCharSet, (#13#10 +
+        'Content-Transfer-Encoding: 8bit')]);
     if head <> '' then
       sock.SockSendHeaders(head); // normalizing CRLF
     sock.SockSendCRLF;            // end of headers
     sock.SockSend(Text);
     Exec('.', '25');
-    Exec('QUIT', '22');
-    result := true;
+    result := true; // the message is accepted once the final '.' returns 250
+    try
+      Exec('QUIT', '221'); // polite session close (best effort)
+    except
+      on Exception do
+        ; // some servers close right after '.', so ignore any QUIT error
+    end;
   finally
     sock.Free;
   end;
@@ -6210,12 +6333,33 @@ begin
 end;
 
 
+var
+  __RemoteResource: function(const Uri: RawUtf8; var Res: RawByteString): boolean;
+
+function _CryptRemoteResource(const Uri: RawUtf8; var Res: RawByteString): boolean;
+var
+  status: integer;
+begin
+  if IsHttp(Uri) then
+  begin
+    Res := HttpGet(Uri, {inhead=}'', {outhead=}nil, {notsock=}false,
+      @status, {timeout=}0, {forcesocket=}false, {ignorecerterror=}true);
+    result := StatusCodeIsSuccess(status);
+  end
+  else
+    result := Assigned(__RemoteResource) and
+              __RemoteResource(Uri, Res); // try next protocol
+end;
+
+
 procedure InitializeUnit;
 begin
   NewSocketAddressCache := TNewSocketAddressCache.Create(600); // 10 min timeout
   NetClientProtocols := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray),
     TypeInfo(TMethodDynArray), {caseinsensitive=}true);
   RegisterNetClientProtocol('file', TNetClientProtocolFile.Create.OnRequest);
+  __RemoteResource := CryptRemoteResource; // cascaded calls
+  CryptRemoteResource := _CryptRemoteResource;
 end;
 
 procedure FinalizeUnit;
