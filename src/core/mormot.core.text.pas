@@ -544,8 +544,7 @@ type
   // - by default we rely on UTF-8 encoding (which is mandatory in the RFC 8259)
   // but you can use jsonEscapeUnicode to produce pure 7-bit ASCII output,
   // with \u#### escape of non-ASCII chars, e.g. as default python json.dumps
-  // - jsonNoEscapeUnicode will search for any \u#### pattern and generate pure
-  // UTF-8 output instead
+  // - jsonNoEscapeUnicode replaces any \u#### pattern by pure UTF-8 output
   // - those features are not implemented in this unit, but in mormot.core.json
   TTextWriterJsonFormat = (
     jsonCompact,
@@ -627,6 +626,10 @@ type
     /// the data will be written to an internal RawUtf8 using the 8KB stack buffer
     // - fDest will be pointer(RawUtf8), not a true TRawByteStringStream
     constructor CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer); overload;
+    /// the data will be appended to an existing RawUtf8 using the 8KB stack buffer
+    // - fDest will be pointer(RawUtf8), not a true TRawByteStringStream
+    constructor CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer;
+      var aAppendTo: RawUtf8); overload;
     /// the data will be written to an external file
     // - you should call explicitly FlushFinal or FlushToStream to write
     // any pending data to the file
@@ -1793,7 +1796,7 @@ function AnyVariantToDouble(const Value: Variant; out V: double): boolean;
 
 /// convert any numerical or text Variant into a 64-bit integer
 // - call first VariantToInt64() then GetInt64Bool() via VariantToTempUtf8()
-// - V=null or any not integer-shaped value will return false
+// - V=null will return true/0, but any not integer-shaped value will return false
 function AnyVariantToInteger(const Value: Variant; out V: Int64): boolean;
 
 /// convert any numerical or text Variant into a 64-bit integer or a given default
@@ -1919,7 +1922,7 @@ procedure VariantToAdder(var Adder: TSynTempAdder; const V: variant;
 // - note that, due to a Delphi compiler limitation, cardinal values should be
 // type-casted to Int64() (otherwise the integer mapped value will be converted)
 // - any supplied TObject instance will be written as their class name
-// - Res.Text may NOT be #0 terminated if the TVarRec is a shortstring
+// - Res.Text may NOT be #0 terminated if the TVarRec is a ShortString
 // - you MUST eventually release any TempRawUtf8 by calling TempUtf8Done(Res)
 function VarRecToTempUtf8(V: PVarRec; var Res: TTempUtf8;
   wasString: PBoolean = nil): boolean;
@@ -2665,11 +2668,18 @@ function CardinalToHexLower(aCardinal: cardinal): RawUtf8;
 /// fast conversion from a cardinal value into hexa chars, ready to be displayed
 // - use internally BinToHexDisplay()
 // - such result type would avoid a string allocation on heap
-function CardinalToHexShort(aCardinal: cardinal): TShort16;
+function CardinalToHexShort(aCardinal: cardinal): TShort15;
 
 /// compute the hexadecimal representation of the crc32 checkum of a given text
 // - wrapper around CardinalToHex(crc32c(...))
 function crc32cUtf8ToHex(const str: RawUtf8): RawUtf8;
+
+/// compute the crc32c of the UTF-8 representation of a string/TFileName
+function crc32cString(const str: string): cardinal;
+
+/// compute the hexadecimal crc32c of the UTF-8 of a string/TFileName
+function crc32cStringToHexShort(const str: string): TShort15;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// fast conversion from a Int64 value into hexa chars, ready to be displayed
 // - use internally BinToHexDisplay()
@@ -3166,17 +3176,14 @@ var
   ext: TFileName;
   P: PChar;
 begin
-  result := -1;
-  P := pointer(CsvExt);
   ext := ExtractExt(FileName, {withoutdot=}true);
-  if (P = nil) or
-     (ext = '') then
-    exit;
-  repeat
-    inc(result);
+  result := 0;
+  P := pointer(CsvExt); // allow void extension e.g. for POSIX exe as 'exe,'
+  while P <> nil do
     if SameTextS(GetNextItemString(P), ext) then
-      exit;
-  until P = nil;
+      exit
+    else
+      inc(result);
   result := -1;
 end;
 
@@ -4300,6 +4307,14 @@ end;
 constructor TTextWriter.CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer);
 begin
   SetOwnedRawUtf8(aStackBuf);
+end;
+
+constructor TTextWriter.CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer;
+  var aAppendTo: RawUtf8);
+begin
+  SetOwnedRawUtf8(aStackBuf);
+  pointer(fDest) := pointer(aAppendTo); // will now own this instance
+  pointer(aAppendTo) := nil;
 end;
 
 constructor TTextWriter.CreateOwnedFileStream(
@@ -5716,7 +5731,7 @@ end;
 procedure TTextWriter.AddOnSameLine(P: PUtf8Char; Len: PtrInt);
 var
   i, s: PtrInt;
-begin // mostly used for TSynLog shortstring append or Reformat() comments
+begin // mostly used for TSynLog ShortString append or Reformat() comments
   i := 0;
   if (P <> nil) and
      (i < Len) then
@@ -8753,16 +8768,12 @@ var
   tmp: TTempUtf8;
   d: double;
 begin
-  result := false;
-  if VarIsEmptyOrNull(Value) then // null means no value, so not a valid integer
-    exit;
   result := true;
   if VariantToInt64(Value, V) then
-    exit; // direct conversion from an integer value
+    exit; // direct conversion from an integer value - null would return 0
   if VariantToDouble(Value, d) then
   begin
     V := trunc(d); // better truncate than convert to TTempUtf8
-    result := true;
     exit;
   end;
   VariantToTempUtf8(Value, tmp, [vfNoAlloc, vfNullAsVoid]);
@@ -8771,7 +8782,8 @@ end;
 
 function AnyVariantToIntegerDef(const V: Variant; Default: Int64): Int64;
 begin
-  if not AnyVariantToInteger(V, result) then
+  if VarIsEmptyOrNull(V) or
+     not AnyVariantToInteger(V, result) then
     result := Default;
 end;
 
@@ -10403,7 +10415,7 @@ function DefaultSynLogExceptionToStr(WR: TTextWriter;
   const Context: TSynLogExceptionContext; WithAdditionalInfo: boolean): boolean;
 {$ifdef OSWINDOWS} // no TSynLogExceptionContext.AdditionalInfo() on POSIX
 var
-  s: shortstring;
+  s: ShortString;
 {$endif OSWINDOWS}
 begin
   WR.AddClassName(Context.EClass);
@@ -11148,7 +11160,7 @@ begin
   BinToHexDisplayLower(@aPointer, @result[1], ord(result[0]) shr 1);
 end;
 
-function CardinalToHexShort(aCardinal: cardinal): TShort16;
+function CardinalToHexShort(aCardinal: cardinal): TShort15;
 begin
   result[0] := AnsiChar(SizeOf(aCardinal) * 2);
   BinToHexDisplay(@aCardinal, @result[1], SizeOf(aCardinal));
@@ -11157,6 +11169,21 @@ end;
 function crc32cUtf8ToHex(const str: RawUtf8): RawUtf8;
 begin
   result := CardinalToHex(crc32c(0, pointer(str), length(str)));
+end;
+
+function crc32cString(const str: string): cardinal;
+var
+  temp: TSynTempBuffer;
+  p: pointer; // in explicit two steps for safety
+begin
+  p := StringToUtf8Temp(str, temp); // returns str if already ASCII-7 or UTF-8
+  result := crc32c(0, p, temp.len);
+  temp.Done;
+end;
+
+function crc32cStringToHexShort(const str: string): TShort15;
+begin
+  result := CardinalToHexShort(crc32cString(str));
 end;
 
 function ToHexShort(P: pointer; Len: PtrInt): TShort64;

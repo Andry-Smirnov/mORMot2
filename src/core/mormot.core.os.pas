@@ -79,9 +79,18 @@ const
   /// human-friendly alias to open a file for exclusive writing ($20)
   fmShareRead      = fmShareDenyWrite;
   /// human-friendly alias to open a file for exclusive reading ($30)
-  fmShareWrite     = {$ifdef DELPHIPOSIX} fmShareDenyNone {$else} fmShareDenyRead {$endif};
+  // - use raw FPC/Delphi RTL value fmShareDenyRead to avoid "platform" warnings
+  fmShareWrite     = {$ifdef DELPHIPOSIX} fmShareDenyNone {$else} $0030 {$endif};
   /// human-friendly alias to open a file with no read/write exclusion ($40)
   fmShareReadWrite = fmShareDenyNone;
+  /// hidden file attribute ($02) - i.e. the Delphi/FPC RTL faHidden value
+  faHiddenFile     = $0002;
+  /// system file attribute ($04) - i.e. the Delphi/FPC RTL faSysFile value
+  faSystemFile     = $0004;
+  /// DOS volume label attribute ($08) - i.e. the Delphi/FPC RTL faVolumeID value
+  faVolumeLabel    = $0008;
+  /// WinAPI FILE_ATTRIBUTE_REPARSE_POINT - i.e. the Delphi/FPC RTL faSymLink value
+  faSymbolicLink   = $0400;
 
   /// execute FileOpen/TFileStreamEx.Create for reading without exclusion
   fmOpenReadShared = fmOpenRead or fmShareReadWrite;
@@ -1574,10 +1583,10 @@ type
     // - e.g. 'C:\Dev\lib\SQLite3\exe\TestSQL3.exe 1.2.3.123 (2011-03-29 11:09:06)'
     ProgramFullSpec: RawUtf8;
     /// the main executable file name (including full path)
-    // - same as paramstr(0)
+    // - same as ExpandFileName(paramstr(0))
     ProgramFileName: TFileName;
     /// the main executable full path (excluding .exe file name)
-    // - same as ExtractFilePath(paramstr(0)) - including an ending PathDelim
+    // - same as ExtractFilePath(ExpandFileName(paramstr(0))) - with PathDelim
     ProgramFilePath: TFileName;
     /// the full path of the running executable or library
     // - for an executable, same as paramstr(0)
@@ -1715,7 +1724,8 @@ var
   // - if mormot.core.log.pas is defined in the project, will redirect to
   // TDebugFile.FindLocationShort() method using .map/.dbg/.mab information, and
   // return filename, symbol name and line number (if any) as plain text, e.g.
-  // '4cb765 ../src/core/mormot.core.base.pas statuscodeissuccess (11183)' on FPC
+  // $ 57f480 mormot.core.log.pas TSynLog.LogEscape (5782)
+  // $ 4a0a40 mormot.core.base.asmx64.inc (mormot.core.base) Rdtsc (3005)
   GetExecutableLocation: function(aAddress: pointer): ShortString;
 
   /// retrieve the MAC addresses of all hardware network adapters
@@ -1724,13 +1734,23 @@ var
   // - as used e.g. by GetComputerUuid() fallback if SMBIOS is not available
   GetSystemMacAddress: function: TRawUtf8DynArray;
 
-/// try to retrieve the file name of the executable/library holding a function
-// - calls dladdr() on POSIX, or GetModuleFileName() on Windows
-function GetExecutableName(aAddress: pointer): TFileName;
-
-/// check if a function address is known within the main executable module
+/// retrieve the base address of the executable/library holding a function
 // - calls dladdr() on POSIX, or GetModuleHandleEx() on Windows
-function IsMainExecutable(aAddress: pointer): boolean;
+// - return the current executable module base (exe or dll) with aAddress = nil
+function GetExecutableBase(aAddress: pointer = nil): PtrUInt;
+
+/// try to retrieve the file name of the executable/library holding a function
+// - calls dladdr() on POSIX - so could return a relative path for a library
+// (but the main exe/lib will return properly expanded Executable.InstanceName)
+// - calls GetModuleHandleEx() then GetModuleFileNameW() on Windows so
+// always returns an absolute path
+function GetExecutableName(aAddress: pointer; aBase: PPtrUInt = nil;
+  aSymbol: PPUtf8Char = nil): TFileName;
+
+/// check if a function address is known within the current running module
+// - not the main process, but the current module - maybe a dll
+// - calls dladdr() on POSIX, or GetModuleHandleEx() against HInstance on Windows
+function IsCurrentExecutable(aAddress: pointer): boolean;
 
 type
   /// identify an operating system folder for GetSystemPath()
@@ -2841,7 +2861,7 @@ function WinApiErrorString(Code: cardinal; Lib: HMODULE = 0): string;
 
 /// return the error message - maybe of a given library - as UTF-8 ShortString
 // - may be used e.g. in conjunction with Exception.CreateUtf8()
-function WinApiErrorShort(Code: cardinal; Lib: HMODULE = 0): shortstring;
+function WinApiErrorShort(Code: cardinal; Lib: HMODULE = 0): ShortString;
 
 /// return the error message - maybe of a given library - as UTF-8 string
 function WinApiErrorUtf8(Code: cardinal; Lib: HMODULE = 0): RawUtf8;
@@ -3073,7 +3093,7 @@ type
     ELevel: TSynLogLevel;
     {$ifdef OSWINDOWS}
     /// retrieve some DotNet CLR extended information about a given Exception
-    function AdditionalInfo(var dest: shortstring): boolean;
+    function AdditionalInfo(var dest: ShortString): boolean;
     {$endif OSWINDOWS}
   end;
 
@@ -3794,9 +3814,11 @@ type
     procedure Close;
   end;
 
+  /// the executable formats recognized by FindExeSection() function
   TExeFormat = (
     efUnknown,
-    efPE,
+    efPE32,
+    efPE32Plus,
     efElf32,
     efElf64);
 
@@ -3805,9 +3827,10 @@ function ResourceExists(ResourceName, ResType: PChar; Instance: TLibHandle = 0):
 
 /// retrieve raw information about one section from a memory-mapped ELF/PE file
 // - cross-plaform function able to parse Little-Endian ELF32/ELF64 or PE files
+// - can optionally return the ImageBase value from COFF extended header
 // - is a much faster alternative to exeinfo FindExeSection()
 function FindExeSection(const exe: TMemoryMap; name: PUtf8Char;
-  var offset, size: integer): TExeFormat;
+  var offset, size: integer; imgbase: PQWord = nil): TExeFormat;
 
 type
   /// store CPU and RAM usage for a given process
@@ -3905,6 +3928,19 @@ function ReserveExecutableMemory(size: cardinal
 // buffer, so its size should be < 4KB
 // - do nothing on Windows and Linux, but may be needed on OpenBSD / OSX
 procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
+
+/// allocate two pages of memory, the first R/W as usual, the second with GPF on access
+// - follow SystemInfo.dwPageSize value and VirtualProtect/mprotect raw API
+// - return a pointer to the access protected second page, for regression tests
+function GetmemDualAccessPagesLock: pointer; overload;
+
+/// make a copy of some text with GPF on any memory access just after it
+// - Content should be <= SystemInfo.dwPageSize - typically <= 4KB
+// - return a pointer to the copied Content bytes, for regression tests
+function GetmemDualAccessPagesLock(const Content: RawByteString): pointer; overload;
+
+/// to be called once GetmemDualAccessPagesLock() memory is not used any more
+procedure GetmemDualAccessPagesUnLock;
 
 /// check if the supplied pointer is actually pointing to some memory page
 // - will call slow but safe VirtualQuery API on Windows, or try a fpaccess()
@@ -4246,12 +4282,12 @@ procedure AppendKb(Size: Int64; var Dest: ShortString; WithSpace: boolean = fals
 
 /// convert a size to a human readable value
 // - append EB, PB, TB, GB, MB, KB or B symbol with preceding space
-function KB(Size: Int64): TShort16; overload;
+function KB(Size: Int64): TShort15; overload;
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert a size to a human readable value
 // - append EB, PB, TB, GB, MB, KB or B symbol without preceding space
-function KBNoSpace(Size: Int64): TShort16;
+function KBNoSpace(Size: Int64): TShort15;
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// return a date/time value as '2026-03-27 13:59:30' UTF-8 text
@@ -4757,8 +4793,8 @@ type
   PLockedListOne = ^TLockedListOne;
   /// abstract parent of one data entry in TLockedList, storing two PLockedListOne
   // - TLockedList should store unmanaged records starting with those fields
-  // - sequence field contains an incremental random-seeded 30-bit integer > 65535,
-  // to avoid ABA problems when instances are recycled
+  // - sequence field contains an incremental random-seeded 30-bit integer >
+  // 65535, to avoid ABA problems when instances are recycled
   TLockedListOne = record
     next, prev: pointer;
     sequence: PtrUInt;
@@ -6519,13 +6555,13 @@ begin
   FastSetString(result, @tmp[1], ord(tmp[0]));
 end;
 
-function KB(Size: Int64): TShort16;
+function KB(Size: Int64): TShort15;
 begin
   result[0] := #0;
   AppendKb(Size, result, {withspace=}true);
 end;
 
-function KBNoSpace(Size: Int64): TShort16;
+function KBNoSpace(Size: Int64): TShort15;
 begin
   result[0] := #0;
   AppendKb(Size, result, {withspace=}false);
@@ -6781,7 +6817,7 @@ begin
   os := GetSystemError(error);
   if os in [seSuccess, seOther] then
     exit;
-  AppendShortTwoChars(ord(' ') + ord('[') shl 8, @result);
+  AppendShortTwoCharsSafe(ord(' ') + ord('[') shl 8, result);
   SystemErrorAppend(os, result);
   AppendShortCharSafe(']', result);
 end;
@@ -7129,7 +7165,7 @@ end;
 
 function GetErrorText(error: integer): RawUtf8;
 var
-  txt: shortstring;
+  txt: ShortString;
 begin
   if error = 0 then
     error := GetLastError;
@@ -7350,7 +7386,7 @@ end;
 
 procedure Unicode_CodePageName(CodePage: cardinal; var Name: ShortString);
 begin // cut-down and fixed version of FPC rtl/objpas/sysutils/syscodepages.inc
-  case codepage of
+  case CodePage of
     932:
       Name  := 'SHIFT_JIS';
     936:
@@ -7374,7 +7410,7 @@ begin // cut-down and fixed version of FPC rtl/objpas/sysutils/syscodepages.inc
     28591 .. 28606:
       begin
         Name := 'ISO-8859-';
-        AppendShortByte(codepage - 28590, @Name); // append '0'..'16'
+        AppendShortByte(CodePage - 28590, @Name); // append '0'..'16'
       end;
     50220, 50222:
       Name := 'ISO-2022-JP';
@@ -7396,8 +7432,10 @@ begin // cut-down and fixed version of FPC rtl/objpas/sysutils/syscodepages.inc
       Name := 'UTF8';
   else
     begin  // 'WINDOWS-####' is enough for most code pages
-      Name := 'WINDOWS-';
-      AppendShortCardinal(codepage, Name);
+      Name[0] := #0;
+      if (CodePage shr 16) = 0 then
+        Name := 'WINDOWS-';
+      AppendShortCardinal(CodePage, Name);
     end; // ICU expects 'CP####' for IBM codepages which are not Windows'
   end;
   Name[ord(Name[0]) + 1] := #0; // ensure is ASCIIZ - e.g. for ucnv_open()
@@ -7750,22 +7788,22 @@ begin
 end;
 
 const
-  // faHidden is supported by the FPC RTL on POSIX, by checking an initial '.'
-  faInvalid = faDirectory + {$ifdef OSWINDOWS} faVolumeID{%H-} + {$endif} faSysFile{%H-};
+  // faHiddenFile is supported by the FPC RTL on POSIX, by checking an initial '.'
+  faInvalid = faDirectory + {$ifdef OSWINDOWS} faVolumeLabel + {$endif} faSystemFile;
 
 function SearchRecValidFile(const F: TSearchRec; IncludeHidden: boolean): boolean;
 begin
   result := (F.Name <> '') and
             (F.Attr and faInvalid = 0) and
             (IncludeHidden or
-             (F.Attr and faHidden{%H-} = 0));
+             (F.Attr and faHiddenFile = 0));
 end;
 
 function SearchRecValidFolder(const F: TSearchRec; IncludeHidden: boolean): boolean;
 begin
   result := (F.Attr and faDirectory <> 0) and
             (IncludeHidden or
-             (F.Attr and faHidden{%H-} = 0)) and
+             (F.Attr and faHiddenFile = 0)) and
             (F.Name <> '') and
             (F.Name <> '.') and
             (F.Name <> '..');
@@ -7776,7 +7814,7 @@ function FindFirstDirectory(const Path: TFileName; IncludeHidden: boolean;
 begin
   result := faDirectory;
   if IncludeHidden then
-    result := result or faHidden{%H-};
+    result := result or faHiddenFile;
   result := FindFirst(Path, result, F);
 end;
 
@@ -8850,23 +8888,34 @@ type
     NumberOfRelocations, NumberOfLinenumbers: word;
     Characteristics: cardinal;
   end;
+  TPeOptHeader = packed record
+    Magic, Linker: word;
+    SizeOfCode, SizeOfInitializedData, SizeOfUninitializedData,
+    AddressOfEntryPoint, BaseOfCode: cardinal;
+    case integer of
+      0: (BaseOfData32, ImageBase32: cardinal);
+      1: (ImageBase64: QWord);
+  end;
 
-  TElfIdent = packed record
+  TElfHeader = packed record
     magic: cardinal;
     file_class, data_encoding, file_version, os_abi: byte;
     padding: array[0..7] of byte;
     e_type, e_machine: word;
     e_version: cardinal;
+    case integer of
+      0: (entry32, phoff32, shoff32, flags32: cardinal;
+          ehsize32, phentsize32, phnum32, shentsize32, shnum32, shstrndx32: word);
+      1: (entry64, phoff64, shoff64: QWord;
+          flags64: cardinal;
+          ehsize64, phentsize64, phnum64, shentsize64, shnum64, shstrndx64: word);
   end;
-  TElfHeader32 = packed record
-    e_entry, e_phoff, e_shoff: cardinal;
-    e_flags: cardinal;
-    e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx: word;
+  TElfProg32 = packed record
+    p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align: cardinal;
   end;
-  TElfHeader64 = packed record
-    e_entry, e_phoff, e_shoff: QWord;
-    e_flags: cardinal;
-    e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx: word;
+  TElfProg64 = packed record
+    p_type, p_flags: cardinal;
+    p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align: QWord;
   end;
   TElfSection32 = packed record
     sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size,
@@ -8880,42 +8929,58 @@ type
   end;
 
 function FindExeSection(const exe: TMemoryMap; name: PUtf8Char;
-  var offset, size: integer): TExeFormat;
+  var offset, size: integer; imgbase: PQWord): TExeFormat;
 var
-  eid: ^TElfIdent;
-  eh32: ^TElfHeader32;
-  eh64: ^TElfHeader64;
+  e: ^TElfHeader;
   es32, estr32: ^TElfSection32;
   es64, estr64: ^TElfSection64;
+  ep32: ^TElfProg32;
+  ep64: ^TElfProg64;
   pe: ^TPeHeader;
+  coff: ^TPeOptHeader;
   ps: ^TPeSection;
+  ef: TExeFormat;
   tmp: TTemp16;
   names, one: PAnsiChar;
-  n: PtrUInt;
+  n, a, c: PtrUInt;
 begin
   result := efUnknown;
-  eid := pointer(exe.Buffer);
-  if (eid = nil) or
+  if imgbase <> nil then
+    imgbase^ := 0; // reset to 0
+  e := pointer(exe.Buffer);
+  if (e = nil) or
      (name = nil) then
     exit;
-  if (exe.Size > SizeOf(TElfHeader64)) and
-     (eid^.magic = $464c457f) and  // ELF
-     (eid^.file_version = 1) and
-     (eid^.data_encoding = 1) then // Little Endian
-  case eid^.file_class of
+  if (exe.Size > SizeOf(e^)) and
+     (e^.magic = $464c457f) and  // ELF
+     (e^.file_version = 1) and
+     (e^.data_encoding = 1) then // Little Endian
+  case e^.file_class of
     1: // ELFCLASS32
       begin
-        inc(eid);
-        eh32 := pointer(eid);
-        n := eh32^.e_shnum;
+        n := e^.shnum32;
         if (n = 0) or
-           (eh32^.e_shoff = 0) or
-           (eh32^.e_shstrndx >= n) or
-           (eh32^.e_shentsize <> SizeOf(es32^)) or
-           (Int64(eh32^.e_shoff) + PtrInt(n * SizeOf(es32^)) > exe.Size) then
+           (e^.shoff32 = 0) or
+           (e^.shstrndx32 >= n) or
+           (e^.shentsize32 <> SizeOf(es32^)) or
+           (Int64(e^.shoff32) + PtrInt(n * SizeOf(es32^)) > exe.Size) then
           exit;
-        es32 := pointer(exe.Buffer + eh32^.e_shoff);
-        estr32 := @PByteArray(es32)[eh32^.e_shstrndx * SizeOf(es32^)];
+        if (imgbase <> nil) and
+           (Int64(e^.phoff32) + PtrInt(e^.phnum32) * SizeOf(ep32^) <= exe.Size) then
+        begin
+          ep32 := pointer(exe.Buffer + e^.phoff32);
+          a := high(a);
+          for c := 1 to e^.phnum32 do
+          begin
+            if ep32^.p_type = 1 then
+              a := MinPtrUInt(a, ep32^.p_vaddr);
+            inc(ep32);
+          end;
+          if a <> high(a) then
+            imgbase^ := a;
+        end;
+        es32 := pointer(exe.Buffer + e^.shoff32);
+        estr32 := @PByteArray(es32)[e^.shstrndx32 * SizeOf(es32^)];
         names := exe.Buffer + estr32^.sh_offset;
         repeat
           if (es32^.sh_name < estr32^.sh_size) and
@@ -8934,17 +8999,29 @@ begin
       end;
     2: // ELFCLASS64
       begin
-        inc(eid);
-        eh64 := pointer(eid);
-        n := eh64^.e_shnum;
+        n := e^.shnum64;
         if (n = 0) or
-           (eh64^.e_shoff = 0) or
-           (eh64^.e_shstrndx >= n) or
-           (eh64^.e_shentsize <> SizeOf(es64^)) or
-           (Int64(eh64^.e_shoff) + PtrInt(n * SizeOf(es64^)) > exe.Size) then
+           (e^.shoff64 = 0) or
+           (e^.shstrndx64 >= n) or
+           (e^.shentsize64 <> SizeOf(es64^)) or
+           (Int64(e^.shoff64) + PtrInt(n * SizeOf(es64^)) > exe.Size) then
           exit;
-        es64 := pointer(exe.Buffer + eh64^.e_shoff);
-        estr64 := @PByteArray(es64)[eh64^.e_shstrndx * SizeOf(es64^)];
+        if (imgbase <> nil) and
+           (Int64(e^.phoff64) + PtrInt(e^.phnum64) * SizeOf(ep64^) <= exe.Size) then
+        begin
+          ep64 := pointer(exe.Buffer + e^.phoff64);
+          a := high(a);
+          for c := 1 to e^.phnum64 do
+          begin
+            if ep64^.p_type = 1 then
+              a := MinPtrUInt(a, ep64^.p_vaddr);
+            inc(ep64);
+          end;
+          if a <> high(a) then
+            imgbase^ := a;
+        end;
+        es64 := pointer(exe.Buffer + e^.shoff64);
+        estr64 := @PByteArray(es64)[e^.shstrndx64 * SizeOf(es64^)];
         names := exe.Buffer + estr64^.sh_offset;
         repeat
           if (es64^.sh_name < estr64^.sh_size) and
@@ -8964,21 +9041,37 @@ begin
         until n = 0;
       end;
   end
-  else if (PDosHeader(eid)^.e_magic = $5A4D) and // DOS
-          (PDosHeader(eid)^.e_lfanew < exe.Size) then
+  else if (PDosHeader(e)^.e_magic = $5A4D) and // DOS
+          (PDosHeader(e)^.e_lfanew + SizeOf(pe^) < exe.Size) then
   begin
-    pe := pointer(exe.Buffer + PDosHeader(eid)^.e_lfanew); // COFF
-    n := pe^.NumberOfSections;
+    pe := pointer(exe.Buffer + PDosHeader(e)^.e_lfanew); // COFF
+    n := pe^.NumberOfSections; // pe^.NumberOfSymbols=0 if external .dbg file
     if (pe^.Signature <> $00004550) or
-       (pe^.SizeOfOptionalHeader = 0) or
-       (pe^.NumberOfSymbols = 0) or
+       (pe^.SizeOfOptionalHeader < SizeOf(coff^)) or
        (n = 0) or
-       (Int64(PDosHeader(eid)^.e_lfanew) + SizeOf(pe^) +
+       (Int64(PDosHeader(e)^.e_lfanew) + SizeOf(pe^) +
         pe^.SizeOfOptionalHeader + PtrInt(n * SizeOf(ps^)) > exe.Size) then
       exit;
+    coff := @PByteArray(pe)[SizeOf(pe^)]; // optional header
+    case coff^.Magic of
+      $010b:
+        begin
+          if imgbase <> nil then
+            imgbase^ := coff^.ImageBase32;
+          ef := efPE32;
+        end;
+      $020b:
+        begin
+          if imgbase <> nil then
+            imgbase^ := coff^.ImageBase64;
+          ef := efPE32Plus;
+        end;
+    else
+      exit;
+    end;
     names := exe.Buffer + pe^.PointerToSymbolTable + pe^.NumberOfSymbols * 18;
     tmp[8] := #0; // ensure ps^.Name8 with 8 chars are #0 terminated
-    ps := @PByteArray(pe)[SizeOf(pe^) + pe^.SizeOfOptionalHeader];
+    ps := @PByteArray(coff)[pe^.SizeOfOptionalHeader];
     repeat
       one := @tmp;
       PQWord(one)^ := ps^.Name8;
@@ -8989,7 +9082,7 @@ begin
         offset := ps^.PointerToRawData;
         size := MinPtrUInt(ps^.VirtualSize, ps^.SizeOfRawData);
         if Int64(offset) + size < exe.Size then
-          result := efPE; // found
+          result := ef;
         exit;
       end;
       inc(ps);
@@ -8997,7 +9090,6 @@ begin
     until n = 0;
   end;
 end;
-
 
 { ReserveExecutableMemory() / TFakeStubBuffer }
 
@@ -9074,6 +9166,38 @@ begin
   end;
 end;
 
+var
+  __GetmemDualAccessPagesLock: TLightLock;
+  __GetmemDualAccessPages: pointer;
+
+function GetmemDualAccessPagesLock: pointer;
+begin
+  __GetmemDualAccessPagesLock.Lock;
+  if __GetmemDualAccessPages = nil then
+    __GetmemDualAccessPages := _GetmemDualAccessPages; // VirtualAlloc/mmap once
+  result := __GetmemDualAccessPages; // nil or pointer for GPF on read
+end;
+
+function GetmemDualAccessPagesLock(const Content: RawByteString): pointer;
+var
+  len: PtrUInt;
+begin
+  len := length(Content);
+  result := nil;
+  if len > SystemInfo.dwPageSize then
+    exit;
+  result := GetmemDualAccessPagesLock;
+  if result = nil then
+    exit;
+  dec(PByte(result), len);
+  MoveFast(pointer(Content)^, result^, len);
+end;
+
+procedure GetmemDualAccessPagesUnLock;
+begin
+  __GetmemDualAccessPagesLock.UnLock;
+end;
+
 const
   OS_ALIGNED = 128 shl 10; // call the OS for any block >= 128KB
 
@@ -9111,6 +9235,14 @@ begin
   FreeMem(p);
 end;
 
+const
+  // = the deprecated System.vmtDestroy, which Delphi replaced by the asm-only
+  // VMTOFFSET operator - verified to match the RTL value on 32-bit and 64-bit
+  // - CPP_ABI_ADJUST was introduced with Delphi XE3, and the RTL constant is
+  // not deprecated on older compilers, so it is used as-is there and on FPC
+  VMT_DESTROY = {$ifdef ISDELPHIXE3} -SizeOf(pointer) - CPP_ABI_ADJUST
+                {$else} vmtDestroy {$endif ISDELPHIXE3};
+
 function SeemsRealObject(p: pointer): boolean;
 var
   i: PtrInt;
@@ -9121,7 +9253,7 @@ begin
     p := PPointer(p)^; // p = vmt
     if (not SeemsRealPointer(p)) or
        (PPtrInt(PAnsiChar(p) + vmtInstanceSize)^ < sizeof(pointer)) or
-       (PPtrInt(PAnsiChar(p) + vmtDestroy)^ = 0) then
+       (PPtrInt(PAnsiChar(p) + VMT_DESTROY)^ = 0) then
       exit;
     p := PPointer(PAnsiChar(p) + vmtClassName)^; // p = ClassName: PShortString
     if (not SeemsRealPointer(p)) or
@@ -9183,7 +9315,7 @@ begin
   AppendFreeTotalKB(info.memtotal - info.memfree, info.memtotal, result);
   AppendShortChar('(', @result);
   AppendShortByte(info.percent, @result); // append '0'..'99' range
-  AppendShortTwoChars(ord('%') + ord(')') shl 8, @result);
+  AppendShortTwoCharsSafe(ord('%') + ord(')') shl 8, result);
 end;
 
 function GetDiskAvailable(aDriveFolderOrFile: TFileName): QWord;
@@ -9211,6 +9343,8 @@ end;
 var
   _Shell: RawUtf8;
   _SystemInfoText: TCachedValue;
+  _SysInfoTix: cardinal;
+  _SysInfoCache: TSysInfo;
 
 function GetSystemInfoText: RawUtf8;
 begin
@@ -9224,13 +9358,29 @@ begin
     _SetShell(_Shell, result);
 end;
 
+function RetrieveSysInfo(var si: TSysInfo): boolean;
+var
+  tix: cardinal;
+begin
+  tix := GetTickSec;
+  OSSafe.Lock;
+  if _SysInfoTix <> tix then
+  begin
+    _SysInfoTix := tix;
+    _RetrieveSysInfo(_SysInfoCache)
+  end;
+  si := _SysInfoCache;
+  OSSafe.UnLock;
+  result := si.uptime <> 0;
+end;
+
 procedure RetrieveSysInfoText(var text: ShortString);
 var
   si: TSysInfo;  // Linuxism, but properly emulated in thit unit on Win/Mac/BSD
 begin
   text[0] := #0;
-  AppendShortCardinal(CpuThreads, text);
-  if not RetrieveSysInfo(si) then // single syscall on Linux/Android
+  AppendShortCardinal(SystemInfo.dwNumberOfProcessors, text); // no syscall
+  if not RetrieveSysInfo(si) then // single syscall on Linux - 1 second cache
     exit;
   AppendShortChar(' ', @text); // si.loads[0/1] = user kern on Windows
   AppendShortCurr64((Int64(si.loads[0]) * CURR_RES + 5000) shr 16, text, 2);
@@ -9318,9 +9468,6 @@ var
   name, search: RawUtf8;
   ignoremissing: boolean;
   error: string;
-  {$ifdef OSPOSIX}
-  dlinfo: dl_info;
-  {$endif OSPOSIX}
 begin
   result := false;
   if (Entry = nil) or
@@ -9349,11 +9496,8 @@ begin
   if result and
      not fLibraryPathTested then
   begin
-    fLibraryPathTested := true;
-    FillCharFast(dlinfo, SizeOf(dlinfo), 0);
-    dladdr(Entry^, @dlinfo);
-    if dlinfo.dli_fname <> nil then
-      fLibraryPath := TFileName(dlinfo.dli_fname);
+    fLibraryPath := GetExecutableName(Entry^);
+    fLibraryPathTested := fLibraryPath <> '';
   end;
   {$endif OSPOSIX}
   result := result or ignoremissing;
@@ -9861,28 +10005,29 @@ begin
   {$endif OSLINUXANDROID}
   with Executable do            // retrieve Executable + Host/User info
   begin
+    ProgramFileName := ExpandFileName(ParamStr(0)); // main executable from RTL
+    ProgramFilePath := ExtractFilePath(ProgramFileName);
+    ProgramName := GetFileNameWithoutExtOrPath(ProgramFileName);
     dt := 0;
     {$ifdef OSWINDOWS}
-    ProgramFileName := ParamStr(0); // RTL seems just fine here
-    {$else}
-    dladdr(@InitializeProcessInfo, @PosixProgramInfo);
-    crcblock(@SystemEntropy.Startup, @PosixProgramInfo); // won't hurt
-    GetDlInfoName(PosixProgramInfo, ProgramFileName);
-    if ProgramFileName <> '' then
-    begin
-      dt := FileAgeToDateTime(ProgramFileName);
-      if dt = 0 then
-        ProgramFileName := '';
-    end;
-    if ProgramFileName = '' then
-      ProgramFileName := ExpandFileName(ParamStr(0));
-    {$endif OSWINDOWS}
-    ProgramFilePath := ExtractFilePath(ProgramFileName);
     if IsLibrary then
       InstanceFileName := GetModuleName(HInstance)
     else
       InstanceFileName := ProgramFileName;
-    ProgramName := GetFileNameWithoutExtOrPath(ProgramFileName);
+    {$else}
+    dladdr(@InitializeProcessInfo, @PosixProgramInfo);   // function in this .so
+    crcblock(@SystemEntropy.Startup, @PosixProgramInfo); // won't hurt
+    GetDlInfoName(PosixProgramInfo, InstanceFileName);
+    if InstanceFileName <> '' then
+    begin // could be e.g. './mormot2tests'
+      InstanceFileName := ExpandFileName(InstanceFileName); // expand at startup
+      dt := FileAgeToDateTime(InstanceFileName); // TFileVersion needs it anyway
+      if dt = 0 then
+        InstanceFileName := '';
+    end;
+    if InstanceFileName = '' then
+      InstanceFileName := ProgramFileName; // fallback (unlikely)
+    {$endif OSWINDOWS}
     GetUserHost(User, Host);
     if Host = '' then
       Host := 'unknown';
@@ -11643,14 +11788,16 @@ end;
 
 function TLockedList.Free(one: pointer): boolean;
 var
-  o: PLockedListOne absolute one;
+  o: PLockedListOne;
 begin
   result := false;
-  if (o = nil) or
-     (o^.sequence = 0) then
+  if one = nil then
     exit;
+  o := one;
   Safe.Lock;
   try
+    if o^.sequence = 0 then // already garbage collected (paranoid)
+      exit;
     // remove from main double-linked list
     if o = fHead then
       fHead := o.next;
@@ -12879,6 +13026,7 @@ end;
 procedure FinalizeUnit;
 var
   i: PtrInt;
+  p: PByte;
 begin
   with InternalGarbageCollection do
   begin
@@ -12887,6 +13035,12 @@ begin
       FreeAndNilSafe(Instances[i]); // before GlobalCriticalSection deletion
   end;
   ObjArrayClear(CurrentFakeStubBuffers);
+  p := __GetmemDualAccessPages;
+  if p <> nil then // need VirtualFree() or unmap()
+  begin
+    dec(p, SystemInfo.dwPageSize); // from GPF page to R/W start page
+    _FreeLargeMem(p, SystemInfo.dwPageSize * 2); // release both pages
+  end;
   Executable.Version.Free;
   Executable.Command.Free;
   FinalizeSpecificUnit; // in mormot.core.os.posix/windows.inc files

@@ -2025,7 +2025,7 @@ type
     function GetThreadOwned(aClass: TClass): pointer;
       {$ifdef HASINLINE} inline; {$endif}
     /// register one object owned by a thread-safe connection instance
-    // - returns the supplied aObject instance as a fluid-interface mechanism
+    // - returns the supplied aObject instance as a fluent-interface mechanism
     // - raise an ESqlDBException if not a TSqlDBConnectionPropertiesThreadSafe
     function SetThreadOwned(aObject: TObject): pointer;
 
@@ -6895,7 +6895,7 @@ begin
       end;
       Msg := @tmp;
     end;
-    MicroSecToString(fSqlLogTimer.StopInMicroSec, elapsed);
+    MicroSecToStringVar(fSqlLogTimer.StopInMicroSec, elapsed);
     if fSqlLogLevel = sllSQL then
       fSqlLogLog.Log(sllSQL, 'Execute t=%% q=%',
         [elapsed, Msg^, fSqlWithInlinedParams], self)

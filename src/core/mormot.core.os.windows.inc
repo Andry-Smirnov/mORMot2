@@ -137,16 +137,15 @@ begin
   result := @Temp;
 end;
 
+procedure Win32SynUnicodeConvert(P: PWideChar; l: PtrInt; var s: string);
+var
+  u: SynUnicode; // transient UTF-16 variable
+begin
+  SetString(u, P, l);
+  s := string(u); // let the RTL do the conversion
+end;
+
 procedure Win32PWideCharToString(P: PWideChar; l: PtrInt; var s: string);
-
-  procedure DoSynUnicodeConv;
-  var
-    u: SynUnicode; // transient UTF-16 variable
-  begin
-    SetString(u, P, l);
-    s := string(u); // let the RTL do the conversion
-  end;
-
 begin
   if IsAnsiCompatibleW(P, l) then // most common case
   begin
@@ -159,7 +158,7 @@ begin
     Unicode_ToUtf8(P, l, RawUtf8(s)) // use RTL or mormot.core.unicode
   {$endif FPC}
   else
-    DoSynUnicodeConv;
+    Win32SynUnicodeConvert(P, l, s);
 end;
 
 procedure SetStringFromAnsi7Buffer(var d: string; s: PAnsiChar; l: PtrInt);
@@ -838,7 +837,7 @@ end;
 
 // some definitions missing on oldest Delphi
 const
-  FILE_ATTRIBUTE_REPARSE_POINT = $0000400; // = faSymLink
+  FILE_ATTRIBUTE_REPARSE_POINT = $0000400; // = faSymLink = faSymbolicLink
 
 function FindFirstFileExW(lpfilename: PWideChar; fInfoLevelId: FINDEX_INFO_LEVELS;
    lpFindFileData: pointer; fSearchOp: FINDEX_SEARCH_OPS;
@@ -1062,36 +1061,48 @@ begin
             (header = $5A4D); // DOS Magic Number
 end;
 
-function GetModuleHandleExA(dwFlags: cardinal; lpModuleName: pointer;
- var phModule: HMODULE): BOOL; stdcall; external kernel32;
+function GetModuleHandleExW(dwFlags: cardinal; lpModuleName: pointer;
+ var phModule: PtrUInt): BOOL; stdcall; external kernel32;
 
 const
   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT = $00000002;
   GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS       = $00000004;
 
-function GetExecutableName(aAddress: pointer): TFileName;
+function GetExecutableBase(aAddress: pointer): PtrUInt;
 var
-  tmp: TByteToWideChar;
-  hm: HMODULE;
+  hm: PtrUInt;
 begin
-  result := '';
-  hm := 0;
-  if not GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT or
-           GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, aAddress, hm) then
-    exit;
-  FillcharFast(tmp, SizeOf(tmp), 0);
-  GetModuleFileNameW(hm, tmp, SizeOf(tmp));
-  Win32PWideCharToFileName(tmp, result);
+  if aAddress = nil then
+    result := PtrUInt(HInstance) // current exe/dll
+  else if GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS or
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, aAddress, hm) then
+    result := hm
+  else
+    result := 0;
 end;
 
-function IsMainExecutable(aAddress: pointer): boolean;
+function GetExecutableName(aAddress: pointer; aBase: PPtrUInt;
+  aSymbol: PPUtf8Char): TFileName;
 var
-  hm: HMODULE;
+  tmp: TW32Temp;
+  base, len: PtrUInt;
 begin
-  hm := 0;
-  result := GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT or
-              GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, aAddress, hm) and
-            (hm = HINSTANCE);
+  result := '';
+  base := GetExecutableBase(aAddress);
+  if base = 0 then
+    exit; // not found
+  if aBase <> nil then
+    aBase^ := base;
+  if aSymbol <> nil then
+    aSymbol^ := nil; // no simple API on Windows to retrieve the symbol name
+  len := GetModuleFileNameW(HMODULE(base), @tmp, SizeOf(tmp));
+  if len <> 0 then
+    Win32PWideCharToString(@tmp, len, string(result));
+end;
+
+function IsCurrentExecutable(aAddress: pointer): boolean;
+begin
+  result := GetExecutableBase(aAddress) = PtrUInt(HInstance); // current exe/dll
 end;
 
 function FileIsWritable(const FileName: TFileName): boolean;
@@ -1882,10 +1893,10 @@ begin
       result := true;
     end;
   if result then
-    AppendShortChar(']', @dest)
+    AppendShortCharSafe(']', dest)
 end;
 
-function TSynLogExceptionContext.AdditionalInfo(var dest: shortstring): boolean;
+function TSynLogExceptionContext.AdditionalInfo(var dest: ShortString): boolean;
 begin
   result := ClassInheritsFromName(EClass, 'EOleSysError') and
             Win32DotNetExceptions(EOleSysError(EInstance).ErrorCode, dest);
@@ -2547,7 +2558,7 @@ type
     mem_unit: cardinal;                  // Memory unit size in bytes
   end;
 
-function RetrieveSysInfo(var si: TSysInfo): boolean;
+function _RetrieveSysInfo(var si: TSysInfo): boolean;
 var
   global: TMemoryStatusEx;
   I, K, U, S: Int64;
@@ -3149,6 +3160,19 @@ end;
 procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
 begin
   // nothing to be done on Windows: PAGE_EXECUTE_READWRITE always work
+end;
+
+function _GetmemDualAccessPages: pointer;
+var
+  s: PtrUInt;
+  ignore: DWord;
+begin
+  s := SystemInfo.dwPageSize;
+  result := VirtualAlloc(nil, s * 2, MEM_COMMIT, PAGE_READWRITE);
+  if result = nil then
+    exit;
+  inc(PByte(result), s);
+  VirtualProtect(result, s, PAGE_NOACCESS, ignore);
 end;
 
 function _GetLargeMem(BigSize: PtrUInt): pointer;

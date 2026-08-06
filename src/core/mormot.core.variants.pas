@@ -102,6 +102,9 @@ function SetOleStr(Source: PSynVarData; Dest: PWideString): boolean;
 procedure ZeroFill(Value: PVarData);
   {$ifdef HASINLINE}inline;{$endif}
 
+/// same as VarClear(Value^) and FillChar(Value^,SizeOf(TVarData),0)
+procedure ZeroClear(Value: PVarData);
+
 /// fill all bytes of the value's memory buffer with zeros, i.e. 'toto' -> #0#0#0#0
 // - may be used to cleanup stack-allocated content
 procedure FillZero(var value: variant); overload;
@@ -1020,7 +1023,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     function GetObjectProp(const aName: RawUtf8; out aFound: PVariant;
       aPreviousIndex: PInteger): boolean;
-    function InternalAddBuf(aName: PUtf8Char; aNameLen: PtrInt): PtrInt;
+    function InternalAddObj(aName: PUtf8Char; aNameLen: PtrInt): PtrInt;
     function InternalSetValue(aIndex: PtrInt; const aValue: variant): PVariant;
       {$ifdef HASINLINE}inline;{$endif}
     procedure InternalAddVarRec(var aValue: PVarRec; aEnd: PtrUInt);
@@ -1957,6 +1960,7 @@ type
       wasAdded: PBoolean = nil; OnlyAddMissing: boolean = false): integer;
     /// add a value in this document, creating a dvArray if aName already exists
     // - returns the index of the corresponding value, which may be just added
+    // - wrapper around TDocVariantData.NewSibling() and SetVariantByValue()
     procedure AddValueArray(const aName: RawUtf8; const aValue: variant);
     /// add a value in this document, recognizing text representation of numbers
     // - this function expects a UTF-8 text for the value, which would be
@@ -2031,7 +2035,19 @@ type
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     procedure AddItems(const aValue: array of const);
     /// low-level adding of one value to this document, handled as array
-    function NewItem: PVariant;
+    // - returns a pointer to the new raw value to be filled
+    function NewItem: PVariant; overload;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// low-level adding of one value to this document, handled as object
+    // - returns a pointer to the new raw value to be filled
+    function NewItem(const aName: RawUtf8): PVariant; overload;
+    /// low-level adding of one value to this document, handled as object
+    // - returns a pointer to the new raw value to be filled
+    function NewItem(aName: PUtf8Char; aNameLen: PtrInt): PVariant; overload;
+    /// low-level adding of one named value to this document, handled as object
+    // - will gather repeated sibling elements of the same name into an array
+    // - returns a pointer to the new raw value to be filled
+    function NewSibling(aName: PUtf8Char; aNameLen: PtrInt): PVariant;
     /// add one object document to this document
     // - if the document is an array, keep aName=''
     // - if the document is an object, set the new object property as aName
@@ -2420,6 +2436,7 @@ type
     // - follows dvoNameCaseSensitive and dvoReturnNullForUnknownProperty options
     // - use GetAsInt/GetAsInt64 if you want to check the availability of the field
     // - I['prop'] := 123 would add a new property, or overwrite an existing
+    // - if Value[] is a string, will try to convert from an exact number
     property I[const aName: RawUtf8]: Int64
       read GetInt64ByName write SetInt64ByName;
     /// direct access to a dvObject boolean stored property value from its name
@@ -2884,6 +2901,10 @@ procedure _ByRef(const DocVariant: variant; out Dest: variant;
 // - could be used e.g. to store either a JSON CSV string or a JSON array of
 // strings in a settings property
 function _Csv(const DocVariantOrString: variant): RawUtf8;
+
+/// compute the raw 32-bit TSynVarData.VType value as TDocVariantData.Init()
+function _VType(const aOptions: TDocVariantOptions; aKind: TDocVariantKind): cardinal;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// will convert any TObject into a TDocVariant document instance
 // - fast processing function as used by _ObjFast(Value)
@@ -4131,6 +4152,13 @@ begin
   {$ifdef CPU64}
   PInt64Array(Value)^[2] := 0;
   {$endif CPU64}
+end;
+
+procedure ZeroClear(Value: PVarData);
+begin
+  if PSynVarData(Value)^.VType <> 0 then
+    VarClearProc(Value^);
+  ZeroFill(Value);
 end;
 
 procedure FillZero(var value: variant);
@@ -5384,9 +5412,9 @@ begin
   ndx := dv.GetValueIndex(pointer(Name), NameLen, dv.Has(dvoNameCaseSensitive));
   if ndx < 0 then
     if dv.Has(dvoIsArray) then
-      exit // avoid EDocVariant in dv.InternalAddBuf()
+      exit // avoid EDocVariant in dv.InternalAddObj()
     else
-      ndx := dv.InternalAddBuf(pointer(Name), NameLen);
+      ndx := dv.InternalAddObj(pointer(Name), NameLen);
   dv.InternalSetValue(ndx, variant(Value));
 end;
 
@@ -6299,6 +6327,11 @@ begin
   VCount := 0;
   pointer(VName)  := nil; // to avoid GPF when mapped within a TVarData/variant
   pointer(VValue) := nil;
+end;
+
+function _VType(const aOptions: TDocVariantOptions; aKind: TDocVariantKind): cardinal;
+begin // dvUndefined=0 dvArray=1 dvObject=2 -> [dvoIsArray]=1 [dvoIsObject]=2
+  result := DocVariantVType + cardinal((word(aOptions) and not _DVO) + ord(aKind)) shl 16;
 end;
 
 procedure TDocVariantData.Init(const aOptions: TDocVariantOptions;
@@ -7331,17 +7364,14 @@ end;
 procedure TDocVariantData.InitFromUrlArray(Url: PUtf8Char; aOptions: TDocVariantOptions);
 var
   n, v: RawUtf8;
-  val: variant;
-begin
+begin // _FromText() below will recognize booleans or numbers
   Init(aOptions, dvObject);
   if Url <> nil then
     repeat
       Url := UrlDecodeNextNameValue(Url, n, v);
       if Url = nil then
         break;
-      VarClear(val);
-      _FromText(aOptions, @val, v); // recognize booleans or numbers
-      AddValueArray(n, val);
+      _FromText(aOptions, NewSibling(pointer(n), length(n)), v);
     until Url^ = #0;
 end;
 
@@ -7579,14 +7609,32 @@ begin
   result := Compare(aName, PVariant(@t)^, aCaseInsensitive);
 end;
 
-function TDocVariantData.InternalAddBuf(aName: PUtf8Char; aNameLen: PtrInt): PtrInt;
+function TDocVariantData.InternalAddObj(aName: PUtf8Char; aNameLen: PtrInt): PtrInt;
 var
-  tmp: pointer; // so that the caller won't need to reserve such a temp var
-begin
-  tmp := nil;
-  FastSetString(RawUtf8(tmp), aName, aNameLen);
-  result := InternalAdd(RawUtf8(tmp), -1);
-  FastAssignNew(tmp);
+  cap: PtrInt;
+begin // caller should ensure aName<>nil and Kind<>dvArray
+  if GetKind = dvUndefined then
+    EnsureDocVariantVType(@self, dvoIsObject);
+  cap := length(VValue);
+  if VCount >= cap then
+  begin
+    cap := NextGrow(cap);
+    SetLength(VName, cap);
+    SetLength(VValue, cap);
+  end
+  else
+  begin // fast EnsureUnique() as SetLength() does
+    if PDACnt(PAnsiChar(pointer(VName)) - _DACNT)^ > 1 then
+      DynArrayEnsureUnique(@VName, TypeInfo(TRawUtf8DynArray));
+    if PDACnt(PAnsiChar(pointer(VValue)) - _DACNT)^ > 1 then
+      DynArrayEnsureUnique(@VValue, TypeInfo(TVariantDynArray));
+  end;
+  result := VCount;
+  inc(VCount);
+  if Has(dvoInternNames) then
+    DocVariantType.InternNames.Unique(VName[result], aName, aNameLen)
+  else
+    FastSetString(VName[result], aName, aNameLen);
 end;
 
 function TDocVariantData.InternalAdd(const aName: RawUtf8; aIndex: integer): integer;
@@ -7748,7 +7796,8 @@ end;
 
 function TDocVariantData.InternalAddValuePrepare(const aName: RawUtf8;
   DoUpdate: boolean; out v: PVariant; const Ctxt: ShortString; aIndex: integer): integer;
-begin // this function won't create any duplicated 
+begin // this function won't create any duplicated item
+  v := nil;
   result := -1;
   if aName = '' then
     exit;
@@ -7798,8 +7847,8 @@ begin
   result := -1;
   if Has(dvoIsArray) or
      (aNameLen <= 0) then
-    exit;
-  result := InternalAddBuf(aName, aNameLen);
+    exit; // avoid EDocVariant in InternalAddObj()
+  result := InternalAddObj(aName, aNameLen);
   GetVariantFromJsonField(aValue.Value, aValue.WasString, VValue[result],
     @VOptions, Has(dvoAllowDoubleValue), aValue.ValueLen);
 end;
@@ -7821,33 +7870,11 @@ end;
 
 procedure TDocVariantData.AddValueArray(const aName: RawUtf8; const aValue: variant);
 var
-  ndx: PtrInt;
   v: PVariant;
-  dv: PDocVariantData;
-  tmp: TVarData;
 begin
-  if aName = '' then
-    exit;
-  ndx := GetValueIndex(aName);
-  if ndx < 0 then
-  begin
-    ndx := InternalAdd(aName); // first time seen this aName
-    v := @VValue[ndx];
-  end
-  else
-  begin
-    v := @VValue[ndx];
-    if not _SafeArray(v^, dv) then // convert this aName into a dvArray
-    begin
-      tmp := PVarData(v)^; // weak copy
-      dv := pointer(v);
-      dv^.InitFast(4, dvArray);
-      dv^.VCount := 1; // store previous value as first item
-      PVarData(@dv^.Values[0])^ := tmp;
-    end;
-    v := dv^.NewItem; // append as item in this array
-  end;
-  SetVariantByValue(aValue, v^, Has(dvoValueDoNotNormalizeAsRawUtf8));
+  v := NewSibling(pointer(aName), length(aName));
+  if v <> nil then
+    SetVariantByValue(aValue, v^, Has(dvoValueDoNotNormalizeAsRawUtf8));
 end;
 
 function TDocVariantData.AddValueFromText(const aName, aValue: RawUtf8;
@@ -8039,6 +8066,61 @@ function TDocVariantData.NewItem: PVariant;
 begin
   result := pointer(PtrUInt(InternalAdd('')));
   result := @VValue[PtrUInt(result)]; // in two steps for FPC
+end;
+
+function TDocVariantData.NewItem(const aName: RawUtf8): PVariant;
+begin
+  InternalAddValuePrepare(aName, {update=}false, result, 'NewItem');
+end;
+
+function TDocVariantData.NewItem(aName: PUtf8Char; aNameLen: PtrInt): PVariant;
+var
+  ndx: PtrInt;
+begin
+  result := nil;
+  if Has(dvoIsArray) or
+     (aNameLen <= 0) then
+    exit; // avoid EDocVariant in InternalAddObj()
+  ndx := InternalAddObj(aName, aNameLen);
+  result := @VValue[ndx]; // where to store the new item
+end;
+
+function TDocVariantData.NewSibling(aName: PUtf8Char; aNameLen: PtrInt): PVariant;
+var
+  ndx: PtrInt;
+  exist: PVariant;
+  arr: PDocVariantData;
+  v: PVarData;
+  tmp: TVarData;
+begin
+  result := nil;
+  if Has(dvoIsArray) or
+     (aNameLen <= 0) then
+    exit; // avoid EDocVariant in InternalAddObj()
+  if VCount <> 0 then // inlined GetValueIndex()
+  begin
+    ndx := FindNonVoid[Has(dvoNameCaseSensitive)](pointer(VName), aName, aNameLen, VCount);
+    if ndx >= 0 then
+    begin
+      exist := @VValue[ndx];
+      arr := _Safe(exist^);
+      if arr^.Has(dvoIsArray) then
+        result := arr^.NewItem // where to store the new item
+      else
+      begin // convert value to array
+        arr := @tmp;
+        arr^.Init(VOptions, dvArray);
+        arr^.VCount := 2;
+        v := DynArrayNew(@arr^.VValue, 3, SizeOf(exist^));
+        v^ := PVarData(exist)^;          // copy as first item
+        PVarData(exist)^ := tmp;         // replace with array
+        result := @PVariantArray(v)^[1]; // where to store the new item
+      end;
+      exit;
+    end;
+  end;
+  ndx := InternalAddObj(aName, aNameLen);
+  result := @VValue[ndx]; // where to store the new item
 end;
 
 function TDocVariantData.AddObject(const aNameValuePairs: array of const;
@@ -9461,7 +9543,7 @@ begin
   if found = nil then
     result := false
   else
-    result := VariantToInt64(PVariant(found)^, aValue)
+    result := AnyVariantToInteger(PVariant(found)^, aValue)
 end;
 
 function TDocVariantData.GetAsDouble(const aName: RawUtf8; out aValue: double;
@@ -9788,7 +9870,7 @@ end;
 function TDocVariantData.GetItemAsInt(aIndex: integer): Int64;
 begin
   if (cardinal(aIndex) >= cardinal(VCount)) or
-     not VariantToInt64(VValue[aIndex], result) then
+     not AnyVariantToInteger(VValue[aIndex], result) then
     result := PtrInt(InternalNotFound(aIndex));
 end;
 
@@ -9901,9 +9983,9 @@ begin
       break; // reached the last item of the path, which is the value to set
     if ndx < 0 then
       if aCreateIfNotExisting and
-         not v^.Has(dvoIsArray) then // avoid EDocVariant in v^.InternalAddBuf()
+         not v^.Has(dvoIsArray) then // avoid EDocVariant in v^.InternalAddObj()
       begin
-        ndx := v^.InternalAddBuf(csv, len); // in two steps for FPC
+        ndx := v^.InternalAddObj(csv, len); // in two steps for FPC
         v := @v^.VValue[ndx];
         v^.InitClone(self); // same Options than root but with no Kind
       end
@@ -9915,9 +9997,9 @@ begin
   until false;
   if ndx < 0 then
     if v^.Has(dvoIsArray) then
-      exit // avoid EDocVariant in v^.InternalAddBuf()
+      exit // avoid EDocVariant in v^.InternalAddObj()
     else
-      ndx := v^.InternalAddBuf(csv, len);
+      ndx := v^.InternalAddObj(csv, len);
   if aMergeExisting and
      (ndx >= 0) then
   begin
@@ -10414,7 +10496,7 @@ end;
 
 function TDocVariantData.GetInt64ByName(const aName: RawUtf8): Int64;
 begin
-  if not VariantToInt64(GetPVariantByName(aName)^, result) then
+  if not AnyVariantToInteger(GetPVariantByName(aName)^, result) then
     result := 0;
 end;
 
@@ -12415,7 +12497,7 @@ var
   v: PVariant;
 begin
   v := ValueAt(position);
-  if not VariantToInt64(v^, result) then
+  if not AnyVariantToInteger(v^, result) then
     EDocList.GetRaise('I', position, v^);
 end;
 
@@ -12956,7 +13038,7 @@ var
   v: PVariant;
 begin
   v := GetExistingValueAt(key, 'I');
-  if not VariantToInt64(v^, result) then
+  if not AnyVariantToInteger(v^, result) then
     EDocDict.Error('I', key, v^);
 end;
 
@@ -13114,7 +13196,7 @@ var
   v: PVariant;
 begin
   result := GetValueAt(key, v) and
-            VariantToInt64(v^, value);
+            AnyVariantToInteger(v^, value);
 end;
 
 function TDocDict.Get(const key: RawUtf8; var value: double): boolean;
@@ -13313,6 +13395,7 @@ begin
   TDocDict.RegisterToRtti(TypeInfo(IDocDict));
 end;
 
+{$ifdef FPC} // GetVariantManager() is no-op on Delphi 7+
 var
   // naive but efficient type cache - e.g. for TBsonVariant or TQuickJsVariant
   LastDispInvoke: TSynInvokeableVariantType;
@@ -13403,6 +13486,7 @@ direct:         if Dest <> nil then
     end;
   end;
 end;
+{$endif FPC}
 
 procedure SetJsonVTypes(opt: PWordArray; vt: cardinal; dest: PCardinal);
 var
@@ -13429,11 +13513,11 @@ const
 
 procedure InitializeUnit;
 var
-  vm: TVariantManager; // available since Delphi 7
   vt: cardinal;
   ins: boolean;
   i: PtrUInt;
   {$ifdef FPC}
+  vm: TVariantManager;
   test: variant;
   {$endif FPC}
 begin
@@ -13481,11 +13565,11 @@ begin
   _VARDATACMP[varUString, false] := 17;
   _VARDATACMP[varUString, true]  := 18;
   {$endif HASVARUSTRING}
-  // patch DispInvoke for performance and to circumvent RTL inconsistencies
+  {$ifdef FPC}
+  // FPC patch DispInvoke for performance and to circumvent RTL inconsistencies
   GetVariantManager(vm);
   vm.DispInvoke := NewDispInvoke;
   SetVariantManager(vm);
-  {$ifdef FPC}
   // circumvent FPC 3.2+ inverted parameters order - may be fixed in later FPC
   test := _ObjFast([]);
   try

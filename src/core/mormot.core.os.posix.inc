@@ -115,6 +115,9 @@ begin
   result := -1;
 end;
 
+var
+  OSSafe: TLightLock; // when GlobalLock is overkill
+
 
 { ****************** Unicode, Time, File process }
 
@@ -154,8 +157,19 @@ begin
 end;
 
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
+var
+  exp: TFileName;
 begin
-  result := TLibHandle(dlopen(pointer(LibraryName), RTLD_LAZY));
+  if Pos('/', LibraryName) > 1 then // relative path but not 'libcrypto.so.4'
+  begin
+    // try to load as absolute file name so that dladdr() returns full path
+    exp := ExpandFileName(LibraryName);
+    result := TLibHandle(dlopen(pointer(exp), RTLD_NOW));
+    if result <> 0 then
+      exit;
+  end;
+  // absolute '/path/to/lib.so' or system-resolved plain 'lib.so'
+  result := TLibHandle(dlopen(pointer(LibraryName), RTLD_NOW));
 end;
 
 procedure LibraryClose(Lib: TLibHandle);
@@ -1688,9 +1702,9 @@ begin
      fpS_ISBLK(st.st_mode) or
      fpS_ISCHR(st.st_mode) or
      fpS_ISFIFO(st.st_mode) Then
-    result := result or faSysFile{%H-};
+    result := result or faSystemFile;
   if fpS_ISLNK(st.st_mode) then
-    result := result or faSymLink{%H-};
+    result := result or faSymbolicLink;
 end;
 
 function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
@@ -1792,36 +1806,56 @@ begin
 end;
 
 var
-  PosixProgramInfo: dl_info; // set at startup
+  PosixProgramInfo: dl_info; // set at startup about the main exec/library
+
+function GetExecutableBase(aAddress: pointer): PtrUInt;
+var
+  dlinfo: dl_info;
+begin
+  if aAddress = nil then
+    exit(PtrUInt(PosixProgramInfo.dli_fbase));
+  FillCharFast(dlinfo, sizeof(dlinfo), 0);
+  if dladdr(aAddress, @dlinfo) = 0 then
+    result := 0
+  else
+    result := PtrUInt(dlinfo.dli_fbase);
+end;
 
 procedure GetDlInfoName(var dlinfo: dl_info; var result: TFileName);
 begin
-  {$ifdef UNICODE}
-  result := string(dlinfo.dli_fname); // use RTL from PAnsiChar to TFileName
-  {$else}
-  FastSetString(RawUtf8(result), dlinfo.dli_fname, StrLen(dlinfo.dli_fname));
-  {$endif UNICODE}
-  if (result <> '') and
-     (result[1] <> '/') then
-    result := ExpandFileName(string(result));
+  if dlinfo.dli_fname = nil then
+    result := ''
+  else
+    {$ifdef UNICODE}
+    result := string(dlinfo.dli_fname); // use RTL from PAnsiChar to TFileName
+    {$else}
+    FastSetString(RawUtf8(result), dlinfo.dli_fname, StrLen(dlinfo.dli_fname));
+    {$endif UNICODE}
 end;
 
-function GetExecutableName(aAddress: pointer): TFileName;
+function GetExecutableName(aAddress: pointer; aBase: PPtrUInt;
+  aSymbol: PPUtf8Char): TFileName;
 var
   dlinfo: dl_info;
 begin
   FillCharFast(dlinfo, sizeof(dlinfo), 0);
-  dladdr(aAddress, @dlinfo);
-  GetDlInfoName(dlinfo, result);
+  if dladdr(aAddress, @dlinfo) = 0 then
+    result := ''
+  else if dlinfo.dli_fbase = PosixProgramInfo.dli_fbase then
+    // main exec/library may return e.g. './mormot2tests'
+    result := Executable.InstanceFileName // this value was expanded at startup
+  else
+    // expected to be absolute for libraries loaded via our LibraryOpen()
+    GetDlInfoName(dlinfo, result);
+  if aBase <> nil then
+    aBase^ := PtrUInt(dlinfo.dli_fbase);
+  if aSymbol <> nil then
+    aSymbol^ := pointer(dlinfo.dli_sname);
 end;
 
-function IsMainExecutable(aAddress: pointer): boolean;
-var
-  dlinfo: dl_info;
+function IsCurrentExecutable(aAddress: pointer): boolean;
 begin
-  FillCharFast(dlinfo, sizeof(dlinfo), 0);
-  dladdr(aAddress, @dlinfo);
-  result := (dlinfo.dli_fbase = PosixProgramInfo.dli_fbase);
+  result := (GetExecutableBase(aAddress) = PtrUInt(PosixProgramInfo.dli_fbase));
 end;
 
 function CopyFile(const Source, Target: TFileName; FailIfExists: boolean): boolean;
@@ -1988,10 +2022,10 @@ begin
   OsErrorShortVar(error, dest, {noint=}true); // known 'E###' on Linux + BSD
   if dest[0] = #0 then
   {$ifdef FPC}
-    dest := StrError(error) // FPC RTL returns its plain text as shortstring
+    dest := StrError(error) // FPC RTL returns its plain text as ShortString
   else
   begin
-    AppendShortTwoChars(ord(' ') + ord('(') shl 8, @dest);
+    AppendShortTwoCharsSafe(ord(' ') + ord('(') shl 8, dest);
     AppendShort(StrError(error), dest); // e.g. 'ECHILD (No child processes)'
     AppendShortCharSafe(')', dest);
   end;
@@ -2082,9 +2116,6 @@ begin
   fpnanosleep(@timeout, nil)
   // no retry loop on ESysEINTR (as with regular RTL's Sleep)
 end;
-
-var
-  OSSafe: TLightLock; // when GlobalLock is overkill
 
 {$undef HASEVENTFD}
 {$undef HASGETRANDOM}
@@ -3337,7 +3368,7 @@ type
     mem_unit: cardinal;                  // Memory unit size in bytes
   end;
 
-function RetrieveSysInfo(var si: TSysInfo): boolean;
+function _RetrieveSysInfo(var si: TSysInfo): boolean;
 var
   avg: TLoadAvg;
   i: PtrInt;
@@ -3844,12 +3875,19 @@ begin
   result := FindFileCardinal('/proc/self/status', 'TRACERPID:') <> 0;
 end;
 
+function _RetrieveSysInfo(var si: TSysInfo): boolean;
+begin // single syscall gives enough information on Linux
+  result := SysInfo(@si) = 0;
+end;
+
+function RetrieveSysInfo(var si: TSysInfo): boolean; forward; // 1 second cache
+
 function RetrieveLoadAvg: TShort23;
 var
   si: TSysInfo;  // Linuxism
 begin
   result[0] := #0;
-  if SysInfo(@si) <> 0 then // one syscall is faster than /proc/loadavg access
+  if not RetrieveSysInfo(si) then // cache or syscall faster than /proc/loadavg
     exit;
   AppendShort(TwoDigits(si.loads[0] / double(65536.0)), result);
   AppendShortChar(' ', @result);
@@ -3857,11 +3895,6 @@ begin
   AppendShortChar(' ', @result);
   AppendShort(TwoDigits(si.loads[2] / double(65536.0)), result);
 end; // we didn't use AppendShortCurr64() because of expected rounding
-
-function RetrieveSysInfo(var si: TSysInfo): boolean;
-begin // single syscall gives enough information on Linux
-  result := SysInfo(@si) = 0;
-end;
 
 function RetrieveSystemTimes(out IdleTime, KernelTime, UserTime: Int64): boolean;
 var
@@ -4427,6 +4460,10 @@ end;
   {$define USEPATCHRWX}
 {$endif OSLINUX}
 
+const
+  PROT_READWRITE = PROT_READ or PROT_WRITE;
+  MAP_DEFAULT = MAP_PRIVATE or MAP_ANONYMOUS;
+
 function mprotect(Addr: PtrUInt; Len: size_t; Prot: integer): integer;
   cdecl external clib name 'mprotect';
 
@@ -4451,7 +4488,7 @@ begin
     inc(siz, SystemInfo.dwPageSize);
   OSSafe.Lock;
   try
-    if mprotect(adr, siz, PROT_READ or PROT_WRITE) <> 0 then // RW
+    if mprotect(adr, siz, PROT_READWRITE) <> 0 then // RW
       exit;
     // no try..finally since could be part of the RTL
     MoveByOne(New, Old, Size);
@@ -4490,13 +4527,13 @@ begin
       if Size < 0 then // from PatchPointer(VMT)
       begin
         if not PtrUIntScanExists(pointer(PatchedVmt), PatchedVmtCount, adr) then
-          if mprotect(adr, siz, PROT_READ or PROT_WRITE) = 0 then
+          if mprotect(adr, siz, PROT_READWRITE) = 0 then
             AddPtrUInt(PatchedVmt, PatchedVmtCount, adr) // mark set to RW
           else
             PatchedHardened := true;
       end // Size > 0 from RedirectCode()
       else if not PtrUIntScanExists(pointer(PatchedCode), PatchedCodeCount, adr) then
-          if mprotect(adr, siz, PROT_READ or PROT_WRITE or PROT_EXEC) = 0 then
+          if mprotect(adr, siz, PROT_READWRITE or PROT_EXEC) = 0 then
             AddPtrUInt(PatchedCode, PatchedCodeCount, adr) // mark set to RWX
           else
             PatchedHardened := true;
@@ -4582,8 +4619,7 @@ begin
   begin
     // try whole -STUB_INTERV..+STUB_INTERV range
     inc(start, STUB_SIZE);
-    result := fpmmap(pointer(start), STUB_SIZE,
-      flProtect, MAP_PRIVATE or MAP_ANONYMOUS, -1, 0);
+    result := fpmmap(pointer(start), STUB_SIZE, flProtect, MAP_DEFAULT, -1, 0);
     if result <> MAP_FAILED then
     begin
       // close enough for a 24/32-bit relative jump?
@@ -4605,8 +4641,7 @@ end;
 // other platforms (Intel+Arm64) use plain Kernel call and PtrInt jump
 function StubCallAllocMem(const Size, flProtect: DWORD): pointer;
 begin
-  result := fpmmap(nil, STUB_SIZE,
-    flProtect, MAP_PRIVATE OR MAP_ANONYMOUS, -1, 0);
+  result := fpmmap(nil, STUB_SIZE, flProtect, MAP_DEFAULT, -1, 0);
 end;
 
 {$endif CPUARM}
@@ -4615,11 +4650,11 @@ function StubMemoryAlloc: pointer;
 begin
   result := MAP_FAILED;
   if not (fStubMemoryExecXorWrite in _F1) then // W and X are exclusive on some OS
-    result := StubCallAllocMem(STUB_SIZE, PROT_READ or PROT_WRITE or PROT_EXEC);
+    result := StubCallAllocMem(STUB_SIZE, PROT_READWRITE or PROT_EXEC);
   if result = MAP_FAILED then
   begin
     // i.e. on OpenBSD or OSX aarch64, we can not have W and X protection
-    result := StubCallAllocMem(STUB_SIZE, PROT_READ OR PROT_WRITE);
+    result := StubCallAllocMem(STUB_SIZE, PROT_READWRITE);
     if result <> MAP_FAILED then
       include(_F1, fStubMemoryExecXorWrite);
   end;
@@ -4646,11 +4681,22 @@ begin
   if Exec then
     flags := PROT_READ OR PROT_EXEC
   else
-    flags := PROT_READ or PROT_WRITE;
+    flags := PROT_READWRITE;
   if mprotect(aligned, pagesize shl 1, flags) < 0 then
      raise EOSException.Create('ReserveExecutableMemoryPageAccess: mprotect fail');
 end;
 
+function _GetmemDualAccessPages: pointer;
+var
+  s: PtrUInt;
+begin
+  s := SystemInfo.dwPageSize;
+  result := fpmmap(nil, s * 2, PROT_READWRITE, MAP_DEFAULT, -1, 0);
+  if result = nil then
+    exit;
+  inc(PByte(result), s);
+  mprotect(PtrUInt(result), s, PROT_NONE); // silently ignore any problem
+end;
 
 const
   // Transparent Huge Pages (THP) exist since Linux 2.6.38, Superpages provide
@@ -4686,14 +4732,14 @@ function _GetLargeMem(BigSize: PtrUInt): pointer;
 var
   flags: cardinal;
 begin
-  flags := MAP_PRIVATE or MAP_ANONYMOUS;
+  flags := MAP_DEFAULT;
   if BigSize >= PMD_SIZE * 2 then
     BigSize := (BigSize + PMD_MASK) and not PMD_MASK;
   if (MAP_HUGE_SIZE <> 0) and
      (BigSize >= PMD_SIZE * 8) then
   begin
     flags := flags or MAP_HUGETLB or MAP_HUGE_2MB;
-    result := fpmmap(nil, BigSize, PROT_READ or PROT_WRITE, flags, -1, 0);
+    result := fpmmap(nil, BigSize, PROT_READWRITE, flags, -1, 0);
     if result <> MAP_FAILED then
       exit;
     // on mmap() failure, /proc/sys/vm/nr_hugepages is likely to be 0
@@ -4701,9 +4747,9 @@ begin
     // - and try "echo 1000 > /proc/sys/vm/nr_hugepages" as root
     // - but we did not see any noticeable benefit for this process
     MAP_HUGE_SIZE := 0; // disable this feature from now on
-    flags := MAP_PRIVATE or MAP_ANONYMOUS;
+    flags := MAP_DEFAULT;
   end;
-  result := fpmmap(nil, BigSize, PROT_READ or PROT_WRITE, flags, -1, 0);
+  result := fpmmap(nil, BigSize, PROT_READWRITE, flags, -1, 0);
   if result = MAP_FAILED then
     result := nil; // as VirtualAlloc()
 end;
@@ -4712,8 +4758,7 @@ function _GetLargeMem(BigSize: PtrUInt): pointer;
 begin
   if BigSize >= PMD_SIZE * 2 then  // ensure 2MB aligned for Size >= 4MB
     BigSize := (BigSize + PMD_MASK) and not PMD_MASK;
-  result := fpmmap(nil, BigSize,
-    PROT_READ or PROT_WRITE, MAP_PRIVATE or MAP_ANONYMOUS, -1, 0);
+  result := fpmmap(nil, BigSize, PROT_READWRITE, MAP_DEFAULT, -1, 0);
   if result = MAP_FAILED then
     result := nil; // as VirtualAlloc()
 end;
@@ -5796,15 +5841,15 @@ begin
   SystemInfo.dwPageSize := fpsysctlhwint(HW_PAGESIZE);
   beg := fpsysctlhwstr(HW_MACHINE, temp1);
   {$ifdef OSDARWIN}
-  CpuThreads := fpsysctlbynameint('hw.logicalcpu');
-  CpuCores   := fpsysctlbynameint('hw.physicalcpu');
+  SystemInfo.dwNumberOfProcessors := fpsysctlbynameint('hw.logicalcpu');
+  CpuCores := fpsysctlbynameint('hw.physicalcpu');
   if PosChar(beg, ' ') = nil then // e.g. from a Parallels VM
     beg := fpsysctlhwstr(HW_MODEL, temp1);
   modname := fpsysctlbynamestr('machdep.cpu.brand_string', temp2);
   {$endif OSDARWIN}
   FastSetString(BiosInfoText, beg, StrLen(beg));
-  if CpuThreads = 0 then
-    CpuThreads := fpsysctlhwint(HW_NCPU);
+  if SystemInfo.dwNumberOfProcessors = 0 then
+    SystemInfo.dwNumberOfProcessors := fpsysctlhwint(HW_NCPU);
   if modname = nil then
     modname := fpsysctlhwstr(HW_MODEL, temp2);
   {$ifdef OSDARWIN}

@@ -1647,6 +1647,9 @@ function IdemPCharW(p: PWideChar; up: PUtf8Char): boolean;
 // - see StartWithExact() from this unit for a case-sensitive version
 function StartWith(const text, upTextStart: RawUtf8): boolean;
 
+/// check case-insensitive matching starting of text in lowerTextStart
+function StartWithLower(const text, lowerTextStart: RawUtf8): boolean;
+
 /// check case-insensitive matching ending of text in upTextEnd
 // - returns true if the item matched
 // - ignore case - upTextEnd must be already in upper case
@@ -2448,10 +2451,10 @@ procedure SetCase(var Dest: RawUtf8; Text: pointer; TextLen: PtrInt; aKind: TSet
 function SetCase(const Text: RawUtf8; aKind: TSetCase): RawUtf8; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// compute a RawUtf8 from a shortstring RTTI identifier with custom casing
+/// compute a RawUtf8 from a ShortString RTTI identifier with custom casing
 procedure ShortTrim(aShort: PShortString; var aDest: RawUtf8; aKind: TSetCase); overload;
 
-/// compute a RawUtf8 from a shortstring RTTI identifier with custom casing
+/// compute a RawUtf8 from a ShortString RTTI identifier with custom casing
 function ShortTrim(aShort: PShortString; aKind: TSetCase = scTrimLeft): RawUtf8; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -2858,6 +2861,9 @@ type
 
 /// add the Value to Values[] string array
 function AddString(var Values: TStringDynArray; const Value: string): PtrInt;
+
+/// case-sensitive search a Value to Values[] string array
+function FindString(const Values: TStringDynArray; const Value: string): PtrInt;
 
 /// convert the string dynamic array into a dynamic array of UTF-8 strings
 procedure StringDynArrayToRawUtf8DynArray(const Source: array of string;
@@ -3982,7 +3988,7 @@ end;
 
 function CodePageToText(aCodePage: cardinal): RawUtf8;
 var
-  tmp: TShort16;
+  tmp: TShort15;
 begin
   Unicode_CodePageName(aCodePage, tmp);
   LowerCaseCopy(@tmp[1], ord(tmp[0]), result); // more convenient as lower ident
@@ -6402,13 +6408,13 @@ begin
   while true do
     if up^ = #0 then
       break
-    else if table[up[PtrUInt(p)]] <> up^ then
+    else if table[up[PtrUInt(p)]] = up^ then
+      inc(up)
+    else
     begin
       result := false;
       exit;
-    end
-    else
-      inc(up);
+    end;
   result := true;
 end;
 
@@ -6425,13 +6431,13 @@ begin
   while true do
     if up^ = #0 then
       break
-    else if table[PtrInt(up[PtrUInt(p)])] <> PByte(up)^ then
+    else if table[PtrInt(up[PtrUInt(p)])] = PByte(up)^ then
+      inc(up)
+    else
     begin
       result := false;
       exit;
-    end
-    else
-      inc(up);
+    end;
   result := true;
 end;
 
@@ -6626,6 +6632,16 @@ begin
               PStrLen(PAnsiChar(pointer(upTextStart)) - _STRLEN)^) and
             IdemPCharAnsi({$ifndef CPUX86NOTPIC}@{$endif}NormToUpperAnsi7,
               pointer(text), pointer(upTextStart));
+end;
+
+function StartWithLower(const text, lowerTextStart: RawUtf8): boolean;
+begin
+  result := (PtrUInt(text) <> 0) and
+            (PtrUInt(lowerTextStart) <> 0) and
+            (PStrLen(PAnsiChar(pointer(text)) - _STRLEN)^ >=
+              PStrLen(PAnsiChar(pointer(lowerTextStart)) - _STRLEN)^) and
+            IdemPCharAnsi({$ifndef CPUX86NOTPIC}@{$endif}NormToLowerAnsi7,
+              pointer(text), pointer(lowerTextStart));
 end;
 
 function EndWith(const text, upTextEnd: RawUtf8): boolean;
@@ -8514,7 +8530,11 @@ var
 begin
   l := length(textStart);
   result := (length(text) >= l) and
+    {$ifdef ASMX64}
+    (MemCmp(pointer(text), pointer(textStart), l) = 0);
+    {$else}
     mormot.core.base.CompareMem(pointer(text), pointer(textStart), l);
+    {$endif ASMX64}
 end;
 
 function EndWithExact(const text, textEnd: RawUtf8): boolean;
@@ -8524,7 +8544,11 @@ begin
   l := length(textEnd);
   o := length(text) - l;
   result := (o >= 0) and
-    mormot.core.base.CompareMem(PUtf8Char(pointer(text)) + o, pointer(textEnd), l);
+    {$ifdef ASMX64}
+    (MemCmp(@PByteArray(text)[o], pointer(textEnd), l) = 0);
+    {$else}
+    mormot.core.base.CompareMem(@PByteArray(text)[o], pointer(textEnd), l);
+    {$endif ASMX64}
 end;
 
 function GetNextLine(source: PUtf8Char; out next: PUtf8Char; andtrim: boolean): RawUtf8;
@@ -10703,6 +10727,14 @@ begin
   result := length(Values);
   SetLength(Values, result + 1);
   Values[result] := Value;
+end;
+
+function FindString(const Values: TStringDynArray; const Value: string): PtrInt;
+begin
+  for result := 0 to length(Values) - 1 do
+    if Values[result] = Value then
+      exit;
+  result := -1;
 end;
 
 procedure StringDynArrayToRawUtf8DynArray(const Source: array of string;

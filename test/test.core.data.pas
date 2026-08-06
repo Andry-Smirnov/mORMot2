@@ -132,6 +132,46 @@ type
     procedure Setup; override;
     procedure MustacheTranslate(var English: string);
     procedure MustacheHelper(const Value: variant; out Result: variant);
+    procedure XmlWalk(var p: TXmlParser; kind: TXmlToken;
+      const name: RawUtf8 = ''; const value: RawUtf8 = '');
+    procedure XmlExpectRaise(Expected: TXmlParserError; const Context: string;
+      const Xml: RawUtf8; Options: TXmlParserOptions = []);
+    procedure RunGolden(const Name, Yaml, ExpectedJson: RawUtf8);
+    procedure RunYaml(const Yaml: array of const);
+    procedure RunFile(const Yaml: array of const);
+    procedure YamlExpectRaise(const Name, Yaml: RawUtf8);
+  public
+    /// SAX-level tokens over elements, attributes, text and CData
+    procedure XmlSaxTokens;
+    /// the five predefined entities and numeric character references
+    procedure XmlSaxEntities;
+    /// xpoStripNamespacePrefix/xpoKeepComments/xpoKeepPI/xpoKeepWhiteSpace
+    procedure XmlSaxOptions;
+    /// malformed input and the "basic profile" rejection set (e.g. DTD)
+    procedure XmlSaxErrors;
+    /// buffer/nesting/entity boundaries which no other test does cover
+    // - markup ending at the very last byte of the input, oversized numeric
+    // references, the 255 nesting levels limit, 127-bytes names, and input
+    // buffers with no #0 terminator nor any readable byte after their end
+    procedure XmlSaxBoundaries;
+    /// XmlToVariant/TryXmlToVariant/XmlToJson mapping conventions
+    procedure XmlToVariant;
+    /// Find/Next/Consume* methods
+    procedure XmlParserConsume;
+    /// parse YAML happy paths and compare TDocVariantData.ToJson
+    procedure YamlParseGoldenReferences;
+    /// parse then serialize then parse, compare equivalence
+    procedure YamlRoundtrip;
+    /// unsupported constructs must raise EYamlException with line info
+    procedure YamlErrorCases;
+    /// YamlFileToVariant reads via OS file I/O
+    procedure YamlFileApi;
+    /// pathological deep nesting must raise EYamlException, not EStackOverflow
+    // - covers the Stripe 6 MB spec3 public stress-test failure mode
+    procedure YamlRecursionDepth;
+    /// an OpenAPI-shaped spec in YAML must yield the same TDocVariantData
+    // as its JSON counterpart - this is the invariant mopenapi relies on
+    procedure YamlOpenapiEquivalence;
   published
     /// some low-level RTTI access
     // - especially the field type retrieval from published properties
@@ -169,30 +209,10 @@ type
     procedure _TSynMonitorUsage;
     /// validate some folder-level functions
     procedure Folders;
-  end;
-
-  /// regression tests for mormot.core.yaml features
-  TTestCoreYaml = class(TSynTestCase)
-  protected
-    procedure RunGolden(const Name, Yaml, ExpectedJson: RawUtf8);
-    procedure RunYaml(const Yaml: array of const);
-    procedure RunFile(const Yaml: array of const);
-    procedure ExpectRaise(const Name, Yaml: RawUtf8);
-  published
-    /// parse YAML happy paths and compare TDocVariantData.ToJson
-    procedure ParseGoldenReferences;
-    /// parse then serialize then parse, compare equivalence
-    procedure Roundtrip;
-    /// unsupported constructs must raise EYamlException with line info
-    procedure ErrorCases;
-    /// YamlFileToVariant reads via OS file I/O
-    procedure FileApi;
-    /// pathological deep nesting must raise EYamlException, not EStackOverflow
-    // - covers the Stripe 6 MB spec3 public stress-test failure mode
-    procedure RecursionDepth;
-    /// an OpenAPI-shaped spec in YAML must yield the same TDocVariantData
-    // as its JSON counterpart - this is the invariant mopenapi relies on
-    procedure OpenapiEquivalence;
+    /// regression tests for the mormot.core.fmt XML parser
+    procedure _XML;
+    /// regression tests for the mormot.core.fmt YAML parser
+    procedure _YAML;
   end;
 
   /// this test case will test most functions, classes and types defined and
@@ -740,8 +760,8 @@ begin
   Check(AnyVariantToDouble(v, d));
   Check(d = 123.0, '123a');
   CheckEqual(AnyVariantToIntegerDef(v), 123);
-  Check(not AnyVariantToInteger(Null, i64));
-  CheckEqual(i64, 123);
+  Check(AnyVariantToInteger(Null, i64));
+  CheckEqual(i64, 0);
   CheckEqual(AnyVariantToIntegerDef(Null), 0);
   CheckEqual(AnyVariantToIntegerDef(Null, 1), 1);
   Check(not AnyVariantToDouble(Null, d));
@@ -4919,6 +4939,7 @@ begin
     '<p><a href="https://test" rel="nofollow">https://test</a></p>');
   CheckEqual(HtmlEscapeWiki('test'#13#10'click on http://coucouc.net toto'),
     '<p>test</p><p>click on <a href="http://coucouc.net" rel="nofollow">http://coucouc.net</a> toto</p>');
+  CheckEqual(HtmlEscapeWiki(':)'), Join(['<p>', EMOJI_UTF8[eSmiley], '</p>']));
   CheckEqual(HtmlEscapeWiki(':test: :) joy:'),
     '<p>:test: ' + EMOJI_UTF8[eSmiley] + ' joy:</p>');
   CheckEqual(HtmlEscapeWiki(':innocent: smile'),
@@ -8746,7 +8767,15 @@ begin
 end;
 
 
-{ TTestCoreYaml }
+procedure TTestCoreProcess._YAML;
+begin
+  YamlParseGoldenReferences;
+  YamlRoundtrip;
+  YamlErrorCases;
+  YamlFileApi;
+  YamlRecursionDepth;
+  YamlOpenapiEquivalence;
+end;
 
 type
   TYamlGoldenCase = record
@@ -8934,7 +8963,7 @@ const
      ExpectedJson: '')
   );
 
-procedure TTestCoreYaml.RunGolden(const Name, Yaml, ExpectedJson: RawUtf8);
+procedure TTestCoreProcess.RunGolden(const Name, Yaml, ExpectedJson: RawUtf8);
 var
   doc: TDocVariantData;
   actual: RawUtf8;
@@ -8944,7 +8973,7 @@ begin
   CheckEqual(actual, ExpectedJson, FormatUtf8('golden "%"', [Name]));
 end;
 
-procedure TTestCoreYaml.RunYaml(const Yaml: array of const);
+procedure TTestCoreProcess.RunYaml(const Yaml: array of const);
 var
   doc: TDocVariantData;
   tmp: RawUtf8;
@@ -8953,7 +8982,7 @@ begin
   YamlToVariant(tmp, doc);
 end;
 
-procedure TTestCoreYaml.RunFile(const Yaml: array of const);
+procedure TTestCoreProcess.RunFile(const Yaml: array of const);
 var
   doc: TDocVariantData;
   tmp: RawUtf8;
@@ -8964,12 +8993,12 @@ begin
   Check(TryYamlFileToVariant(fn, doc));
 end;
 
-procedure TTestCoreYaml.ExpectRaise(const Name, Yaml: RawUtf8);
+procedure TTestCoreProcess.YamlExpectRaise(const Name, Yaml: RawUtf8);
 begin
   CheckRaised(RunYaml, [Yaml], EYamlException, Name);
 end;
 
-procedure TTestCoreYaml.ParseGoldenReferences;
+procedure TTestCoreProcess.YamlParseGoldenReferences;
 var
   i: PtrInt;
 begin
@@ -8977,7 +9006,7 @@ begin
     RunGolden(GOLDEN[i].Name, GOLDEN[i].Yaml, GOLDEN[i].ExpectedJson);
 end;
 
-procedure TTestCoreYaml.Roundtrip;
+procedure TTestCoreProcess.YamlRoundtrip;
 var
   i: PtrInt;
   doc1, doc2: TDocVariantData;
@@ -9003,15 +9032,15 @@ begin
   end;
 end;
 
-procedure TTestCoreYaml.ErrorCases;
+procedure TTestCoreProcess.YamlErrorCases;
 var
   i: PtrInt;
 begin
   for i := low(ERRORS) to high(ERRORS) do
-    ExpectRaise(Join([' for ', ERRORS[i].Name]), ERRORS[i].Yaml);
+    YamlExpectRaise(Join([' for ', ERRORS[i].Name]), ERRORS[i].Yaml);
 end;
 
-procedure TTestCoreYaml.FileApi;
+procedure TTestCoreProcess.YamlFileApi;
 var
   fn: TFileName;
   doc: TDocVariantData;
@@ -9041,7 +9070,7 @@ begin
   end;
 end;
 
-procedure TTestCoreYaml.RecursionDepth;
+procedure TTestCoreProcess.YamlRecursionDepth;
 var
   i: PtrInt;
   yaml, indent: RawUtf8;
@@ -9059,7 +9088,7 @@ begin
     Append(yaml, indent, 'a: 1'#10);
     // deep input beyond the cap must raise EYamlException (not EStackOverflow)
     YamlMaxDepth := 8;
-    ExpectRaise(' depth 20 must raise EYamlException when YamlMaxDepth=8', yaml);
+    YamlExpectRaise(' depth 20 must raise EYamlException when YamlMaxDepth=8', yaml);
     // same input parses cleanly when the cap is high enough
     YamlMaxDepth := 100;
     YamlToVariant(yaml, doc);
@@ -9069,7 +9098,7 @@ begin
   end;
 end;
 
-procedure TTestCoreYaml.OpenapiEquivalence;
+procedure TTestCoreProcess.YamlOpenapiEquivalence;
 const
   // a compact OpenAPI 3.0 slice exercising: nested maps, arrays, $ref,
   // numeric-looking keys (the "200" response code) and boolean properties
@@ -9136,6 +9165,662 @@ begin
     'OpenAPI-shaped YAML must match JSON equivalent');
 end;
 
+procedure TTestCoreProcess._XML;
+begin
+  XmlSaxTokens;
+  XmlSaxEntities;
+  XmlSaxOptions;
+  XmlSaxErrors;
+  XmlSaxBoundaries;
+  XmlToVariant;
+  XmlParserConsume;
+end;
+
+procedure TTestCoreProcess.XmlWalk(var p: TXmlParser; kind: TXmlToken;
+  const name, value: RawUtf8);
+var
+  n, v: RawUtf8;
+begin
+  Check(p.ParseNext = kind, 'no more tokens');
+  Check(p.Kind = kind, 'kind');
+  p.NameToUtf8(n);
+  Check(p.ValueToUtf8(v), 'valuetoutf8');
+  CheckEqual(n, name, 'name');
+  CheckEqual(v, value, 'value');
+end;
+
+procedure TTestCoreProcess.XmlExpectRaise(Expected: TXmlParserError;
+  const Context: string; const Xml: RawUtf8; Options: TXmlParserOptions);
+var
+  p: TXmlParser;
+  n, v: RawUtf8;
+  ok: boolean;
+begin
+  // first try to catch the EXmlException (default behavior)
+  ok := false;
+  try
+    p.Init(Xml, Options);
+    Check(p.LastError = xpeNone);
+    while p.ParseNext <> xtEof do
+    begin
+      p.NameToUtf8(n);
+      p.ValueToUtf8(v); // may set xpeXmlUnescapeFailed
+    end;
+  except
+    on EXmlException do
+      ok := true;
+  end;
+  Check(ok, Context);
+  CheckEqual(ord(p.LastError), ord(Expected), XML_ERROR[Expected]);
+  // check properly return xtError with xpoNoException option
+  p.Init(Xml, Options + [xpoNoException]);
+  Check(p.LastError = xpeNone);
+  while not (p.ParseNext in [xtEof, xtError]) do
+  begin
+    Check(p.LastError = xpeNone);
+    p.ValueToUtf8(v); // may set xtError and xpeXmlUnescapeFailed
+  end;
+  Check(p.Kind = xtError, Context);
+  CheckEqual(ord(p.LastError), ord(Expected), XML_ERROR[Expected]);
+  Check(p.Kind = xtError, Context);
+  Check(p.LastError = Expected, Context);
+end;
+
+const
+  XML1: RawUtf8 = '<?xml version="1.0" encoding="UTF-8"?>'#13#10 +
+    '<root a="1" b=''two''>'#10 +
+    '  <item> some text </item>'#10 +
+    '  <empty/>'#10 +
+    '  <![CDATA[raw <>&'' " ]]>'#10 +
+    '  <!-- a comment -->tail</root>';
+
+procedure TTestCoreProcess.XmlSaxTokens;
+var
+  p: TXmlParser;
+begin
+  p.Init(XML1);
+  Check(p.Kind = xtNotStarted, 'not started');
+  Check(p.LastError = xpeNone);
+  CheckEqual(p.Depth, 0);
+  XmlWalk(p, xtElementStart, 'root');
+  CheckEqual(p.Depth, 1);
+  XmlWalk(p, xtAttribute, 'a', '1');
+  XmlWalk(p, xtAttribute, 'b', 'two');
+  XmlWalk(p, xtElementStart, 'item');
+  CheckEqual(p.Depth, 2);
+  XmlWalk(p, xtText, '', ' some text ');
+  XmlWalk(p, xtElementEnd, 'item');
+  CheckEqual(p.Depth, 1);
+  XmlWalk(p, xtElementStart, 'empty');
+  XmlWalk(p, xtElementEnd, 'empty');
+  CheckEqual(p.Depth, 1);
+  XmlWalk(p, xtCData, '', 'raw <>&'' " ');
+  XmlWalk(p, xtText, '', 'tail');
+  XmlWalk(p, xtElementEnd, 'root');
+  CheckEqual(p.Depth, 0);
+  Check(p.ParseNext = xtEof, 'eof');
+  Check(p.Kind = xtEof);
+  Check(p.ParseNext = xtEof, 'still eof');
+  Check(p.LastError = xpeNone);
+end;
+
+procedure TTestCoreProcess.XmlSaxEntities;
+var
+  p: TXmlParser;
+  unicode: RawUtf8;
+  buf: array[0..7] of AnsiChar;
+begin
+  // compute the U+4E2D UTF-8 bytes at runtime: a #$e4#$b8#$ad literal would
+  // be re-encoded from UTF-16 chars by the Delphi compiler
+  SetString(unicode, PAnsiChar(@buf), Ucs4ToUtf8($4E2D, @buf));
+  p.Init('<r q="&quot;&apos;">&lt;&amp;&gt; &#65;&#x42;c &#x4E2D;</r>');
+  XmlWalk(p, xtElementStart, 'r');
+  XmlWalk(p, xtAttribute, 'q', '"''');
+  XmlWalk(p, xtText, '', '<&> ABc ' + unicode);
+  XmlWalk(p, xtElementEnd, 'r');
+  Check(p.ParseNext = xtEof);
+  // the shared NumCharToUcs4() decoder is also wired into HTML unescape
+  CheckEqual(HtmlUnescape('x &#65;&#x42; &amp; y'), 'x AB & y');
+end;
+
+procedure TTestCoreProcess.XmlSaxOptions;
+var
+  p: TXmlParser;
+  s: RawUtf8;
+begin
+  // namespace prefixes are part of the names by default
+  s := '<ns:a xsi:x="1"><ns:b/></ns:a>';
+  p.Init(s);
+  XmlWalk(p, xtElementStart, 'ns:a');
+  XmlWalk(p, xtAttribute, 'xsi:x', '1');
+  XmlWalk(p, xtElementStart, 'ns:b');
+  XmlWalk(p, xtElementEnd, 'ns:b');
+  XmlWalk(p, xtElementEnd, 'ns:a');
+  Check(p.ParseNext = xtEof);
+  // ... but can be stripped on request
+  p.Init(s, [xpoStripNamespacePrefix]);
+  XmlWalk(p, xtElementStart, 'a');
+  XmlWalk(p, xtAttribute, 'x', '1');
+  XmlWalk(p, xtElementStart, 'b');
+  XmlWalk(p, xtElementEnd, 'b');
+  XmlWalk(p, xtElementEnd, 'a');
+  Check(p.ParseNext = xtEof);
+  // comments and processing instructions on request
+  p.Init(XML1, [xpoKeepComments, xpoKeepPI]);
+  XmlWalk(p, xtPI, 'xml', 'version="1.0" encoding="UTF-8"');
+  XmlWalk(p, xtElementStart, 'root');
+  XmlWalk(p, xtAttribute, 'a', '1');
+  XmlWalk(p, xtAttribute, 'b', 'two');
+  XmlWalk(p, xtElementStart, 'item');
+  XmlWalk(p, xtText, '', ' some text ');
+  XmlWalk(p, xtElementEnd, 'item');
+  XmlWalk(p, xtElementStart, 'empty');
+  XmlWalk(p, xtElementEnd, 'empty');
+  XmlWalk(p, xtCData, '', 'raw <>&'' " ');
+  XmlWalk(p, xtComment, '', ' a comment ');
+  XmlWalk(p, xtText, '', 'tail');
+  XmlWalk(p, xtElementEnd, 'root');
+  Check(p.ParseNext = xtEof);
+  // pure whitespace text nodes on request
+  p.Init('<a>  <b/>  </a>', [xpoKeepWhiteSpace]);
+  XmlWalk(p, xtElementStart, 'a');
+  XmlWalk(p, xtText, '', '  ');
+  XmlWalk(p, xtElementStart, 'b');
+  XmlWalk(p, xtElementEnd, 'b');
+  XmlWalk(p, xtText, '', '  ');
+  XmlWalk(p, xtElementEnd, 'a');
+  Check(p.ParseNext = xtEof);
+end;
+
+procedure TTestCoreProcess.XmlSaxErrors;
+var
+  deep: RawUtf8;
+  i: integer;
+begin
+  XmlExpectRaise(xpeUnsupportedMarkup, 'dtd',
+    '<!DOCTYPE foo [<!ENTITY x "y">]><a>&x;</a>');
+  XmlExpectRaise(xpeWrongEndTag, 'mismatch',
+    '<a><b></a>');
+  XmlExpectRaise(xpeEofElement, 'unclosed',
+    '<a><b>text');
+  XmlExpectRaise(xpeEofInTag, 'eof in tag',
+    '<a');
+  XmlExpectRaise(xpeEofInAttribute, 'eof in attr',
+    '<a b="c');
+  XmlExpectRaise(xpeMissingAttrQuote, 'unquoted attr',
+    '<a b=c/>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'unknown entity',
+    '<a>&nbsp;</a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'bad numeric ref',
+    '<a>&#xzz;</a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'overflow ref',
+    '<a>&#x110000;</a>');
+  XmlExpectRaise(xpeUnexpectedEndTag, 'lone end tag',
+    '</a>');
+  XmlExpectRaise(xpeEofInComment, 'eof in comment',
+    '<a><!-- x</a>');
+  XmlExpectRaise(xpeEofInCdata, 'eof in cdata',
+    '<a><![CDATA[x</a>');
+  XmlExpectRaise(xpeVoidTagName, 'void name',
+   '< a></a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'dangling amp',
+    '<a>&</a>');
+  for i := 1 to 300 do
+    Append(deep, '<a>');
+  XmlExpectRaise(xpeTooMuchNesting, 'too much nesting', deep);
+  deep := '<' + RawUtf8OfChar('n', 300) + '/>';
+  XmlExpectRaise(xpeTagNameTooLong, 'name too long', deep);
+end;
+
+procedure TTestCoreProcess.XmlSaxBoundaries;
+var
+  p: TXmlParser;
+  deep, u, v, s: RawUtf8;
+  i, n: PtrInt;
+  maxcp: RawUtf8;
+  buf: array[0..7] of AnsiChar;
+
+  procedure Scan(var x: TXmlParser; len: PtrInt; const Context: string);
+  // consume all tokens of an already Init-ed parser, checking that no
+  // spurious empty xtText is reported at the very end of the buffer
+  var
+    tok: PtrInt;
+    err: RawUtf8;
+  begin
+    tok := 0;
+    err := '';
+    try
+      while x.ParseNext <> xtEof do
+      begin
+        inc(tok);
+        // an empty text token would mean the end of buffer was mis-detected
+        Check((x.Kind <> xtText) or
+              (x.Value.Len > 0), Context);
+        if tok > 100 then
+          break; // paranoid: detect any infinite loop
+      end;
+      CheckEqual(x.Position, len);
+      Check(x.Depth = 0, Context);
+      Check(x.Kind = xtEof, Context);
+      Check(x.ParseNext = xtEof, Context); // idempotent at eof
+      Check(x.Depth = 0, Context);
+      CheckEqual(x.Position, len);
+    except
+      on E: EXmlException do
+        err := StringToUtf8(E.Message);
+    end;
+    Check(err = '', Context);
+    Check(tok <= 100, Context);
+  end;
+
+  procedure ExpectOk(const Context, Xml: RawUtf8;
+    Options: TXmlParserOptions = []);
+  // the mirror of ExpectRaise(): parse the whole input with no error at all,
+  // reported as a plain failed assertion rather than as an escaping exception
+  var
+    x: TXmlParser;
+    n, v, err: RawUtf8;
+  begin
+    err := '';
+    try
+      x.Init(Xml, Options);
+      while x.ParseNext <> xtEof do
+      begin
+        x.NameToUtf8(n);
+        Check(x.ValueToUtf8(v), 'valuetoutf82');
+      end;
+      CheckEqual(x.Position, length(Xml), Context);
+    except
+      on E: EXmlException do
+        err := StringToUtf8(E.Message);
+    end;
+    CheckEqual(err, '', Context);
+  end;
+
+  function DeepStarts(const Xml: RawUtf8; out Reason: RawUtf8): PtrInt;
+  // how many xtElementStart are accepted before an EXmlException is raised
+  var
+    x: TXmlParser;
+  begin
+    result := 0;
+    Reason := '';
+    try
+      x.Init(Xml);
+      while x.ParseNext <> xtEof do
+        if x.Kind = xtElementStart then
+          inc(result);
+    except
+      on E: EXmlException do
+        Reason := StringToUtf8(E.Message);
+    end;
+  end;
+
+  procedure NoTerm(const Xml: RawUtf8; const Context: string);
+  // parse a buffer holding exactly length(Xml) bytes with NO #0 terminator:
+  // the intent is to guard against any read of buffer[len], i.e. one single
+  // byte past the end of the input
+  // - on Windows the buffer is flushed against a PAGE_NOACCESS page, so such
+  // an overread does raise an access violation instead of going unnoticed
+  // - elsewhere a plain GetMem() block of the exact size is used: a regression
+  // would then show up as a wrong token, and any ASAN/valgrind run would
+  // still catch the overread itself
+  var
+    x: TXmlParser;
+    len: PtrInt;
+    raw: PUtf8Char;
+  begin
+    len := length(Xml);
+    raw := GetmemDualAccessPagesLock(Xml);
+    if Check(raw <> nil, 'GetmemDualAccessPagesLock') then
+    try
+      x.Init(raw, len);
+      Scan(x, len, Context);
+    finally
+      GetmemDualAccessPagesUnLock;
+    end;
+  end;
+
+begin
+  // 1. mixed content: non-blank text nodes keep their leading/trailing blanks
+  ExpectOk('mixed 1', '<a>  hello</a>');
+  ExpectOk('mixed 2', '<p><b>Hi</b> there</p>');
+  ExpectOk('mixed 3', '<a> both </a>');
+  ExpectOk('mixed 5', '<a>  <b/>  </a>');
+  ExpectOk('mixed 6', '<a>  <b/>  </a>', [xpoKeepWhiteSpace]);
+  p.Init('<a>  hello</a>');
+  XmlWalk(p, xtElementStart, 'a');
+  XmlWalk(p, xtText, '', '  hello'); // two leading blanks are preserved
+  XmlWalk(p, xtElementEnd, 'a');
+  Check(p.ParseNext = xtEof);
+  p.Init('<p><b>Hi</b> there</p>');
+  XmlWalk(p, xtElementStart, 'p');
+  XmlWalk(p, xtElementStart, 'b');
+  XmlWalk(p, xtText, '', 'Hi');
+  XmlWalk(p, xtElementEnd, 'b');
+  XmlWalk(p, xtText, '', ' there'); // one leading blank is preserved
+  XmlWalk(p, xtElementEnd, 'p');
+  Check(p.ParseNext = xtEof);
+  // but a pure-blank text node is still ignored, unless asked for
+  p.Init('<a>  <b/>  </a>');
+  XmlWalk(p, xtElementStart, 'a');
+  XmlWalk(p, xtElementStart, 'b');
+  XmlWalk(p, xtElementEnd, 'b');
+  XmlWalk(p, xtElementEnd, 'a');
+  Check(p.ParseNext = xtEof);
+  CheckEqual(XmlToJson('<a> both </a>'), '{"a":" both "}');
+  CheckEqual(XmlToJson('<p>Hello <b>x</b> world</p>'),
+    '{"p":{"b":"x","#text":"Hello  world"}}');
+  // 2. markup whose last byte is the very last byte of the input buffer
+  ExpectOk('cdata at end', '<a></a><![CDATA[x]]>');
+  ExpectOk('lone cdata', '<![CDATA[x]]>');
+  ExpectOk('cdata then blank', '<a></a><![CDATA[x]]> ');
+  ExpectOk('empty cdata at end', '<a></a><![CDATA[]]>');
+  ExpectOk('pi at end', '<a/><?pi x?>', [xpoKeepPI]);
+  ExpectOk('pi at end skipped', '<a/><?pi x?>');
+  ExpectOk('pi then blank', '<a/><?pi x?> ', [xpoKeepPI]);
+  ExpectOk('void pi at end', '<a/><?pi?>', [xpoKeepPI]);
+  ExpectOk('blank pi at end', '<a/><?pi ?>', [xpoKeepPI]);
+  ExpectOk('comment at end', '<a/><!-- c -->', [xpoKeepComments]);
+  ExpectOk('comment at end skipped', '<a/><!-- c -->');
+  ExpectOk('element at end', '<a/>');
+  ExpectOk('text at end', '<a>x</a>');
+  // a PI body is trimmed, and never reported with a negative length
+  p.Init('<?pi   ?><a/>', [xpoKeepPI]);
+  XmlWalk(p, xtPI, 'pi', '');
+  CheckEqual(p.Value.Len, 0, 'blanks-only PI body');
+  XmlWalk(p, xtElementStart, 'a');
+  XmlWalk(p, xtElementEnd, 'a');
+  Check(p.ParseNext = xtEof);
+  p.Init('<?pi  x  ?><a/>', [xpoKeepPI]);
+  XmlWalk(p, xtPI, 'pi', 'x');
+  XmlWalk(p, xtElementStart, 'a');
+  XmlWalk(p, xtElementEnd, 'a');
+  Check(p.ParseNext = xtEof);
+  // truncated markup is still rejected, i.e. the fixes above did not open up
+  XmlExpectRaise(xpeEofInCdata, 'cdata cut', '<a/><![CDATA[x]]');
+  XmlExpectRaise(xpeEofInCdata, 'cdata cut 2', '<a/><![CDATA[x]');
+  XmlExpectRaise(xpeEofInCdata, 'cdata cut 3', '<a/><![CDATA[x');
+  XmlExpectRaise(xpeEofInPi, 'pi cut', '<a/><?pi x?', [xpoKeepPI]);
+  XmlExpectRaise(xpeEofInPi, 'pi cut 2', '<a/><?pi x', [xpoKeepPI]);
+  XmlExpectRaise(xpeEofInPi, 'pi cut 3', '<a/><?pi', [xpoKeepPI]);
+  XmlExpectRaise(xpeVoidPiName, 'void pi', '<a/><?', [xpoKeepPI]);
+  XmlExpectRaise(xpeEofInComment, 'comment cut', '<a/><!-- c --', [xpoKeepComments]);
+  XmlExpectRaise(xpeEofInComment, 'comment cut 2', '<a/><!-- c -', [xpoKeepComments]);
+  XmlExpectRaise(xpeEofInComment, 'comment cut 3', '<a/><!-- c ', [xpoKeepComments]);
+  XmlExpectRaise(xpeEofInTag, 'element cut', '<a');
+  XmlExpectRaise(xpeSlashInTag, 'element cut 2', '<a/');
+  // 3. numeric character references at and above the Unicode range
+  maxcp := '';
+  SetString(maxcp, PAnsiChar(@buf), Ucs4ToUtf8($10ffff, @buf)); // no literal
+  p.Init('<a>&#x10FFFF;</a>');
+  XmlWalk(p, xtElementStart, 'a');
+  Check(p.ParseNext = xtText);
+  Check(p.ValueToUtf8(v), 'valuetoutf83');
+  CheckEqual(v, maxcp, 'highest code point');
+  XmlWalk(p, xtElementEnd, 'a');
+  Check(p.ParseNext = xtEof);
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'above range', '<a>&#x110000;</a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'above range dec', '<a>&#1114112;</a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'way above range', '<a>&#xFFFFFFF;</a>');
+  // a 32-bit wraparound must not smuggle any markup character back in
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'wrap to lt', '<a>&#x10000003C;</a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'wrap to amp', '<a>&#x100000026;</a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'wrap to lt dec', '<a>&#4294967356;</a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'wrap many digits', '<a>&#x000000000000003C;</a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'void ref', '<a>&#;</a>');
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'void hex ref', '<a>&#x;</a>');
+  // 4. the nesting limit is 255 opened elements, with a per-root offset origin
+  for n := 253 to 257 do
+  begin
+    // well-formed documents of exactly n nesting levels
+    deep := '';
+    u := '';
+    for i := 1 to n do
+      Append(deep, ['<e', i, '>']); // per-level distinct names
+    for i := n downto 1 do
+      Append(deep, ['</e', i, '>']);
+    for i := 1 to n do
+      u := u + '<e>';                              // all levels sharing a name
+    for i := 1 to n do
+      u := u + '</e>';
+    s := Make(['nesting ', n]);
+    if n <= 255 then
+    begin
+      CheckEqual(DeepStarts(deep, v), n, s);
+      CheckEqual(v, '', s);
+      CheckEqual(DeepStarts(u, v), n, s);
+      CheckEqual(v, '', s);
+    end
+    else
+    begin
+      CheckEqual(DeepStarts(deep, v), 255, s);
+      CheckNotEqual(v, '', s);
+      CheckEqual(DeepStarts(u, v), 255, s);
+      CheckNotEqual(v, '', s);
+    end;
+  end;
+  XmlExpectRaise(xpeTooMuchNesting, 'nesting 257', deep); // deep is 257 levels here
+  deep := '';
+  for i := 1 to 300 do
+    Append(deep, '<a>');
+  CheckEqual(DeepStarts(deep, v), 255, 'nesting 300');
+  // the packed offsets origin is reset once the nesting returns to 0
+  ExpectOk('two roots', '<a><b/></a><c><d/></c>');
+  u := '';
+  for i := 1 to 255 do
+    Append(u, ['<e', i, '>']);
+  for i := 255 downto 1 do
+    Append(u, ['</e', i, '>']);
+  ExpectOk('255 deep', u);
+  ExpectOk('255 deep then sibling root', u + '<z/>');
+  CheckEqual(DeepStarts(u + '<z/>', v), 256, 'sibling root is a new origin');
+  CheckEqual(v, '', 'sibling root');
+  ExpectOk('255 deep twice', u + u);
+  // names are limited to 255 bytes, and the limit itself must be reachable
+  u := RawUtf8OfChar('n', 255);
+  Join(['<', u, '/>'], v);
+  ExpectOk('255-bytes name', v);
+  ExpectOk('255-bytes name nested', '<a>' + v + '</a>');
+  p.Init(v);
+  XmlWalk(p, xtElementStart, u);
+  CheckEqual(p.Name.Len, 255, '255-bytes name length');
+  XmlWalk(p, xtElementEnd, u);
+  Check(p.ParseNext = xtEof);
+  Join(['<', RawUtf8OfChar('n', 256), '/>'], u);
+  XmlExpectRaise(xpeTagNameTooLong, '256-bytes name', u);
+  // 5. no byte at all may be read past the end of the input buffer, i.e. the
+  // parser must never rely on any #0 terminator - see NoTerm() comments above
+  NoTerm('<a/>', 'clean');
+  NoTerm('<a/>'#10, 'lf');
+  NoTerm('<a>x</a>', 'text');
+  NoTerm('<a>x</a> ', 'trailing blank');
+  NoTerm('<a> x </a>', 'inner blanks');
+  NoTerm('    ', 'blanks only');
+  NoTerm(' ', 'single blank');
+  // 3 bytes is the exact length at which Init() checks for a leading UTF-8
+  // BOM, and it must not read a 4th byte to do so
+  NoTerm('   ', '3 blanks');
+  NoTerm(#$ef#$bb#$bf, 'BOM only');
+  NoTerm(#$ef#$bb#$bf'<a/>', 'BOM then element');
+  NoTerm(#$ef#$bb, '2 bytes of a BOM');
+  NoTerm(#$ef, '1 byte of a BOM');
+  NoTerm('<a/>'#13#10, 'crlf');
+  NoTerm('<a></a><![CDATA[x]]>', 'cdata');
+  NoTerm('<a/><!-- c -->', 'comment');
+  NoTerm('<a b="c"/>', 'attribute');
+  NoTerm('<a>&amp;</a>', 'entity');
+  NoTerm(XML1, 'xml1');
+end;
+
+procedure TTestCoreProcess.XmlToVariant;
+var
+  doc: variant;
+begin
+  // plain string value for text-only elements
+  CheckEqual(XmlToJson('<a>hello</a>'), '{"a":"hello"}');
+  CheckEqual(XmlToJson('<a>0</a>'), '{"a":"0"}');
+  CheckEqual(XmlToJson('<a>123</a>'), '{"a":"123"}');
+  CheckEqual(XmlToJson('<a>12.3</a>'), '{"a":"12.3"}');
+  CheckEqual(XmlToJson('<a>true</a>'), '{"a":"true"}');
+  CheckEqual(XmlToJson('<a>false</a>'), '{"a":"false"}');
+  // void element as an empty string
+  CheckEqual(XmlToJson('<a/>'), '{"a":""}');
+  // attribute-only element
+  CheckEqual(XmlToJson('<a d="x"/>'), '{"a":{"@d":"x"}}');
+  // all values remain (lossless) strings
+  CheckEqual(XmlToJson('<c><sipId>34020000001320000001</sipId>' +
+    '<port>5060</port></c>'),
+    '{"c":{"sipId":"34020000001320000001","port":"5060"}}');
+  // attributes with '@' prefix, repeated siblings as arrays, mixed as #text
+  CheckEqual(XmlToJson('<a><b>1</b><b>2</b><c d="x">t</c></a>'),
+    '{"a":{"b":["1","2"],"c":{"@d":"x","#text":"t"}}}');
+  CheckEqual(XmlToJson('<a><b>1</b><b>2</b><b>3</b></a>'),
+    '{"a":{"b":["1","2","3"]}}');
+  CheckEqual(XmlToJson('<a>false</a><a>7</a><a>hello</a>'),
+    '{"a":["false","7","hello"]}');
+  // mixed content
+  CheckEqual(XmlToJson('<a>pre <b/>post</a>'),
+    '{"a":{"b":"","#text":"pre post"}}');
+  // entities and CDATA
+  CheckEqual(XmlToJson('<a>x &amp; y</a>'), '{"a":"x & y"}');
+  CheckEqual(XmlToJson('<a><![CDATA[<raw> & unescaped]]></a>'),
+    '{"a":"<raw> & unescaped"}');
+  // XML declaration and comments are ignored
+  CheckEqual(XmlToJson(XMLUTF8_HEADER + '<a><!-- c --><b>1</b></a>'),
+    '{"a":{"b":"1"}}');
+  // namespace prefixes kept by default, stripped on request
+  CheckEqual(XmlToJson('<s:e><s:b>x</s:b></s:e>'),
+    '{"s:e":{"s:b":"x"}}');
+  CheckEqual(XmlToJson('<s:e xmlns:s="u"><s:b>x</s:b></s:e>',
+    [xpoStripNamespacePrefix]),
+    '{"e":{"@s":"u","b":"x"}}');
+  // validate xpoVariantGuessType
+  CheckEqual(XmlToJson('<a>hello</a>', [xpoVariantGuessType]), '{"a":"hello"}');
+  CheckEqual(XmlToJson('<a>0</a>', [xpoVariantGuessType]), '{"a":0}');
+  CheckEqual(XmlToJson('<a>123</a>', [xpoVariantGuessType]), '{"a":123}');
+  CheckEqual(XmlToJson('<a>12.3</a>', [xpoVariantGuessType]), '{"a":12.3}');
+  CheckEqual(XmlToJson('<a>true</a>', [xpoVariantGuessType]), '{"a":true}');
+  CheckEqual(XmlToJson('<a>false</a>', [xpoVariantGuessType]), '{"a":false}');
+  CheckEqual(XmlToJson('<a>false</a><a>7</a><a>hello</a>',
+    [xpoVariantGuessType]), '{"a":[false,7,"hello"]}');
+  // TryXmlToVariant
+  Check(TryXmlToVariant('<a><b>1</b></a>', doc) = xpeNone, 'try ok');
+  CheckEqual(VariantSaveJson(doc), '{"a":{"b":"1"}}');
+  Check(TryXmlToVariant('<a><b></a>', doc) = xpeWrongEndTag, 'try mismatch');
+  CheckEqual(_Safe(doc)^.Count, 0);
+end;
+
+procedure TTestCoreProcess.XmlParserConsume;
+const
+  _XML: RawUtf8 = '<root>' +
+                    '<header>' +
+                      '<version>2.4</version>' +
+                      '<author>Some rodent</author>' +
+                      '<catalog>Trap for Next(''catalog'')</catalog>' +
+                    '</header>' +
+                    '<catalog>' +
+                      '<book id="1">' +
+                        '<title>mORMot</title>' +
+                        '<comment lng="en">Nice species</comment>' +
+                        '<price>42</price>' +
+                      '</book>' +
+                      '<ignore>nothing</ignore>'+
+                      '<book id="2">' +
+                        '<title>Delphi</title>' +
+                        '<price>99</price>' +
+                      '</book>' +
+                      '<pending />' +
+                    '</catalog>' +
+                    '<footer>done</footer>' +
+                  '</root>';
+var
+  x: TXmlParser;
+  title, json, footer: RawUtf8;
+  header, comment, book, doc, catalog: TDocVariantData;
+  price: currency;
+  n, id: integer;
+  bak: TXmlState;
+begin
+  // the natural way using the hybrix SAX/DOM
+  n := 0;
+  if x.Init(_XML).Find('/root/catalog') then
+    while x.Next('book', book) do
+    begin
+      id      := book.I['@id'];
+      title   := book.U['title'];
+      price   := book['price'];
+      comment := book.O['comment']^;
+      Check((id = 1) or (id = 2), 'id');
+      Check((title = 'mORMot') or (title = 'Delphi'), 'title');
+      Check((price = 42) or (price = 99), 'price');
+      if id = 1 then
+        CheckEqual(comment.ToJson, '{"@lng":"en","#text":"Nice species"}')
+      else
+        CheckEqual(comment.Count, 0, 'comment');
+      inc(n);
+      CheckEqual(id, n);
+    end;
+  CheckEqual(n, 2, 'books');
+  Check(x.Kind = xtElementEnd, 'after next(book)');
+  Check(x.Name.Equal('catalog'), '</catalog>');
+  Check(x.Find('/root/header'));
+  Check(x.Kind = xtElementStart, 'find1');
+  Check(x.Consume(header), 'consume(header)');
+  Check(x.Kind = xtElementEnd, 'after consume(header)');
+  json := header.ToJson;
+  CheckEqual(json, '{"version":"2.4","author":"Some rodent",' +
+    '"catalog":"Trap for Next(''catalog'')"}');
+  Check(x.Rewind.Find('root'));
+  Check(x.Find('header'));
+  Check(x.Consume(header));
+  CheckEqual(header.ToJson, json);
+  Check(x.Rewind.Find('root/header'));
+  Check(x.Consume(header));
+  CheckEqual(header.ToJson, json);
+  Check(not x.Find('root/header'));
+  Check(not x.Consume(header));
+  CheckNotEqual(header.ToJson, json);
+  Check(not x.Find('/root/hEader'));
+  Check(not x.Find('/roo/header'));
+  Check(x.Find('/root/footer'));
+  Check(x.Kind = xtElementStart, 'find2');
+  CheckNotEqual(footer, 'done');
+  Check(x.ConsumeText(footer));
+  CheckEqual(footer, 'done');
+  Check(x.Kind = xtElementEnd, 'after consumetext(title)');
+  footer := '';
+  Check(x.Find('/root/footer'));
+  Check(x.ConsumeText(footer));
+  CheckEqual(footer, 'done');
+  Check(x.Find('/root/catalog'));
+  Check(x.Consume(book));
+  CheckEqual(book.ToJson,
+    '{"book":[{"@id":"1","title":"mORMot","comment":{"@lng":"en","#text":"Nice' +
+    ' species"},"price":"42"},{"@id":"2","title":"Delphi","price":"99"}],"igno' +
+    're":"nothing","pending":""}');
+  catalog.InitFast;
+  x.Rewind;
+  while x.Find('//catalog') do
+  begin
+    Check(x.Consume(doc));
+    catalog.AddItem(doc);
+  end;
+  CheckEqual(catalog.ToJson,
+    '["Trap for Next(''catalog'')",{"book":[{"@id":"1","title":"mORMot","comme' +
+     'nt":{"@lng":"en","#text":"Nice species"},"price":"42"},{"@id":"2","title"' +
+     ':"Delphi","price":"99"}],"ignore":"nothing","pending":""}]');
+  Check(not x.Rewind.Find('//katalog'));
+  Check(x.Find('/root/catalog'));
+  n := 0;
+  while x.Next('book', book) do
+  begin
+    inc(n);
+    x.Save(bak);
+    Check(not x.Find('none'), 'none');
+    x.Restore(bak);
+  end;
+  CheckEqual(n, 2);
+end;
 
 
 { TTestCoreCompression }

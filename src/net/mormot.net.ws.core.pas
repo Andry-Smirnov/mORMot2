@@ -1104,7 +1104,7 @@ type
     function NameSpaceIs(const Name: RawUtf8): boolean;
     /// retrieve the NameSpace value as a new RawUtf8
     procedure NameSpaceGet(out Dest: RawUtf8);
-    /// retrieve the NameSpace value as a shortstring (used e.g. for RaiseESockIO)
+    /// retrieve the NameSpace value as a ShortString (e.g. for RaiseESockIO)
     function NameSpaceShort: ShortString;
       {$ifdef HASINLINE} inline; {$endif}
     /// parse the Data content JSON payload into a TDocVariant
@@ -1353,7 +1353,7 @@ type
     constructor Create(aOwner: TEngineIOAbstract;
       const aNamespace: RawUtf8 = '/'); reintroduce;
     /// register an event with an associated callback
-    // - returns self to be used as a fluid interface, e.g.
+    // - returns self to be used as a fluent interface, e.g.
     // from TSocketsIOClient.Local()
     function RegisterEvent(const aEventName: RawUtf8;
       const aCallback: TOnSocketIOEvent): TSocketIOLocalNamespace;
