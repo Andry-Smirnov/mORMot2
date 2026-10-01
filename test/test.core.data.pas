@@ -88,6 +88,7 @@ uses
   mormot.core.rtti,
   mormot.core.json,
   mormot.core.fmt,
+  mormot.core.i18n,
   mormot.core.variants,
   mormot.crypt.core,
   mormot.crypt.secure,
@@ -140,6 +141,20 @@ type
     procedure RunYaml(const Yaml: array of const);
     procedure RunFile(const Yaml: array of const);
     procedure YamlExpectRaise(const Name, Yaml: RawUtf8);
+    /// TLanguageFile table load and translation with fallback
+    procedure I18nLanguageTable;
+    /// TLanguageFiles registry, thread language and Mustache wiring
+    procedure I18nLanguagesRegistry;
+    /// global hooks: captions and date/time rendering
+    procedure I18nGlobalHooks;
+    /// GNU gettext .po parsing into a TLanguageFile table
+    procedure I18nPoFormat;
+    /// GNU gettext .mo binary parsing into a TLanguageFile table
+    procedure I18nMoFormat;
+    /// INI and YAML parsing, and the per-extension file loaders
+    procedure I18nIniAndFiles;
+    /// the FPC resourcestring table rewriting channel
+    procedure I18nResourceStrings;
   public
     /// SAX-level tokens over elements, attributes, text and CData
     procedure XmlSaxTokens;
@@ -154,7 +169,7 @@ type
     // references, the 255 nesting levels limit, 127-bytes names, and input
     // buffers with no #0 terminator nor any readable byte after their end
     procedure XmlSaxBoundaries;
-    /// XmlToVariant/TryXmlToVariant/XmlToJson mapping conventions
+    /// XmlToVariant/TryXmlToVariant/XmlToJson/JsonToXml/VariantToXml conversions
     procedure XmlToVariant;
     /// Find/Next/Consume* methods
     procedure XmlParserConsume;
@@ -213,6 +228,8 @@ type
     procedure _XML;
     /// regression tests for the mormot.core.fmt YAML parser
     procedure _YAML;
+    /// regression tests for the mormot.core.i18n unit
+    procedure _i18n;
   end;
 
   /// this test case will test most functions, classes and types defined and
@@ -495,10 +512,14 @@ var
   vd: TVarData absolute v;
   info: TGetJsonField;
   t: pointer;
+  s: RawUtf8;
+  r: RawByteString;
+  rc: integer;
   dt: TDateTime;
   ni: TNullableInteger;
   nt: TNullableUtf8Text;
 begin
+  CheckEqual(vd.VType, varEmpty);
   TextToVariant('1E629839-D230-4EEE-BA04-BE1258EB3AF6', {allowdouble=}true, v);
   Check(VarIsStr(v));
   Check(VarIsString(v));
@@ -512,9 +533,16 @@ begin
   TextToVariant('1e308', true, v);
   Check(VarIsStr(v));
   Check(VarIsString(v));
+  FormatUtf8('value-%', [123], s); // ensure a regular ref-counted string
+  TextToVariant(s, true, v);
+  VariantToRawByteString(v, r);
+  rc := GetRefCount(r);
+  Check(rc > 1);
   t := nil; // makes the compiler happy
   ValueVarToVariant(nil, 0, oftBoolean, vd, false, t);
   CheckEqual(TVarData(v).VType, varNull);
+  CheckEqual(GetRefCount(r), rc - 1);
+  r := '';
   ValueVarToVariant('0', 1, oftBoolean, vd, false, t);
   Check(not boolean(v));
   Check(VariantTypeName(v)^ = 'Boolean');
@@ -850,7 +878,11 @@ begin
   CheckEqual(mustache.SectionMaxCount, 0);
   {$ifdef POSIXDELPHI} exit; {$endif} // variant late binding seems unstable
   TDocVariant.NewFast(doc);
+  {$ifdef DISPINVOKE_NO_OLESTR}
+  _Safe(doc)^.AddValue('name', 'Chris');
+  {$else}
   doc.name := 'Chris';
+  {$endif DISPINVOKE_NO_OLESTR}
   doc.value := 10000;
   html := mustache.Render(doc);
   CheckEqual(html, 'Hello Chris'#13#10'You have just won 10000 dollars!');
@@ -4159,7 +4191,7 @@ begin
   Parser := TRttiJson.RegisterFromText(TypeInfo(TTestCustomDiscogs),
     __TTestCustomDiscogs, [jpoIgnoreUnknownProperty], []);
   FillCharFast(Disco, SizeOf(Disco), 0);
-  Check(PtrUInt(@Disco.releases) - PtrUInt(@Disco) = 3 * SizeOf(integer));
+  CheckEqual(PtrUInt(@Disco.releases) - PtrUInt(@Disco), 3 * SizeOf(integer));
   Check(SizeOf(Disco.releases[0]) = 5 * SizeOf(Pointer) + 2 * SizeOf(integer));
   Check(SizeOf(Disco) = SizeOf(Pointer) + 3 * SizeOf(integer));
   U := RecordSaveJson(Disco, TypeInfo(TTestCustomDiscogs));
@@ -4570,10 +4602,10 @@ begin
   NotifyTestSpeed('TDocVariant FromResults not exp', c, lennexp * ITER, @timer, ONLYLOG);
   // TDocVariant FromResults not exp in 242.29ms i.e. 6.4M/s, 355.9 MB/s
   Check(dv.InitArrayFromResults(people));
-  CheckEqual(peoplehash, Hash32(dv.ToJson));
+  CheckHash(dv.ToJson, peoplehash, 'dv.ToJson1');
   dv.Clear; // to reuse dv
   Check(dv.InitArrayFromResults(notexpanded));
-  CheckEqual(peoplehash, Hash32(dv.ToJson));
+  CheckHash(dv.ToJson, peoplehash, 'dv.ToJson2');
   dv.Clear; // to reuse dv
   timer.Start;
   for i := 1 to ITER do
@@ -6246,10 +6278,12 @@ begin
   CheckSame(double(o.bson._(1)), 5.05);
   Check(o.bson._(2) = 1986);
   Check(o.dummy = null);
-  Check(o.Exists('bson'));
+  {$ifndef DISPINVOKE_NO_OLESTR} // 'bson' 'dummy' invalid OleStr constants
+  Check(o.Exists('bson'), 'exists');
   Check(not o.Exists('dummy'));
-  Check(o.NameIndex('bson') = 0);
+  Check(o.NameIndex('bson') = 0, 'nameindex');
   Check(o.NameIndex('dummy') < 0);
+  {$endif DISPINVOKE_NO_OLESTR}
   DocVariantData(o.bson).ToRawUtf8DynArray(arr);
   Check(length(arr) = 3);
   Check(RawUtf8ArrayToCsv(arr) = 'awesome,5.05,1986');
@@ -6658,12 +6692,17 @@ var
     for i := 0 to oSeasons._Count - 1 do
     begin
       oSeason := oSeasons._(i);
+      {$ifdef DISPINVOKE_NO_OLESTR}
+      _Safe(oSeason)^['Name'] := 'CHANGED !';
+      _Safe(oSeason)^['Extra'] := 'blabla';
+      {$else}
       oSeason.Name := 'CHANGED !';
       oSeason.Extra := 'blabla';
+      {$endif DISPINVOKE_NO_OLESTR}
     end;
   end;
 
-  {$ifdef HASITERATORS}
+  {$ifdef HASSAFEITERATORS}
   procedure DoEnumerators;
   var
     vd, v2: TDocVariantData;
@@ -6763,7 +6802,147 @@ var
     end;
     Check(v2.Count = 0);
   end;
-  {$endif HASITERATORS}
+
+  procedure OneProduct(const Json, Context: RawUtf8; Expected: integer;
+    Path: PUtf8Char; const Last: RawUtf8);
+  var
+    doc: TDocVariantData;
+    e: PDocVariantData;
+    n: integer;
+  begin
+    doc.InitJson(Json, JSON_XML);
+    CheckNotEqual(doc.Count, 0, 'count');
+    Check(doc.IsObject, 'obj');
+    n := 0;
+    for e in doc.Product(Path) do
+    begin
+      inc(n);
+      CheckEqual(e^.I[Last], n, Context);
+    end;
+    CheckEqual(n, Expected);
+  end;
+
+  procedure DoProduct;
+  var
+    doc, a: TDocVariantData;
+    v: PVariant;
+    e: PDocVariantData;
+    s: RawUtf8;
+    i, n: integer;
+    timer: TPrecisionTimer;
+    vi: TSynVarData;
+begin
+    OneProduct('{"a":{"b":{"c":{"id":1}}}}', 'no array', 1, 'a.b.c', 'id');
+    OneProduct(
+      '{"a":{"b":[' +
+        '{"c":{"id":1}},' +
+        '{"c":{"id":2}},' +
+        '{"c":{"id":3}}]}}', 'one array', 3, 'a.b.c', 'id');
+    OneProduct(
+      '{"a":[' +
+        '{"b":[{"c":{"id":1}},{"c":{"id":2}}]},' +
+        '{"b":[{"c":{"id":3}},{"c":{"id":4}}]}' +
+      ']}', 'two arrays', 4, 'a.b.c', 'id');
+    OneProduct(
+      '{"a":[' +
+        '{"b":{"c":1,"x":0}},' +
+        '{"b":[{"x":0,"c":2},{"c":3},{"x":0,"c":4}]}' +
+      ']}', 'object after array', 4, 'a.b', 'c');
+    OneProduct(
+      '{"a":{"b":[' +
+        '{"c":1},{"c":2},{"c":3}]}}',
+      'array after object', 3, 'a.b', 'c');
+    OneProduct('{"a":[{"b":[{"c":1}]},{"b":{"c":2}},{"b":[{"c":3}]}]}',
+       'object/array siblings', 3, 'a.b', 'c');
+    OneProduct('{"a":[{"b":{"c":1}},{},{"b":{"c":2}}]}',
+      'missing prop 0', 2, 'a.b', 'c');
+    OneProduct('{"a":[{"b":{"c":1}},{"d":{"c":0}},{"b":{"b":7,"c":2}},{}]}',
+      'missing prop 1', 2, 'a.b', 'c');
+    OneProduct('{"a":[{},{"b":{"c":1}},{"b":{"c":2}}]}',
+      'missing prop 2', 2, 'a.b', 'c');
+    OneProduct('{"a":[{},{"b":{"c":1}},{"b":{"c":2}},{}]}',
+      'missing prop 3', 2, 'a.b', 'c');
+    OneProduct('{"a":[{"b":[{},{"d":0}]},{"b":[{"c":{"id":1}}]}]}',
+      'backward init', 1, 'a.b.c', 'id');
+    OneProduct(
+      '{"a":[{"b":[{},{}]},{"b":[{"c":{"id":1}},{"c":{"id":2}}]}]}',
+      'nested arrays with missing c', 2, 'a.b.c', 'id');
+    doc.InitJson(
+      '{"tableHead":{"fields":{"field":[' +
+        '{"units":"deg"},' +
+        '{"units":"arcsec"},' +
+        '{"units":"arcsec"}]}}}', JSON_XML);
+    n := 0;
+    for e in doc.Product('tableHead.fields.field') do
+      if e^.U['units'] = 'arcsec' then
+        inc(n);
+    CheckEqual(n, 2, 'xml-like-pdocvariant');
+    n := 0;
+    for v in doc.ProductValue('tableHead.fields.field.units') do
+      if v^ = 'arcsec' then
+        inc(n);
+    CheckEqual(n, 2, 'xml-like-variant 1');
+    n := 0;
+    for v in doc.ProductValue('tableHead.fields.field.units') do
+      if VariantEquals(v^, 'arcsec') then
+        inc(n);
+    CheckEqual(n, 2, 'xml-like-variant 2');
+    n := 0;
+    for s in doc.ProductU('tableHead.fields.field.units') do
+      if s = 'arcsec' then
+        inc(n);
+    CheckEqual(n, 2, 'xml-like-u');
+    doc.Clear;
+    doc.InitJson('{"a":{"b":1}}', JSON_XML);
+    n := 0;
+    for e in doc.Product('a.c.d') do
+      if Check(e <> nil) then // to make the compiler happy
+        inc(n);
+    CheckEqual(n, 0, 'missing path');
+    doc.Clear;
+    doc.InitJson('{"a":{"b":[]}}', JSON_XML);
+    n := 0;
+    for e in doc.Product('a.b') do
+      if Check(e <> nil) then // to make the compiler happy
+        inc(n);
+    CheckEqual(n, 0, 'empty array');
+    // stress test - 100000 Product(a.b) in 1.87ms i.e. 51M/s, aver. 18ns
+    n := 1000;
+    a.InitFast(n, dvArray);
+    for i := 1 to n do
+      a.AddItem(_ObjFast(['b', _ObjFast(['rnd', Random32(100), 'c', i])]));
+    doc.Clear;
+    doc.InitObject(['a', variant(a)]);
+    timer.Start;
+    i := 0;
+    for e in doc.Product('a.b') do
+    begin
+      inc(i);
+      CheckEqual(e^.I['c'], i);
+    end;
+    CheckEqual(i, n);
+    NotifyTestSpeed('Product(a.b)', n, 0, @timer, {onlylog=}true);
+    timer.Start;
+    i := 0;
+    for v in doc.ProductValue('a.b.c') do
+    begin
+      inc(i);
+      Check(v^ = i, 'varcomp rtl');
+    end;
+    CheckEqual(i, n);
+    NotifyTestSpeed('ProductValue(a.b.c) rtl', n, 0, @timer, {onlylog=}true);
+    timer.Start;
+    vi.VType := varInteger;
+    vi.VInteger := 0;
+    for v in doc.ProductValue('a.b.c') do
+    begin
+      inc(vi.VInteger);
+      CheckEqual(VariantCompare(v^, variant(vi)), 0);
+    end;
+    CheckEqual(i, n);
+    NotifyTestSpeed('ProductValue(a.b.c) mormot', n, 0, @timer, {onlylog=}true);
+  end;
+  {$endif HASSAFEITERATORS}
 
 const
   MAX = 20000;
@@ -7039,13 +7218,17 @@ begin
   for i := 0 to 2 do
     Check(V._(i) = Doc.Values[i]);
   Check(V._(3) = 4);
+  {$ifdef DISPINVOKE_NO_OLESTR}
+  _Safe(V)^.AddItemText('a5');
+  {$else}
   V._ := 'a5';
-  Check(V._count = 5);
+  {$endif DISPINVOKE_NO_OLESTR}
+  Check(V._count = 5, 'v_a5');
   for i := 0 to 2 do
     Check(V._(i) = Doc.Values[i]);
-  Check(V._(3) = 4);
-  Check(V._(4) = 'a5');
-  Check(V._Json = '["one",2,3,4,"a5"]');
+  Check(V._(3) = 4, '(3)=4');
+  Check(V._(4) = 'a5', '(4)=a5');
+  Check(V._Json = '["one",2,3,4,"a5"]', 'json_a5');
   uu := nil;
   CheckEqual(length(uu), 0);
   _Safe(V)^.ToRawUtf8DynArray(uu);
@@ -7062,29 +7245,45 @@ begin
   CheckNestedDoc([dvoJsonObjectParseWithinString]);
   CheckNestedDoc([dvoJsonObjectParseWithinString, dvoValueCopiedByReference]);
   V1 := _Obj(['name', 'John', 'year', 1972], [dvoValueCopiedByReference]);
+  Check(V1.name = 'John', 'V1.name0');
+  CheckEqual(integer(V1.year), 1972, 'V1.year0');
   V2 := V1;             // creates a reference to the V1 instance
+  Check(V2.name = 'John', 'V2.name0');
+  CheckEqual(integer(V2.year), 1972, 'V1.year0');
+  {$ifdef DISPINVOKE_NO_OLESTR}
+  _Safe(V2)^['name'] := 'James'; // modifies V2.name, but also V1.name
+  {$else}
   V2.name := 'James';   // modifies V2.name, but also V1.name
-  Check(V1.name = 'James');
-  Check(V2.name = 'James');
+  {$endif DISPINVOKE_NO_OLESTR}
+  Check(VariantEquals(V1.Name, 'James'), 'V1.name1e');
+  Check(VariantEquals(V2.Name, 'James'), 'V2.name1e');
+  Check(V1.name = 'James', 'V1.name1');
+  Check(V2.name = 'James', 'V2.name1');
   {$ifdef FPC}
-  Check(V1._Json = '{"name":"James","year":1972}');
+  Check(V1._Json = '{"name":"James","year":1972}', 'V1._Json');
   {$else}
   Check(V1 = '{"name":"James","year":1972}');
   {$endif FPC}
   _Unique(V1);          // change options of V1 to be by-value
   V2 := V1;             // creates a full copy of the V1 instance
+  {$ifdef DISPINVOKE_NO_OLESTR}
+  _Safe(V2)^['name'] := 'John'; // modifies V2.name, but not V1.name
+  {$else}
   V2.name := 'John';    // modifies V2.name, but not V1.name
-  Check(V1.name = 'James');
-  Check(V2.name = 'John');
+  {$endif DISPINVOKE_NO_OLESTR}
+  Check(VariantEquals(V1.Name, 'James'), 'V1.name2');
+  Check(VariantEquals(V2.Name, 'John'), 'V2.name2');
+  Check(V1.name = 'James', 'V1.name2');
+  Check(V2.name = 'John', 'V2.name2');
   V1 := _Arr(['root', V2]); // created as by-value by default, as V2 was
-  Check(V1._Count = 2);
+  Check(V1._Count = 2, 'count');
   _UniqueFast(V1);      // change options of V1 to be by-reference
   V2 := V1;
-  Check(V1._(1)._Json = '{"name":"John","year":1972}');
+  Check(V1._(1)._Json = '{"name":"John","year":1972}', 'json_');
   {$ifdef FPC}
-  TDocVariantData(V1).Values[1].name := 'Jim';
-  Check(V1._Json = '["root",{"name":"Jim","year":1972}]');
-  Check(V2._Json = '["root",{"name":"Jim","year":1972}]');
+  _Safe(TDocVariantData(V1).Values[1])^['name'] := 'Jim';
+  Check(V1._Json = '["root",{"name":"Jim","year":1972}]', 'V1._Json');
+  Check(V2._Json = '["root",{"name":"Jim","year":1972}]', 'V2._Json');
   {$else}
   V1._(1).name := 'Jim';
   Check(V1 = '["root",{"name":"Jim","year":1972}]');
@@ -7148,7 +7347,11 @@ begin
   {$endif FPC}
   V1 := _ObjFast(['n1', 'v1']);
   Check(V1._JSON = '{"n1":"v1"}');
-  V1.Add('n2', 'v2');
+  {$ifdef DISPINVOKE_NO_OLESTR}
+  _Safe(V1)^.AddValue('n2', 'v2');
+  {$else}
+  V1.Add('n2', 'v2')
+  {$endif DISPINVOKE_NO_OLESTR};
   Check(V1._JSON = '{"n1":"v1","n2":"v2"}', 'FPC 3.2+ inverted order');
   s := '{"Url":"argentina","Seasons":[{"Name":"2011/2012","Url":"2011-2012",' +
     '"Competitions":[{"Name":"Ligue1","Url":"ligue-1"},{"Name":"Ligue2","Url":"ligue-2"}]},' +
@@ -7159,46 +7362,48 @@ begin
   V2 := V1.seasons;
   DoChange(V2);
   j := VariantSaveJson(V1);
-  Check(j <> s);
+  CheckNotEqual(j, s);
   CheckHash(j, $6998B225, 'changed');
   CheckHash(VariantSaveJson(V2), $92FEB37B);
   V1 := _Json(s);
   V2 := V1.seasons;
   _Unique(V2);
   DoChange(V2);
-  Check(VariantSaveJson(V1) = s);
+  CheckEqual(VariantSaveJson(V1), s);
   CheckHash(VariantSaveJson(V2), $92FEB37B);
   V2 := TDocVariant.NewUnique(V1.Seasons);
   DoChange(V2);
-  Check(VariantSaveJson(V1) = s);
+  CheckEqual(VariantSaveJson(V1), s);
   CheckHash(VariantSaveJson(V2), $92FEB37B);
   V2 := _copy(V1.Seasons);
   DoChange(V2);
-  Check(VariantSaveJson(V1) = s);
+  CheckEqual(VariantSaveJson(V1), s);
   CheckHash(VariantSaveJson(V2), $92FEB37B);
   s := _Safe(V1.Seasons)^.ToNonExpandedJson;
-  Check(s =
+  CheckEqual(s,
     '{"fieldCount":3,"rowCount":2,"values":["Name","Url","Competitions",' + '"2011/2012","2011-2012",[{"Name":"Ligue1","Url":"ligue-1"},{"Name":"Ligue2"' +
     ',"Url":"ligue-2"}],"2010/2011","2010-2011",[{"Name":"Ligue1","Url":"ligue-1"}' +
     ',{"Name":"Ligue2","Url":"ligue-2"}]]}');
   V := _Json('{result:{data:{"1000":"D1", "1001":"D2"}}}');
-  Check(V.result._Json = '{"data":{"1000":"D1","1001":"D2"}}');
-  Check(V.result.data.Exists('1000'));
-  Check(V.result.data.Exists('1001'));
-  Check(not V.result.data.Exists('1002'));
+  Check(V.result._Json = '{"data":{"1000":"D1","1001":"D2"}}', 'D1D2');
+  {$ifndef DISPINVOKE_NO_OLESTR} // '100x' constants are generated wrong
+  Check(V.result.data.Exists('1000'), '1000');
+  Check(V.result.data.Exists('1001'), '1001');
+  Check(not V.result.data.Exists('1002'), '1002');
+  Check(V.result.data.Value('1000') = 'D1', 'ValueD1');
+  Check(V.result.data.Value('1001') = 'D2', 'ValueD2');
+  {$endif DISPINVOKE_NO_OLESTR}
   Check(DocVariantData(V.result.data).Value['1000'] = 'D1');
-  Check(V.result.data.Value(0) = 'D1');
-  Check(V.result.data.Value('1000') = 'D1');
-  Check(V.result.data.Value('1001') = 'D2');
+  Check(V.result.data.Value(0) = 'D1', 'Value0');
   V := _Obj(['Z', 10, 'name', 'John', 'year', 1972, 'a', 1], []);
   j := VariantSaveJson(V);
-  Check(j = '{"Z":10,"name":"John","year":1972,"a":1}');
+  CheckEqual(j, '{"Z":10,"name":"John","year":1972,"a":1}');
   TDocVariantData(V).SortByName;
   j := VariantSaveJson(V);
-  Check(j = '{"a":1,"name":"John","year":1972,"Z":10}');
+  CheckEqual(j, '{"a":1,"name":"John","year":1972,"Z":10}');
   TDocVariantData(V).SortByName(@StrComp);
   j := VariantSaveJson(V);
-  Check(j = '{"Z":10,"a":1,"name":"John","year":1972}');
+  CheckEqual(j, '{"Z":10,"a":1,"name":"John","year":1972}');
   V := _JsonFast('{"Database":"\u201d\u00c9\u00c3\u00b6\u00b1\u00a2\u00a7\u00ad\u00a5\u00a4"}');
   j := VariantToUtf8(V.Database);
   Check((j <> '') and
@@ -7250,7 +7455,7 @@ begin
   checkEqual(dv^.ToJson, '{"name":"toto"}');
   pv := Doc.GetPVariantByPath('people2.NAME');
   check(pv <> nil);
-  check(pv^ = 'toto');
+  check(pv^ = 'toto', 'toto');
   Check(Doc.DeleteByPath('people2.Name'));
   checkEqual(Doc.ToJson, '{"people":{"age":31},"people2":{}}');
   Check(not Doc.DeleteByPath('people22'));
@@ -7341,8 +7546,13 @@ begin
   V1 := _Copy(V._(0)); // expect a true instance for v1.Val1 := ... below
   check(V1.val1 = 'blabla');
   V2 := _Obj([]); // or TDocVariant.New(v2);
+  {$ifdef DISPINVOKE_NO_OLESTR}
+  _Safe(V2)^['Val1'] := 'blublu';
+  _Safe(V2)^['Val2'] := 'blybly';
+  {$else}
   V2.Val1 := 'blublu';
   V2.Val2 := 'blybly';
+  {$endif DISPINVOKE_NO_OLESTR}
   V1.Val1 := V2.Val1;
   V1.Val2 := V2.Val2;
   CheckEqual(VariantSaveJson(V1), VariantSaveJson(V2));
@@ -7358,9 +7568,10 @@ begin
   CheckEqual(GetCodePage(s), CP_UTF8);
   {$endif HASCODEPAGE}
   CheckEqual(s, '{"ID":1,"Notation":"ABC","Price":10.1,"CustomNotation":"XYZ"}');
-  {$ifdef HASITERATORS}
+  {$ifdef HASSAFEITERATORS}
   DoEnumerators;
-  {$endif HASITERATORS}
+  DoProduct;
+  {$endif HASSAFEITERATORS}
   Doc.Clear;
   s := '[{a:1,b:2,c:0},{a:2,b:1,c:2},{b:3,c:1,a:1}]';
   Doc.InitJson(s);
@@ -8356,6 +8567,20 @@ begin
   CheckEqual(XmlEscape('& some'), '&amp; some');
   CheckEqual(XmlEscape('<&>'), '&lt;&amp;&gt;');
   CheckEqual(XmlEscape('a<b&c>d'), 'a&lt;b&amp;c&gt;d');
+  CheckEqual(XmlEscape('"'), '&quot;');
+  CheckEqual(XmlEscape(''''), '&apos;');
+  CheckEqual(XmlEscape('a"b''c'), 'a&quot;b&apos;c');
+  CheckEqual(XmlEscape(#9), '&#x09;');
+  CheckEqual(XmlEscape(#10), '&#x0a;');
+  CheckEqual(XmlEscape(#13), '&#x0d;');
+  CheckEqual(XmlEscape('a'#9'b'#10'c'#13'd'), 'a&#x09;b&#x0a;c&#x0d;d');
+  for i := 1 to 31 do
+    if not (i in [9, 10, 13]) then
+    begin
+      FastSetString(s, PAnsiChar('a b'), 3); // allocated, so writable below
+      PByteArray(s)[1] := i; // #1..#31 are not allowed in any XML 1.0 document
+      CheckEqual(XmlEscape(s), 'ab', 'ignored control char');
+    end;
 end;
 
 procedure TTestCoreProcess._TSelectStatement;
@@ -9198,6 +9423,7 @@ var
 begin
   // first try to catch the EXmlException (default behavior)
   ok := false;
+  TSynLog.Family.ExceptionIgnoreCurrentThread := true;
   try
     p.Init(Xml, Options);
     Check(p.LastError = xpeNone);
@@ -9208,8 +9434,9 @@ begin
     end;
   except
     on EXmlException do
-      ok := true;
+      ok := Check(p.LastError = Expected, Context);
   end;
+  TSynLog.Family.ExceptionIgnoreCurrentThread := false;
   Check(ok, Context);
   CheckEqual(ord(p.LastError), ord(Expected), XML_ERROR[Expected]);
   // check properly return xtError with xpoNoException option
@@ -9330,6 +9557,57 @@ begin
   XmlWalk(p, xtText, '', '  ');
   XmlWalk(p, xtElementEnd, 'a');
   Check(p.ParseNext = xtEof);
+  // simple DOCTYPE is ignored by default
+  s := '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '#10 +
+       '  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">'#10 +
+       '<svg/>';
+  p.Init(s);
+  XmlWalk(p, xtElementStart, 'svg');
+  XmlWalk(p, xtElementEnd, 'svg');
+  Check(p.ParseNext = xtEof);
+  // XML declaration, whitespace and DOCTYPE
+  s := '<?xml version="1.0" encoding="UTF-8"?>'#10 +
+       '<!DOCTYPE svg SYSTEM "svg.dtd">'#10 +
+       '<svg/>';
+  p.Init(s);
+  XmlWalk(p, xtElementStart, 'svg');
+  XmlWalk(p, xtElementEnd, 'svg');
+  Check(p.ParseNext = xtEof);
+  // quoted '>' doesn't terminate the declaration
+  p.Init('<!DOCTYPE svg SYSTEM "foo>bar.dtd"><svg/>');
+  XmlWalk(p, xtElementStart, 'svg');
+  XmlWalk(p, xtElementEnd, 'svg');
+  Check(p.ParseNext = xtEof);
+  // works even when prolog whitespace is explicitly returned
+  p.Init('  <!DOCTYPE svg><svg/>', [xpoKeepWhiteSpace]);
+  XmlWalk(p, xtText, '', '  ');
+  XmlWalk(p, xtElementStart, 'svg');
+  XmlWalk(p, xtElementEnd, 'svg');
+  Check(p.ParseNext = xtEof);
+  // exercises the prolog state choice directly
+  p.Init('<!--before--><!DOCTYPE svg><svg/>', [xpoKeepComments]);
+  XmlWalk(p, xtComment, '', 'before');
+  XmlWalk(p, xtElementStart, 'svg');
+  XmlWalk(p, xtElementEnd, 'svg');
+  Check(p.ParseNext = xtEof);
+  // DOCTYPE should be properly supported after Save/Restore
+  p.Init('<!DOCTYPE svg><svg/>');
+  p.Save;
+  XmlWalk(p, xtElementStart, 'svg');
+  XmlWalk(p, xtElementEnd, 'svg');
+  Check(p.ParseNext = xtEof);
+  p.Restore;
+  XmlWalk(p, xtElementStart, 'svg');
+  XmlWalk(p, xtElementEnd, 'svg');
+  Check(p.ParseNext = xtEof);
+  p.Init('<!--before--><!DOCTYPE svg><svg/>', [xpoKeepComments]);
+  XmlWalk(p, xtComment, '', 'before');
+  p.Save;
+  XmlWalk(p, xtElementStart, 'svg');
+  XmlWalk(p, xtElementEnd, 'svg');
+  p.Restore;
+  XmlWalk(p, xtElementStart, 'svg');
+  XmlWalk(p, xtElementEnd, 'svg');
 end;
 
 procedure TTestCoreProcess.XmlSaxErrors;
@@ -9370,6 +9648,18 @@ begin
   XmlExpectRaise(xpeTooMuchNesting, 'too much nesting', deep);
   deep := '<' + RawUtf8OfChar('n', 300) + '/>';
   XmlExpectRaise(xpeTagNameTooLong, 'name too long', deep);
+  XmlExpectRaise(xpeUnsupportedMarkup, 'dtd internal subset',
+    '<!DOCTYPE foo [<!ENTITY x "y">]><foo>&x;</foo>');
+  XmlExpectRaise(xpeUnsupportedMarkup, 'dtd nested definition',
+    '<!DOCTYPE foo <!ENTITY x "y">><foo/>');
+  XmlExpectRaise(xpeUnsupportedMarkup, 'doctype after root',
+    '<foo/><!DOCTYPE foo>');
+  XmlExpectRaise(xpeUnsupportedMarkup, 'doctype explicitly rejected',
+    '<!DOCTYPE svg SYSTEM "svg.dtd"><svg/>',
+    [xpoRejectDocType]);
+  // A simple DOCTYPE never defines or loads entities.
+  XmlExpectRaise(xpeXmlUnescapeFailed, 'doctype entity is never resolved',
+    '<!DOCTYPE foo SYSTEM "foo.dtd"><foo>&custom;</foo>');
 end;
 
 procedure TTestCoreProcess.XmlSaxBoundaries;
@@ -9432,7 +9722,7 @@ var
       CheckEqual(x.Position, length(Xml), Context);
     except
       on E: EXmlException do
-        err := StringToUtf8(E.Message);
+        StringToUtf8(E.Message, err);
     end;
     CheckEqual(err, '', Context);
   end;
@@ -9444,15 +9734,17 @@ var
   begin
     result := 0;
     Reason := '';
+    TSynLog.Family.ExceptionIgnoreCurrentThread := true;
     try
       x.Init(Xml);
       while x.ParseNext <> xtEof do
         if x.Kind = xtElementStart then
           inc(result);
     except
-      on E: EXmlException do
-        Reason := StringToUtf8(E.Message);
+      on E: Exception do
+        StringToUtf8(E.Message, Reason);
     end;
+    TSynLog.Family.ExceptionIgnoreCurrentThread := false;
   end;
 
   procedure NoTerm(const Xml: RawUtf8; const Context: string);
@@ -9703,11 +9995,123 @@ begin
   CheckEqual(XmlToJson('<a>false</a>', [xpoVariantGuessType]), '{"a":false}');
   CheckEqual(XmlToJson('<a>false</a><a>7</a><a>hello</a>',
     [xpoVariantGuessType]), '{"a":[false,7,"hello"]}');
+  // validate dvoInternNames
+  CheckEqual(XmlToJson('<a><a/></a>', [], JSON_XML + [dvoInternNames]),
+    '{"a":{"a":""}}');
   // TryXmlToVariant
   Check(TryXmlToVariant('<a><b>1</b></a>', doc) = xpeNone, 'try ok');
   CheckEqual(VariantSaveJson(doc), '{"a":{"b":"1"}}');
   Check(TryXmlToVariant('<a><b></a>', doc) = xpeWrongEndTag, 'try mismatch');
   CheckEqual(_Safe(doc)^.Count, 0);
+  // JsonToXml() reverse direction: no '@name'/'#text' mapping by default
+  CheckEqual(JsonToXml('{"a":"hello"}', ''), '<a>hello</a>');
+  CheckEqual(JsonToXml('{"a":{"b":"1"}}', ''), '<a><b>1</b></a>');
+  CheckEqual(JsonToXml('{"a":{"@d":"x","#text":"t"}}', ''),
+    '<a><@d>x</@d><#text>t</#text></a>');
+  // jxoAttribute/jxoText follow the very same conventions as XmlToVariant()
+  CheckEqual(JsonToXml('{"a":{"@d":"x"}}', '', '', JXO_ENABLED), '<a d="x"></a>');
+  CheckEqual(JsonToXml('{"a":{"@d":"x","#text":"t"}}', '', '', JXO_ENABLED),
+    '<a d="x">t</a>');
+  CheckEqual(JsonToXml('{"a":{"@x":"1","@y":"2","b":"3"}}', '', '', JXO_ENABLED),
+    '<a x="1" y="2"><b>3</b></a>');
+  CheckEqual(JsonToXml('{"a":{"@d":1}}', '', '', JXO_ENABLED), '<a d="1"></a>');
+  CheckEqual(JsonToXml('{"e":{"@xmlns:s":"u","b":"x"}}', '', '', JXO_ENABLED),
+    '<e xmlns:s="u"><b>x</b></e>');
+  // attribute values and text are XML-escaped as expected
+  CheckEqual(JsonToXml('{"a":{"@d":"a<b&c\"d"}}', '', '', JXO_ENABLED),
+    '<a d="a&lt;b&amp;c&quot;d"></a>');
+  // '#text' may appear after the sub-elements, as XmlToVariant() generates it
+  CheckEqual(JsonToXml('{"a":{"b":"","#text":"pre post"}}', '', '', JXO_ENABLED),
+    '<a><b></b>pre post</a>');
+  // array items may have their own attributes
+  CheckEqual(JsonToXml('{"item":[{"@id":"1"},{"@id":"2"}]}', '', '', JXO_ENABLED),
+    '<item id="1"></item><item id="2"></item>');
+  // XmlToJson() then JsonToXml() should round-trip the original XML content
+  CheckEqual(JsonToXml(XmlToJson('<a d="x"/>'), '', '', JXO_ENABLED), '<a d="x"></a>');
+  CheckEqual(JsonToXml(XmlToJson('<a><b>1</b><b>2</b><c d="x">t</c></a>'),
+    '', '', JXO_ENABLED), '<a><b>1</b><b>2</b><c d="x">t</c></a>');
+  CheckEqual(JsonToXml(XmlToJson('<a><b i="1">x</b><b i="2">y</b></a>'),
+    '', '', JXO_ENABLED), '<a><b i="1">x</b><b i="2">y</b></a>');
+  // VariantToXml() applies the same conventions, straight from the DOM
+  CheckEqual(VariantToXml(_Json('{"a":{"b":"1"}}'), ''), '<a><b>1</b></a>');
+  CheckEqual(VariantToXml(_Json('{"a":{"@d":"x"}}'), ''), '<a d="x"></a>');
+  CheckEqual(VariantToXml(_Json('{"a":{"@d":"x","#text":"t"}}'), ''),
+    '<a d="x">t</a>');
+  CheckEqual(VariantToXml(_Json('{"a":{"@x":"1","@y":"2","b":"3"}}'), ''),
+    '<a x="1" y="2"><b>3</b></a>');
+  CheckEqual(VariantToXml(_Json('{"a":{"@d":"a<b&c\"d"}}'), ''),
+    '<a d="a&lt;b&amp;c&quot;d"></a>');
+  CheckEqual(VariantToXml(_Json('{"item":[{"@id":"1"},{"@id":"2"}]}'), ''),
+    '<item id="1"></item><item id="2"></item>');
+  // unlike JsonToXml(), the whole object is available: '@name' fields may
+  // appear after the content fields and are still written as attributes
+  CheckEqual(VariantToXml(_Json('{"a":{"b":"1","@d":"x"}}'), ''),
+    '<a d="x"><b>1</b></a>');
+  CheckEqual(VariantToXml(_Json('{"a":{"@d":"x","#text":"t"}}'), '', '', []),
+    '<a><@d>x</@d><#text>t</#text></a>');
+  CheckEqual(VariantToXml(_Json('{"a":"1"}'), '', '<c>'), '<c><a>1</a></c>');
+  // XmlToVariant() then VariantToXml() should round-trip the XML content
+  mormot.core.fmt.XmlToVariant('<a><b>1</b><b>2</b><c d="x">t</c></a>', doc);
+  CheckEqual(VariantToXml(doc, ''), '<a><b>1</b><b>2</b><c d="x">t</c></a>');
+  mormot.core.fmt.XmlToVariant('<a><b i="1">x</b><b i="2">y</b></a>', doc);
+  CheckEqual(VariantToXml(doc, ''), '<a><b i="1">x</b><b i="2">y</b></a>');
+  // a void document is an element with no content - and never JSON text
+  CheckEqual(VariantToXml(_Json('{"a":{}}'), ''), '<a></a>');
+  CheckEqual(VariantToXml(_Json('{"a":{"b":{}}}'), ''), '<a><b></b></a>');
+  CheckEqual(VariantToXml(_Json('{"a":{"@d":"x","b":{}}}'), ''),
+    '<a d="x"><b></b></a>');
+  CheckEqual(VariantToXml(_Json('{"a":{}}'), '', '', []), '<a></a>');
+  // a void array writes no element at all, as JsonToXml() does
+  CheckEqual(VariantToXml(_Json('{"a":[]}'), ''), '');
+  CheckEqual(JsonToXml('{"a":[]}', '', '', JXO_ENABLED), '');
+  CheckEqual(VariantToXml(_Json('{}'), ''), '');
+  CheckEqual(JsonToXml('{"a":{"b":{}}}', '', '', JXO_ENABLED), '<a><b></b></a>');
+  // jxoSelfClosed writes '<name/>' for elements with no text nor sub-element
+  CheckEqual(JsonToXml('{"a":""}', '', '', JXO_SHORT), '<a/>');
+  CheckEqual(JsonToXml('{"a":null}', '', '', JXO_SHORT), '<a/>');
+  CheckEqual(JsonToXml('{"a":{}}', '', '', JXO_SHORT), '<a/>');
+  CheckEqual(JsonToXml('{"a":{"@d":"x"}}', '', '', JXO_SHORT), '<a d="x"/>');
+  CheckEqual(JsonToXml('{"a":{"@d":"x","#text":""}}', '', '', JXO_SHORT),
+    '<a d="x"/>');
+  CheckEqual(JsonToXml('{"a":{"b":"","c":"1"}}', '', '', JXO_SHORT),
+    '<a><b/><c>1</c></a>');
+  CheckEqual(JsonToXml('{"item":[{"@id":"1"},{"@id":"2"}]}', '', '', JXO_SHORT),
+    '<item id="1"/><item id="2"/>');
+  CheckEqual(JsonToXml('{"a":["",""]}', '', '', JXO_SHORT), '<a/><a/>');
+  CheckEqual(JsonToXml('["",""]', '', '', JXO_SHORT), '<0/><1/>');
+  // non-void elements are not affected by jxoSelfClosed
+  CheckEqual(JsonToXml('{"a":{"@d":"x","#text":"t"}}', '', '', JXO_SHORT),
+    '<a d="x">t</a>');
+  CheckEqual(JsonToXml('{"a":{"b":"","#text":"pre post"}}', '', '', JXO_SHORT),
+    '<a><b/>pre post</a>');
+  CheckEqual(JsonToXml('{"a":{"b":"1"}}', '', '', JXO_SHORT), '<a><b>1</b></a>');
+  CheckEqual(JsonToXml('{"a":{"@d":"x"}}', '', '', [jxoSelfClosed]),
+    '<a><@d>x</@d></a>');
+  // VariantToXml() supports jxoSelfClosed the very same way
+  CheckEqual(VariantToXml(_Json('{"a":""}'), '', '', JXO_SHORT), '<a/>');
+  CheckEqual(VariantToXml(_Json('{"a":null}'), '', '', JXO_SHORT), '<a/>');
+  CheckEqual(VariantToXml(_Json('{"a":{}}'), '', '', JXO_SHORT), '<a/>');
+  CheckEqual(VariantToXml(_Json('{"a":[]}'), '', '', JXO_SHORT), '');
+  CheckEqual(VariantToXml(_Json('{"a":{"@d":"x"}}'), '', '', JXO_SHORT),
+    '<a d="x"/>');
+  CheckEqual(VariantToXml(_Json('{"a":{"@d":"x","#text":""}}'), '', '', JXO_SHORT),
+    '<a d="x"/>');
+  CheckEqual(VariantToXml(_Json('{"a":{"b":"","c":"1"}}'), '', '', JXO_SHORT),
+    '<a><b/><c>1</c></a>');
+  CheckEqual(VariantToXml(_Json('{"a":{"b":"","@d":"x"}}'), '', '', JXO_SHORT),
+    '<a d="x"><b/></a>');
+  CheckEqual(VariantToXml(_Json('{"item":[{"@id":"1"},{"@id":"2"}]}'), '', '',
+    JXO_SHORT), '<item id="1"/><item id="2"/>');
+  CheckEqual(VariantToXml(_Json('{"a":{"@d":"x","#text":"t"}}'), '', '', JXO_SHORT),
+    '<a d="x">t</a>');
+  CheckEqual(VariantToXml(_Json('{"a":{"b":{"c":{"@d":"x"}}}}'), '', '', JXO_SHORT),
+    '<a><b><c d="x"/></b></a>');
+  // both forms are read back as the very same content
+  CheckEqual(XmlToJson(JsonToXml('{"a":{"@d":"x"}}', '', '', JXO_SHORT)),
+    '{"a":{"@d":"x"}}');
+  CheckEqual(XmlToJson(VariantToXml(_Json('{"a":{"@d":"x"}}'), '', '', JXO_SHORT)),
+    '{"a":{"@d":"x"}}');
+  CheckEqual(JsonToXml(XmlToJson('<a d="x"/>'), '', '', JXO_SHORT), '<a d="x"/>');
 end;
 
 procedure TTestCoreProcess.XmlParserConsume;
@@ -9739,19 +10143,18 @@ var
   header, comment, book, doc, catalog: TDocVariantData;
   price: currency;
   n, id: integer;
-  bak: TXmlState;
 begin
-  // the natural way using the hybrix SAX/DOM
+  // the natural way using the hybrix SAX/DOM mode via Find/Consume
   n := 0;
   if x.Init(_XML).Find('/root/catalog') then
-    while x.Next('book', book) do
+    while x.Consume('book', book) do
     begin
       id      := book.I['@id'];
       title   := book.U['title'];
-      price   := book['price'];
+      price   := book.Value['price'];
       comment := book.O['comment']^;
       Check((id = 1) or (id = 2), 'id');
-      Check((title = 'mORMot') or (title = 'Delphi'), 'title');
+      Check((title = 'mORMot') or (title = 'Delphi'), 'title1');
       Check((price = 42) or (price = 99), 'price');
       if id = 1 then
         CheckEqual(comment.ToJson, '{"@lng":"en","#text":"Nice species"}')
@@ -9761,7 +10164,7 @@ begin
       CheckEqual(id, n);
     end;
   CheckEqual(n, 2, 'books');
-  Check(x.Kind = xtElementEnd, 'after next(book)');
+  Check(x.Kind = xtElementEnd, 'after Consume(book)');
   Check(x.Name.Equal('catalog'), '</catalog>');
   Check(x.Find('/root/header'));
   Check(x.Kind = xtElementStart, 'find1');
@@ -9806,20 +10209,896 @@ begin
     catalog.AddItem(doc);
   end;
   CheckEqual(catalog.ToJson,
-    '["Trap for Next(''catalog'')",{"book":[{"@id":"1","title":"mORMot","comme' +
-     'nt":{"@lng":"en","#text":"Nice species"},"price":"42"},{"@id":"2","title"' +
-     ':"Delphi","price":"99"}],"ignore":"nothing","pending":""}]');
+   '[{"#text":"Trap for Next(''catalog'')"},{"book":[{"@id":"1","title":"mORM' +
+   'ot","comment":{"@lng":"en","#text":"Nice species"},"price":"42"},{"@id":"' +
+   '2","title":"Delphi","price":"99"}],"ignore":"nothing","pending":""}]');
   Check(not x.Rewind.Find('//katalog'));
+  // Structured Streaming search with Find/ForEach
   Check(x.Find('/root/catalog'));
+  x.Save;
+  x.Save;
   n := 0;
-  while x.Next('book', book) do
+  while x.ForEach('book', 0) do
+    if x.Find('title') and
+       x.ConsumeText(title) then
+    begin
+      Check((title = 'mORMot') or (title = 'Delphi'), 'title2');
+      inc(n);
+    end;
+  CheckEqual(n, 2);
+  x.Restore; // back to x.Find('/root/catalog'))
+  n := 0;
+  while x.Next('book') do
   begin
-    inc(n);
-    x.Save(bak);
-    Check(not x.Find('none'), 'none');
-    x.Restore(bak);
+    if x.GetU('title', title) then
+    begin
+      Check((title = 'mORMot') or (title = 'Delphi'), 'title2');
+      inc(n);
+    end;
+    x.Skip;
   end;
   CheckEqual(n, 2);
+  x.Restore; // back to x.Find('/root/catalog'))
+  n := 0;
+  while x.ForEach('book', 0) do
+    if x.GetU('title', title) then
+    begin
+      Check((title = 'mORMot') or (title = 'Delphi'), 'title2');
+      inc(n);
+    end;
+  CheckEqual(n, 2);
+  x.Init('<r><c>trap</c><c><i>1</i></c></r>');
+  while x.Find('//c') do
+  begin
+    x.Consume(doc);
+    dec(n);
+  end;
+  CheckEqual(n, 0);
+end;
+
+procedure TTestCoreProcess._i18n;
+begin
+  I18nLanguageTable;
+  I18nLanguagesRegistry;
+  I18nGlobalHooks;
+  I18nPoFormat;
+  I18nMoFormat;
+  I18nIniAndFiles;
+  I18nResourceStrings;
+end;
+
+procedure TTestCoreProcess.I18nLanguageTable;
+var
+  l: TLanguageFile;
+  bin: RawByteString;
+
+  procedure DoTest;
+  var
+    t: RawUtf8;
+    s: string;
+  begin
+    CheckEqual(l.Count, 2);
+    t := 'Hello';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Bonjour');
+    t := 'Missing';
+    Check(not l.Translate(t));
+    CheckEqual(t, 'Missing', 'fallback keeps input');
+    s := 'World';
+    l.TranslateString(s);
+    Check(s = 'Monde');
+    s := 'Missing';
+    l.TranslateString(s);
+    Check(s = 'Missing');
+  end;
+
+begin
+  l := TLanguageFile.Create(lngFrench);
+  try
+    CheckEqual(l.Iso, 'fr');
+    Check(l.Language = lngFrench);
+    CheckEqual(l.Count, 0);
+    CheckEqual(l.AddFromJson('{"Hello":"Bonjour","World":"Monde"}'), 2);
+    CheckEqual(l.Count, 2);
+    CheckEqual(l.AddFromJson('invalid'), -1);
+    DoTest;
+    bin := l.SaveToBinary;
+  finally
+    l.Free;
+  end;
+  l := TLanguageFile.Create(lngFrench);
+  try
+    CheckEqual(l.Count, 0);
+    Check(l.LoadFromBinary(bin), 'LoadFromBinary');
+    DoTest;
+    l.Texts.DeleteAll;
+    CheckEqual(l.Count, 0);
+    Check(l.LoadFromBinary(bin), 'LoadFromBinary');
+    DoTest;
+  finally
+    l.Free;
+  end;
+end;
+
+procedure TTestCoreProcess.I18nLanguagesRegistry;
+var
+  langs: TLanguageFiles;
+  bin: RawByteString;
+
+  procedure DoTest;
+  var
+    m: TSynMustache;
+    u: RawUtf8;
+    loaded: TLanguageDynArray;
+  begin
+    CheckEqual(langs.Count, 2);
+    Check(TLanguageFiles.ThreadLanguage = lngUndefined);
+    CheckEqual(langs.Name, 'ProjectV1');
+    Check(langs.Language[lngFrench] <> nil);
+    Check(langs.Language[lngChinese] <> nil);
+    Check(langs.Language[lngGerman] = nil);
+    Check(langs.FindIso('fr') = langs.Language[lngFrench]);
+    Check(langs.FindIso('xx') = nil);
+    // LoadedLanguages returns the loaded tables, in TLanguage enumerate order
+    loaded := langs.LoadedLanguages;
+    CheckEqual(length(loaded), 2, 'LoadedLanguages count');
+    Check(loaded[0] = lngChinese, 'lngChinese comes first in TLanguage');
+    Check(loaded[1] = lngFrench);
+    // direct language selection
+    u := 'Hello';
+    Check(not langs.Translate(lngUndefined, u));
+    CheckEqual(u, 'Hello');
+    u := 'Hello';
+    Check(not langs.Translate(lngGerman, u));
+    CheckEqual(u, 'Hello');
+    langs.TranslateUtf8(lngGerman, pointer(u), length(u), u);
+    CheckEqual(u, '');
+    u := 'Hello';
+    Check(langs.Translate(lngFrench, u));
+    CheckEqual(u, 'Bonjour');
+    u := 'Hello';
+    langs.TranslateUtf8(lngChinese, pointer(u), length(u), u);
+    CheckEqual(u, 'NiHao');
+    // no thread language nor default: passthrough
+    Check(TLanguageFiles.ThreadLanguage = lngUndefined);
+    Check(langs.Current = nil);
+    u := 'Hello';
+    Check(not langs.Translate(u));
+    CheckEqual(u, 'Hello');
+    langs.TranslateUtf8(pointer(u), length(u), u);
+    CheckEqual(u, '');
+    // per-thread selection
+    TLanguageFiles.SetThreadLanguage(lngFrench);
+    Check(TLanguageFiles.ThreadLanguage = lngFrench);
+    Check(langs.Current = langs.Language[lngFrench]);
+    u := 'Hello';
+    Check(langs.Translate(u));
+    CheckEqual(u, 'Bonjour');
+    langs.TranslateUtf8(pointer(u), length(u), u);
+    CheckEqual(u, '');
+    u := 'Hello';
+    langs.TranslateUtf8(pointer(u), length(u), u);
+    CheckEqual(u, 'Bonjour');
+    // fallback to DefaultLanguage when no thread language is set
+    TLanguageFiles.SetThreadLanguage(lngUndefined);
+    langs.DefaultLanguage := lngChinese;
+    Check(TLanguageFiles.ThreadLanguage = lngUndefined);
+    Check(langs.Current = langs.Language[lngChinese]);
+    u := 'Hello';
+    Check(langs.Translate(u));
+    CheckEqual(u, 'NiHao');
+    // DefaultLanguage should not affect Translate*(Language) methods
+    u := 'Hello';
+    Check(not langs.Translate(lngGerman, u));
+    CheckEqual(u, 'Hello');
+    langs.TranslateUtf8(lngGerman, pointer(u), length(u), u);
+    CheckEqual(u, '');
+    // Mustache {{"text}} channel end-to-end
+    TLanguageFiles.SetThreadLanguage(lngFrench);
+    m := TSynMustache.Parse('{{"Hello}} {{name}}!');
+    CheckEqual(m.Render(_ObjFast(['name', 'world']), nil, nil,
+      langs.TranslateString), 'Bonjour world!');
+    TLanguageFiles.SetThreadLanguage(lngUndefined);
+    langs.DefaultLanguage := lngUndefined;
+    CheckEqual(m.Render(_ObjFast(['name', 'world']), nil, nil,
+      langs.TranslateString), 'Hello world!', 'passthrough fallback');
+  end;
+
+begin
+  langs := TLanguageFiles.Create('ProjectV1');
+  try
+    CheckEqual(length(langs.LoadedLanguages), 0, 'void registry');
+    Check(langs.Language[lngFrench] = nil);
+    Check(langs.Language[lngChinese] = nil);
+    CheckEqual(langs.Add(lngFrench, ['Hello', 'Bonjour']), 1);
+    CheckEqual(langs.AddFromJson(lngChinese, '{"Hello":"NiHao"}'), 1);
+    DoTest;
+    langs.SaveTo(bin);
+    DoTest;
+  finally
+    langs.Free;
+  end;
+  langs := TLanguageFiles.CreateFrom(bin);
+  try
+    DoTest;
+  finally
+    TLanguageFiles.SetThreadLanguage(lngUndefined);
+    langs.Free;
+  end;
+end;
+
+procedure TTestCoreProcess.I18nGlobalHooks;
+var
+  langs: TLanguageFiles;
+  s: string;
+begin
+  Check(I18n = nil);
+  langs := TLanguageFiles.Create;
+  try
+    Check(langs.Language[lngFrench] = nil);
+    langs.AddFromJson(lngFrench, '{"Hello world":"Bonjour tout le monde"}');
+    if Check(langs.Language[lngFrench] <> nil) then
+      langs.Language[lngFrench].DateTimeFormat := 'yyyy/mm/dd hh:nn';
+    langs.SetGlobal;
+    Check(I18n = langs);
+    TLanguageFiles.SetThreadLanguage(lngFrench);
+    // LoadResStringTranslate is consumed by the GetCaptionFrom* family
+    GetCaptionFromPCharLen('HelloWorld', s);
+    Check(s = 'Bonjour tout le monde', 'caption translation');
+    // date/time hooks
+    Check(Assigned(i18nDateTimeText));
+    s := i18nDateTimeText(EncodeDate(2026, 7, 31) + EncodeTime(12, 30, 0, 0));
+    Check(s = '2026/07/31 12:30', 'DateTimeFormat pattern');
+  finally
+    TLanguageFiles.SetThreadLanguage(lngUndefined);
+    langs.Free; // also unhooks the global slots
+  end;
+  Check(I18n = nil, 'unhooked');
+  Check(not Assigned(LoadResStringTranslate));
+  Check(not Assigned(i18nDateTimeText));
+end;
+
+const
+  // a realistic GNU gettext .po sample, mixing CRLF and LF line endings
+  _PO: RawUtf8 =
+    '# French translation of the demo'#13#10 +
+    '# Copyright (C) 2026'#13#10 +
+    'msgid ""'#13#10 +
+    'msgstr "Project-Id-Version: demo\n"'#13#10 +
+    '"Content-Type: text/plain; charset=UTF-8\n"'#13#10 +
+    '"Plural-Forms: nplurals=2; plural=(n > 1);\n"'#13#10 +
+    #13#10 +
+    '#: src/main.c:42'#13#10 +
+    'msgid "Hello"'#13#10 +
+    'msgstr "Bonjour"'#13#10 +
+    #13#10 +
+    '#. a multi-line entry, using .po continuation lines'#10 +
+    'msgid "Hello "'#10 +
+    '"World"'#10 +
+    'msgstr "Bonjour "'#10 +
+    '"tout le monde"'#10 +
+    #10 +
+    '#: src/main.c:50'#10 +
+    '#, fuzzy, c-format'#10 +
+    'msgid "Fuzzy"'#10 +
+    'msgstr "Flou"'#10 +
+    #10 +
+    'msgid "Untranslated"'#10 +
+    'msgstr ""'#10 +
+    #10 +
+    'msgctxt "menu"'#10 +
+    'msgid "Open"'#10 +
+    'msgstr "Ouvrir"'#10 +
+    #10 +
+    'msgid "One file"'#10 +
+    'msgid_plural "%d files"'#10 +
+    'msgstr[0] "Un fichier"'#10 +
+    'msgstr[1] "%d fichiers"'#10 +
+    #10 +
+    'msgid "a\nb\tc \"d\" e\\f"'#10 +
+    'msgstr "A\nB\tC \"D\" E\\F"'#10 +
+    #10 +
+    'msgid "unknown \q and \u escapes"'#10 +
+    'msgstr "inconnu \q et \u"'#10 +
+    #10 +
+    '  msgid "Indented"'#10 +
+    '  msgstr "Indente"'#10;
+
+procedure TTestCoreProcess.I18nPoFormat;
+var
+  l: TLanguageFile;
+  t, cha: RawUtf8;
+  fn: TFileName;
+  tmp: array[0 .. 15] of AnsiChar;
+begin
+  l := TLanguageFile.Create(lngFrench);
+  try
+    CheckEqual(l.AddFromPo(''), 0, 'void input');
+    CheckEqual(l.Count, 0);
+    CheckEqual(l.AddFromPo('# only'#10#10'#. comments'#10'#, fuzzy'#10#10), 0,
+      'comments and blank lines only');
+    CheckEqual(l.Count, 0);
+    // the whole reference sample: 5 entries out of 9 msgid blocks
+    CheckEqual(l.AddFromPo(_PO), 5, 'sample entries');
+    CheckEqual(l.Count, 5, 'no extra key stored');
+    // plain msgid/msgstr pair
+    t := 'Hello';
+    Check(l.Translate(t), 'plain pair');
+    CheckEqual(t, 'Bonjour');
+    // multi-line msgid/msgstr continuation
+    t := 'Hello World';
+    Check(l.Translate(t), 'continuation lines');
+    CheckEqual(t, 'Bonjour tout le monde');
+    // \n \t \" \\ escape decoding, on both msgid and msgstr
+    t := 'a'#10'b'#9'c "d" e\f';
+    Check(l.Translate(t), 'escapes');
+    CheckEqual(t, 'A'#10'B'#9'C "D" E\F');
+    // unknown escapes keep the escaped character itself
+    t := 'unknown q and u escapes';
+    Check(l.Translate(t), 'unknown escapes');
+    CheckEqual(t, 'inconnu q et u');
+    // leading blanks are tolerated
+    t := 'Indented';
+    Check(l.Translate(t), 'indented lines');
+    CheckEqual(t, 'Indente');
+    // fuzzy entries are pending human review: they should be ignored
+    t := 'Fuzzy';
+    Check(not l.Translate(t), 'fuzzy is skipped');
+    CheckEqual(t, 'Fuzzy');
+    // a void msgstr is an untranslated entry
+    t := 'Untranslated';
+    Check(not l.Translate(t), 'void msgstr is skipped');
+    CheckEqual(t, 'Untranslated');
+    // msgctxt disambiguation is not supported yet
+    t := 'Open';
+    Check(not l.Translate(t), 'msgctxt is skipped');
+    CheckEqual(t, 'Open');
+    // msgid_plural / msgstr[] plural forms are not supported yet
+    t := 'One file';
+    Check(not l.Translate(t), 'plural forms are skipped');
+    CheckEqual(t, 'One file');
+    // the void msgid header entry should never pollute the table
+    t := 'Project-Id-Version: demo'#10 +
+         'Content-Type: text/plain; charset=UTF-8'#10 +
+         'Plural-Forms: nplurals=2; plural=(n > 1);'#10;
+    Check(not l.Translate(t), 'header is skipped');
+    // a missing ending line feed should still store the last entry
+    CheckEqual(l.AddFromPo('msgid "EOF"'#10'msgstr "Fin"'), 1, 'no ending LF');
+    CheckEqual(l.Count, 6);
+    t := 'EOF';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Fin');
+    // an existing key is replaced, not duplicated
+    CheckEqual(l.AddFromPo('msgid "Hello"'#10'msgstr "Salut"'#10), 1, 'replace');
+    CheckEqual(l.Count, 6, 'replaced, not added');
+    t := 'Hello';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Salut');
+    // the parser should be transparent to any UTF-8 multi-byte content
+    FastSetString(cha, @tmp, Ucs4ToUtf8($8336, @tmp)); // U+8336 = tea ideogram
+    CheckEqual(length(cha), 3, 'utf-8 3 bytes');
+    CheckEqual(l.AddFromPo('msgid "Tea"'#10'msgstr "' + cha + '"'#10), 1);
+    t := 'Tea';
+    Check(l.Translate(t));
+    CheckEqual(t, cha, 'utf-8 passthrough');
+    // AddFromPoFile() should ignore any leading UTF-8 BOM
+    fn := WorkDir + 'test.po';
+    Check(FileFromString(BOM_UTF8_CHARS +
+      'msgid "File"'#10'msgstr "Fichier"'#10, fn), 'po file');
+    CheckEqual(l.AddFromPoFile(fn), 1, 'AddFromPoFile');
+    CheckEqual(l.Count, 8);
+    t := 'File';
+    Check(l.Translate(t), 'BOM skipped');
+    CheckEqual(t, 'Fichier');
+    Check(DeleteFile(fn));
+  finally
+    l.Free;
+  end;
+end;
+
+// generate some GNU gettext .mo binary content, as msgfmt would
+// - Swapped will store the multi-byte numbers in the reverse endianness of this
+// CPU, to validate the byte swapping code path of TLanguageFile.AddFromMo()
+// - Revision and CountDelta allow to generate some deliberately invalid content
+function MakeMo(const Ids, Strs: array of RawUtf8; Swapped: boolean;
+  Revision: cardinal = 0; CountDelta: integer = 0): RawByteString;
+const
+  MO_HEAD = 28; // fixed size of the .mo header, in bytes
+var
+  n, i, p: PtrInt;
+  nul: AnsiChar;
+  txt: RawByteString;
+
+  procedure AddCard(V: cardinal);
+  begin
+    if Swapped then
+      V := bswap32(V);
+    Append(result, @V, 4);
+  end;
+
+begin
+  result := '';
+  txt := '';
+  nul := #0;
+  n := length(Ids);
+  AddCard($950412de);            // magic number
+  AddCard(Revision);             // major shl 16 + minor file format
+  AddCard(n + CountDelta);       // number of strings
+  AddCard(MO_HEAD);              // original strings table offset
+  AddCard(MO_HEAD + n * 8);      // translated strings table offset
+  AddCard(0);                    // hash table size
+  AddCard(0);                    // hash table offset
+  p := MO_HEAD + n * 16;         // where the #0 terminated strings begin
+  for i := 0 to n - 1 do         // original strings (length, offset) table
+  begin
+    AddCard(length(Ids[i]));
+    AddCard(p);
+    inc(p, length(Ids[i]) + 1);  // each string has its #0 terminator
+  end;
+  for i := 0 to n - 1 do         // translated strings (length, offset) table
+  begin
+    AddCard(length(Strs[i]));
+    AddCard(p);
+    inc(p, length(Strs[i]) + 1);
+  end;
+  for i := 0 to n - 1 do
+  begin
+    Append(txt, Ids[i]);
+    Append(txt, @nul, 1);
+  end;
+  for i := 0 to n - 1 do
+  begin
+    Append(txt, Strs[i]);
+    Append(txt, @nul, 1);
+  end;
+  Append(result, txt);
+end;
+
+procedure TTestCoreProcess.I18nMoFormat;
+var
+  l, l2: TLanguageFile;
+  langs: TLanguageFiles;
+  mo, bad: RawByteString;
+  t, cha: RawUtf8;
+  fn, folder: TFileName;
+  swapped: boolean;
+  i: PtrInt;
+  tmp: array[0 .. 15] of AnsiChar;
+begin
+  FastSetString(cha, @tmp, Ucs4ToUtf8($8336, @tmp)); // U+8336 = tea ideogram
+  // the same .mo content, in this CPU endianness and in the reverse one
+  for swapped := false to true do
+  begin
+    mo := MakeMo([
+      '',                                 // the void msgid header entry
+      'Hello',
+      'Hello World',
+      'Untranslated',
+      'One file'#0'%d files',             // msgid + #0 + msgid_plural
+      'menu'#4'Open',                     // msgctxt + #4 + msgid
+      'Tea'], [
+      'Project-Id-Version: demo'#10'Content-Type: text/plain; charset=UTF-8'#10,
+      'Bonjour',
+      'Bonjour tout le monde',
+      '',                                 // an untranslated entry
+      'Un fichier'#0'%d fichiers',        // msgstr[0] + #0 + msgstr[1]
+      'Ouvrir',
+      cha], swapped);
+    l := TLanguageFile.Create(lngFrench);
+    try
+      CheckEqual(l.AddFromMo(mo), 3, 'Hello + Hello World + Tea');
+      CheckEqual(l.Count, 3, 'no extra key stored');
+      t := 'Hello';
+      Check(l.Translate(t), 'plain pair');
+      CheckEqual(t, 'Bonjour');
+      t := 'Hello World';
+      Check(l.Translate(t), 'no escaping in the binary format');
+      CheckEqual(t, 'Bonjour tout le monde');
+      // the parser should be transparent to any UTF-8 multi-byte content
+      t := 'Tea';
+      Check(l.Translate(t));
+      CheckEqual(t, cha, 'utf-8 passthrough');
+      // the void msgid header entry should never pollute the table
+      t := 'Project-Id-Version: demo'#10 +
+           'Content-Type: text/plain; charset=UTF-8'#10;
+      Check(not l.Translate(t), 'header is skipped');
+      // a void msgstr is an untranslated entry, as with AddFromPo()
+      t := 'Untranslated';
+      Check(not l.Translate(t), 'void msgstr is skipped');
+      CheckEqual(t, 'Untranslated');
+      // msgid_plural / msgstr[] plural forms are not supported yet, as for .po
+      t := 'One file';
+      Check(not l.Translate(t), 'plural forms are skipped');
+      // msgctxt disambiguation is not supported yet, as for .po
+      t := 'Open';
+      Check(not l.Translate(t), 'msgctxt is skipped');
+      t := 'menu'#4'Open';
+      Check(not l.Translate(t), 'the raw msgctxt key is not stored either');
+    finally
+      l.Free;
+    end;
+  end;
+  // a .mo and the .po source it was compiled from should give the same table
+  l := TLanguageFile.Create(lngFrench);
+  l2 := TLanguageFile.Create(lngFrench);
+  try
+    CheckEqual(l.AddFromPo('msgid "Hello"'#10'msgstr "Bonjour"'#10 +
+      'msgid "Hello World"'#10'msgstr "Bonjour tout le monde"'#10), 2, '.po');
+    CheckEqual(l2.AddFromMo(MakeMo(['Hello', 'Hello World'],
+      ['Bonjour', 'Bonjour tout le monde'], false)), 2, '.mo');
+    CheckEqual(l.Count, l2.Count, 'same entry count as its .po source');
+    t := 'Hello';
+    Check(l2.Translate(t));
+    CheckEqual(t, 'Bonjour', 'same translation as its .po source');
+    t := 'Hello World';
+    Check(l2.Translate(t));
+    CheckEqual(t, 'Bonjour tout le monde');
+  finally
+    l2.Free;
+    l.Free;
+  end;
+  // invalid content should be rejected, and should never merge anything
+  l := TLanguageFile.Create(lngFrench);
+  l2 := TLanguageFile.Create(lngFrench);
+  try
+    CheckEqual(l.AddFromMo(''), -1, 'void input');
+    CheckEqual(l.AddFromMo('too short for a header'), -1, 'truncated header');
+    CheckEqual(l.Count, 0);
+    mo := MakeMo(['One'], ['Un'], false);
+    CheckEqual(l.AddFromMo(mo), 1, 'reference sample');
+    CheckEqual(l.Count, 1);
+    bad := mo;
+    bad[1] := 'X'; // whatever the endianness is, the magic is broken
+    CheckEqual(l.AddFromMo(bad), -1, 'invalid magic number');
+    CheckEqual(l.AddFromMo(MakeMo(['One'], ['Un'], false, 1 shl 16)), 1,
+      'revision 1.0 is supported');
+    CheckEqual(l.AddFromMo(MakeMo(['One'], ['Un'], false, 2 shl 16)), -1,
+      'unsupported major revision');
+    CheckEqual(l.AddFromMo(MakeMo(['One'], ['Un'], false, 0, 1)), -1,
+      'one more entry than actually supplied');
+    CheckEqual(l.AddFromMo(MakeMo(['One'], ['Un'], false, 0, 1 shl 20)), -1,
+      'way more entries than this content could store');
+    CheckEqual(l.Count, 1, 'no invalid content did pollute the table');
+    CheckEqual(l.AddFromMo(MakeMo([], [], false)), 0, 'valid but void .mo');
+    // any truncated content should be rejected, and merge nothing at all
+    for i := 1 to length(mo) - 1 do
+    begin
+      CheckEqual(l2.AddFromMo(copy(mo, 1, i)), -1, 'truncated');
+      CheckEqual(l2.Count, 0, 'nothing merged from a truncated input');
+    end;
+    // AddFromMoFile() should read the file as binary, and AddFromFile() should
+    // dispatch on the .mo extension
+    fn := WorkDir + 'i18ntest.mo';
+    Check(FileFromString(mo, fn), 'mo file');
+    CheckEqual(l2.AddFromMoFile(fn), 1, 'AddFromMoFile');
+    CheckEqual(l2.AddFromFile(fn), 1, '.mo dispatch');
+    CheckEqual(l2.Count, 1);
+    t := 'One';
+    Check(l2.Translate(t));
+    CheckEqual(t, 'Un');
+    Check(DeleteFile(fn));
+  finally
+    l2.Free;
+    l.Free;
+  end;
+  // TLanguageFiles.LoadFromFolder() should load the files in a deterministic
+  // order, whatever the OS folder enumeration order is
+  folder := EnsureDirectoryExists([WorkDir, 'i18nmo']);
+  Check(folder <> '', 'folder');
+  Check(FileFromString('msgid "Hello"'#10'msgstr "FromPo"'#10 +
+    'msgid "OnlyPo"'#10'msgstr "SeulementPo"'#10, folder + 'fr.po'));
+  Check(FileFromString(MakeMo(['Hello', 'OnlyMo'],
+    ['FromMo', 'SeulementMo'], false), folder + 'fr.mo'));
+  langs := TLanguageFiles.Create;
+  try
+    CheckEqual(langs.AddFromFolder(folder), 2, 'fr.po + fr.mo');
+    Check(langs.Language[lngFrench] <> nil);
+    CheckEqual(langs.Language[lngFrench].Count, 3, 'Hello + OnlyPo + OnlyMo');
+    TLanguageFiles.SetThreadLanguage(lngFrench);
+    t := 'Hello';
+    Check(langs.Translate(t));
+    CheckEqual(t, 'FromMo', 'the compiled .mo wins over its .po source');
+    t := 'OnlyPo';
+    Check(langs.Translate(t), 'both files are merged');
+    CheckEqual(t, 'SeulementPo');
+    t := 'OnlyMo';
+    Check(langs.Translate(t));
+    CheckEqual(t, 'SeulementMo');
+  finally
+    TLanguageFiles.SetThreadLanguage(lngUndefined);
+    langs.Free;
+  end;
+  Check(DirectoryDelete(folder), 'cleanup');
+end;
+
+const
+  // an INI sample mixing CRLF and LF line endings, comments and sections
+  _INI: RawUtf8 =
+    '; a leading comment'#13#10 +
+    '# another comment'#10 +
+    #13#10 +                        // a blank line
+    '   '#10 +                      // a blank-only line
+    'Hello=Bonjour'#13#10 +         // plain pair, CRLF ended
+    '  World  =  Monde  '#10 +      // indentation and blanks around '='
+    'Void='#10 +                    // a void value is ignored
+    '=NoKey'#10 +                   // a void key is ignored
+    'NoEqualSignHere'#10 +          // a line without '=' is ignored
+    '[fr]'#13#10 +
+    'Hello=Salut'#10 +
+    '; in-section comment'#10 +
+    'Bye=Au revoir'#10 +
+    '[de]'#10 +
+    'Hello=Hallo'#10;
+
+var
+  // some WinAnsi chars to avoid any charset/IDE conflict during tests
+  _uC9, _uE7, _uE8, _uE9: RawUtf8;
+
+const
+  UTF8_ACCENTS: array[0..3] of byte = ($C9, $E7, $E8, $E9);
+
+procedure TTestCoreProcess.I18nIniAndFiles;
+var
+  l: TLanguageFile;
+  langs: TLanguageFiles;
+  t, cha: RawUtf8;
+  folder: TFileName;
+  tmp: array[0 .. 15] of AnsiChar;
+
+  function Fn(const Ext: TFileName): TFileName;
+  begin
+    result := WorkDir + 'i18ntest.' + Ext;
+  end;
+
+begin
+  FastSetString(cha, @tmp, Ucs4ToUtf8($8336, @tmp)); // U+8336 = tea ideogram
+  l := TLanguageFile.Create(lngFrench);
+  try
+    // INI basics: no section, so any [section] header is just ignored
+    CheckEqual(l.AddFromIni(''), 0, 'void input');
+    CheckEqual(l.Count, 0);
+    CheckEqual(l.AddFromIni('; only'#10'# comments'#10#13#10), 0, 'comments only');
+    CheckEqual(l.Count, 0);
+    CheckEqual(l.AddFromIni(_INI), 5, 'all sections merged');
+    CheckEqual(l.Count, 3, 'Hello + World + Bye');
+    t := 'World';
+    Check(l.Translate(t), 'blanks around = are trimmed');
+    CheckEqual(t, 'Monde');
+    t := 'Hello';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Hallo', 'last [de] value did overwrite the previous ones');
+    t := 'Bye';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Au revoir');
+    t := 'Void';
+    Check(not l.Translate(t), 'void value is skipped');
+    t := 'NoKey';
+    Check(not l.Translate(t), 'void key is skipped');
+    t := 'NoEqualSignHere';
+    Check(not l.Translate(t), 'line without = is skipped');
+  finally
+    l.Free;
+  end;
+  l := TLanguageFile.Create(lngFrench);
+  try
+    // INI with an explicit [section] filter
+    CheckEqual(l.AddFromIni(_INI, 'fr'), 2, '[fr] section only');
+    CheckEqual(l.Count, 2);
+    t := 'Hello';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Salut', '[fr] value, not the [de] one');
+    t := 'Bye';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Au revoir');
+    t := 'World';
+    Check(not l.Translate(t), 'content before any section is out of [fr]');
+    CheckEqual(l.AddFromIni(_INI, 'DE'), 1, 'section name is case-insensitive');
+    CheckEqual(l.Count, 2, 'Hello was replaced, not added');
+    t := 'Hello';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Hallo');
+    CheckEqual(l.AddFromIni(_INI, 'nosuchsection'), 0, 'unknown section');
+    CheckEqual(l.Count, 2);
+    // the INI parser should be transparent to any UTF-8 multi-byte content
+    CheckEqual(length(cha), 3, 'utf-8 3 bytes');
+    CheckEqual(l.AddFromIni('Tea = ' + cha + #13#10), 1, 'utf-8 value');
+    t := 'Tea';
+    Check(l.Translate(t));
+    CheckEqual(t, cha, 'utf-8 passthrough');
+    // YAML mapping
+    CheckEqual(l.AddFromYaml('Hello: Bonjour'#10'World: Monde'#10), 2, 'yaml');
+    t := 'Hello';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Bonjour', 'yaml did overwrite the INI value');
+    t := 'World';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Monde');
+    CheckEqual(l.AddFromYaml('- one'#10'- two'#10), -1, 'yaml array is no table');
+    // the relaxed JSON variants are supported by AddFromJson()
+    CheckEqual(l.AddFromJson(RawUtf8('{ // a JSONC comment'#10' "Six": "Sixi') + _uE8 + 'me"'#10'}'),
+      1, 'jsonc');
+    t := 'Six';
+    Check(l.Translate(t));
+    CheckEqual(t, RawUtf8('Sixi') + _uE8 + 'me');
+    CheckEqual(l.AddFromJson(RawUtf8('{ /* JSON5 */ Seven: "Septi') + _uE8 + 'me", }'), 1, 'json5');
+    t := 'Seven';
+    Check(l.Translate(t));
+    CheckEqual(t, RawUtf8('Septi') + _uE8 + 'me');
+    CheckEqual(l.AddFromJson('invalid'), -1, 'invalid JSON');
+    CheckEqual(l.AddFromJson(''), -1, 'void JSON');
+    CheckEqual(l.AddFromJson('["Hello"]'), -1, 'JSON array is no table');
+  finally
+    l.Free;
+  end;
+  l := TLanguageFile.Create(lngFrench);
+  try
+    // AddFromFile() dispatches on the file extension
+    CheckEqual(l.AddFromFile(WorkDir + 'i18nnotexisting.json'), -1, 'no file');
+    Check(FileFromString('this is no translation file', Fn('txt')));
+    CheckEqual(l.AddFromFile(Fn('txt')), -1, 'unknown extension');
+    Check(DeleteFile(Fn('txt')));
+    Check(FileFromString('msgid "One"'#10'msgstr "Un"'#10, Fn('po')));
+    CheckEqual(l.AddFromFile(Fn('po')), 1, '.po');
+    Check(DeleteFile(Fn('po')));
+    Check(FileFromString('[fr]'#13#10'Two=Deux'#13#10, Fn('ini')));
+    CheckEqual(l.AddFromFile(Fn('ini')), 1, '.ini');
+    Check(DeleteFile(Fn('ini')));
+    Check(FileFromString('Five=Cinq'#10, Fn('msg')));
+    CheckEqual(l.AddFromFile(Fn('msg')), 1, '.msg');
+    Check(DeleteFile(Fn('msg')));
+    Check(FileFromString(BOM_UTF8_CHARS + '{"Three":"Trois"}', Fn('json')));
+    CheckEqual(l.AddFromFile(Fn('json')), 1, '.json');
+    Check(DeleteFile(Fn('json')));
+    Check(FileFromString('Four: Quatre'#10, Fn('yaml')));
+    CheckEqual(l.AddFromFile(Fn('yaml')), 1, '.yaml');
+    Check(DeleteFile(Fn('yaml')));
+    CheckEqual(l.Count, 5, 'po + ini + msg + json + yaml');
+    t := 'One';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Un');
+    t := 'Two';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Deux');
+    t := 'Three';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Trois');
+    t := 'Four';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Quatre');
+    t := 'Five';
+    Check(l.Translate(t));
+    CheckEqual(t, 'Cinq');
+  finally
+    l.Free;
+  end;
+  // TLanguageFiles.LoadFromFolder() with several extensions
+  folder := EnsureDirectoryExists([WorkDir, 'i18n']);
+  Check(folder <> '', 'folder');
+  Check(FileFromString(RawUtf8('msgid "Hello"'#10'msgstr "Bonjour"'#10 +
+    'msgid "Resume"'#10'msgstr "R') + _uE9 + 'sum' + _uE9 + '"'#10 +
+    'msgid "Cafe"'#10'msgstr "Caf' + _uE9 + '"'#10, folder + 'fr.po'));
+  Check(FileFromString(RawUtf8('{"Facade":"Fa') + _uE7 + 'ade","Elephant":"' + _uC9 + 'l' + _uE9 + 'phant"}', folder + 'fr.json'));
+  Check(FileFromString('Hello=' + cha + #10, folder + 'zh.ini'));
+  Check(FileFromString('ignored', folder + 'en.txt'), 'unknown extension');
+  Check(FileFromString('ignored', folder + 'nolang.json'), 'unknown iso');
+  langs := TLanguageFiles.Create;
+  try
+    CheckEqual(langs.AddFromFolder(folder), 3, 'fr.po + fr.json + zh.ini');
+    Check(langs.Language[lngEnglish] = nil, '.txt is not a translation file');
+    Check(langs.Language[lngFrench] <> nil);
+    CheckEqual(langs.Language[lngFrench].Count, 5);
+    t := 'Hello';
+    TLanguageFiles.SetThreadLanguage(lngFrench);
+    Check(langs.Translate(t), 'from fr.po');
+    CheckEqual(t, 'Bonjour');
+    t := 'Resume';
+    Check(langs.Translate(t));
+    CheckEqual(t, RawUtf8('R') + _uE9 + 'sum' + _uE9);
+    t := 'Cafe';
+    Check(langs.Translate(t));
+    CheckEqual(t, RawUtf8('Caf') + _uE9);
+    t := 'Facade';
+    Check(langs.Translate(t));
+    CheckEqual(t, RawUtf8('Fa') + _uE7 + 'ade');
+    t := 'Elephant';
+    Check(langs.Translate(t));
+    CheckEqual(t, _uC9 + 'l' + _uE9 + 'phant');
+    Check(langs.Language[lngChinese] <> nil);
+    CheckEqual(langs.Language[lngChinese].Count, 1);
+    t := 'Hello';
+    TLanguageFiles.SetThreadLanguage(lngChinese);
+    Check(langs.Translate(t), 'from zh.ini');
+    CheckEqual(t, cha);
+  finally
+    TLanguageFiles.SetThreadLanguage(lngUndefined);
+    langs.Free;
+  end;
+  Check(DirectoryDelete(folder), 'cleanup');
+end;
+
+resourcestring
+  // the one and only resourcestring of this test executable we do translate
+  RS_I18N_TEST = 'i18n test string';
+
+{$ifdef FPC}
+var
+  // FPC does allow a global variable to be initialized from a resourcestring,
+  // and registers its reference into the RTL _FPC_ResStrInitTables so that
+  // SetResourceStrings() refreshes it - this is the FPC_HAS_RESSTRINITS
+  // feature, which has no Delphi equivalent since a Delphi resourcestring is
+  // no compile-time constant, so can't initialize a global variable
+  RS_I18N_VAR: string = RS_I18N_TEST;
+{$endif FPC}
+
+procedure TTestCoreProcess.I18nResourceStrings;
+var
+  langs: TLanguageFiles;
+  tr: RawUtf8;
+  i: integer;
+
+  function Rs: RawUtf8;
+  begin // Delphi resourcestring are plain string and FPC are already CP_UTF8
+    StringToUtf8(RS_I18N_TEST, result);
+  end;
+
+  {$ifdef FPC}
+  function RsVar: RawUtf8;
+  begin
+    FastSetString(result, pointer(RS_I18N_VAR), length(RS_I18N_VAR));
+  end;
+  {$endif FPC}
+
+begin
+  tr := 'traduit ';
+  CheckEqual(Rs, 'i18n test string', 'initial English text');
+  {$ifdef FPC}
+  CheckEqual(RsVar, 'i18n test string', 'initial variable text');
+  AppendUcs4(tr, $8336); // U+8336 = tea ideogram into FPC UTF8 systemcodepage
+  {$else}
+  {$ifdef UNICODE}
+  AppendUcs4(tr, $8336); // U+8336 = tea ideogram into UTF-8/UTF-16 strings
+  {$else}
+  {$endif UNICODE}
+  Append(tr, 'ascii7'); // Delphi 7/2007 AnsiString won't drink any tea 
+  {$endif FPC}
+  langs := TLanguageFiles.Create;
+  try
+    Check(langs.Language[lngFrench] = nil);
+    CheckEqual(langs.Add(lngFrench, ['i18n test string', tr]), 1);
+    Check(langs.Language[lngFrench] <> nil);
+    langs.TranslateResourceStrings(lngFrench);
+    CheckEqual(Rs, tr, 'resourcestring translated');
+    {$ifdef FPC}
+    // the FPC_HAS_RESSTRINITS references do follow the translation
+    CheckEqual(RsVar, tr, 'variable translated');
+    {$endif FPC}
+    // a language with no table restores the original English text
+    langs.TranslateResourceStrings(lngGerman);
+    for i := 1 to 100 do // stress resource cache
+      CheckEqual(Rs, 'i18n test string', 'unknown language');
+    {$ifdef FPC}
+    CheckEqual(RsVar, 'i18n test string', 'variable of unknown language');
+    {$endif FPC}
+    // switching back and forth is safe, thanks to the ResetResourceTables call
+    langs.TranslateResourceStrings(lngFrench);
+    for i := 1 to 100 do // stress resource cache
+      CheckEqual(Rs, tr, 'translated again');
+    {$ifdef FPC}
+    CheckEqual(RsVar, tr, 'variable translated again');
+    {$endif FPC}
+    langs.TranslateResourceStrings(lngUndefined);
+    for i := 1 to 100 do // stress resource cache
+      CheckEqual(Rs, 'i18n test string', 'ResetResourceTables');
+    {$ifdef FPC}
+    CheckEqual(RsVar, 'i18n test string', 'variable of no language');
+    {$endif FPC}
+  finally
+    langs.Free;
+  end;
+  CheckEqual(Rs, 'i18n test string', 'restored');
+  {$ifdef FPC}
+  CheckEqual(RsVar, 'i18n test string', 'variable restored');
+  {$endif FPC}
 end;
 
 
@@ -9931,11 +11210,11 @@ begin
   Check(ReferenceCrc32(0, @c32t, 1024) = $6FCF9E13);
   Check(crc32(0, @c32t, 1024 - 5) = $70965738, 'crc32');
   Check(ReferenceCrc32(0, @c32t, 1024 - 5) = $70965738);
-  Check(crc32(0, pointer(PtrInt(@c32t) + 1), 2) = $41D912FF, 'crc32');
-  Check(ReferenceCrc32(0, pointer(PtrInt(@c32t) + 1), 2) = $41D912FF);
-  Check(crc32(0, pointer(PtrInt(@c32t) + 3), 1024 - 5) = $E5FAEC6C, 'crc32');
+  Check(crc32(0, pointer(PtrUInt(@c32t) + 1), 2) = $41D912FF, 'crc32');
+  Check(ReferenceCrc32(0, pointer(PtrUInt(@c32t) + 1), 2) = $41D912FF);
+  Check(crc32(0, pointer(PtrUInt(@c32t) + 3), 1024 - 5) = $E5FAEC6C, 'crc32');
   Check(CompareMem(@c32t, crc32tab, SizeOf(c32t)), 'crc32tab');
-  Check(ReferenceCrc32(0, pointer(PtrInt(@c32t) + 3), 1024 - 5) = $E5FAEC6C, 'crc32');
+  Check(ReferenceCrc32(0, pointer(PtrUInt(@c32t) + 3), 1024 - 5) = $E5FAEC6C, 'crc32');
   M := TMemoryStream.Create;
   Z := TSynZipCompressor.Create(M, 6, szcfGZ);
   L := length(Data);
@@ -10226,7 +11505,7 @@ begin
     with TZipWrite.CreateFromIgnore(
       FN2, TFileNameDynArray(deleted), 1 shl 20, onprog) do
     try
-      Check(Count = length(json) - length(deleted));
+      CheckEqual(Count, length(json) - length(deleted));
     finally
       Free;
     end;
@@ -10639,6 +11918,11 @@ end;
 
 
 initialization
+  _uC9 := WinAnsiToUtf8(@UTF8_ACCENTS[0], 1);
+  _uE7 := WinAnsiToUtf8(@UTF8_ACCENTS[1], 1);
+  _uE8 := WinAnsiToUtf8(@UTF8_ACCENTS[2], 1);
+  _uE9 := WinAnsiToUtf8(@UTF8_ACCENTS[3], 1);
+
   {$ifndef HASDYNARRAYTYPE}
   Rtti.RegisterObjArray(TypeInfo(TSimpleExampleObjArray), TSimpleExample);
   {$endif HASDYNARRAYTYPE}

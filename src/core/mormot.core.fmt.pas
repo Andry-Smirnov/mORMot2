@@ -6,9 +6,9 @@ unit mormot.core.fmt;
 {
   *****************************************************************************
 
-   Binary, JSON and Text Advanced Formatting Functions
+   Binary, JSON, XML and Text Advanced Formatting Functions
     - HTML Text Conversions
-    - Basic XML Conversions
+    - XML Processing with Escape/Unescape and TXmlParser
     - YAML 1.2 core-schema to JSON or TDocVariant Support
     - Markup (e.g. Markdown or Emoji) Process
     - INI Files In-memory Access
@@ -98,7 +98,7 @@ function HtmlToText(const text: RawUtf8): RawUtf8;
 function HtmlTagNeedsCRLF(tag: PUtf8Char): boolean;
 
 
-{ ************* Basic XML Conversions }
+{ ************* XML Processing with Escape/Unescape and TXmlParser }
 
 const
   /// standard header for an UTF-8 encoded XML file
@@ -114,6 +114,39 @@ function NeedsXmlEscape(text: PUtf8Char): boolean;
 // - just a wrapper around the AddXmlEscape() function
 function XmlEscape(const text: RawUtf8): RawUtf8;
 
+type
+  /// how AddJsonToXml() and its wrappers handle the XML naming conventions
+  // - default [] is to write any JSON field name as a XML element name, for
+  // backward compatibility - even '@name' or '#text', which are not valid XML
+  // element names
+  // - jxoAttribute will write a '@name' field holding a scalar value as a
+  // name="value" attribute of its enclosing element
+  // - jxoText will write a '#text' field as the element text content
+  // - so [jxoAttribute, jxoText] will reverse the XmlToVariant() conventions,
+  // i.e. JsonToXml(XmlToJson(x)) would return the original XML content
+  // - note that '@name' fields should appear before any content field of their
+  // object, which is how XmlToVariant() does generate them
+  // - jxoSelfClosed will write an element with no text and no sub-element using
+  // the self-closing short form, i.e. '<name/>' and '<name attr="v"/>' instead
+  // of '<name></name>' and '<name attr="v"></name>' - both forms are equivalent
+  // for any XML reader, and XmlToVariant() does generate the very same content
+  // from either of them, so this option is only about the emitted layout
+  TJsonToXmlOption = (
+    jxoAttribute,
+    jxoText,
+    jxoSelfClosed);
+
+  /// set of options for AddJsonToXml() and its wrappers
+  TJsonToXmlOptions = set of TJsonToXmlOption;
+
+const
+  /// the TJsonToXmlOptions reversing the XmlToVariant() naming conventions
+  // - i.e. write '@name' fields as XML attributes, and '#text' as text content
+  // - jxoSelfClosed is not part of it, to generate the most explicit content
+  JXO_ENABLED = [jxoAttribute, jxoText];
+  /// shorter alternative to JXO_ENABLED, including jxoSelfClosed
+  JXO_SHORT = [jxoAttribute, jxoText, jxoSelfClosed];
+
 /// convert a JSON array or document into a simple XML content
 // - just a wrapper around AddJsonToXml() function, with an optional
 // header before the XML converted data (e.g. XMLUTF8_HEADER), and an optional
@@ -122,7 +155,7 @@ function XmlEscape(const text: RawUtf8): RawUtf8;
 // corresponding ending token will be appended after (e.g. '</contents>')
 // - WARNING: the JSON buffer is decoded in-place, so P^ WILL BE modified
 procedure JsonBufferToXml(P: PUtf8Char; const Header, NameSpace: RawUtf8;
-  out result: RawUtf8);
+  out result: RawUtf8; Options: TJsonToXmlOptions = []);
 
 /// convert a JSON array or document into a simple XML content
 // - just a wrapper around AddJsonToXml() function, making a private copy
@@ -131,23 +164,37 @@ procedure JsonBufferToXml(P: PUtf8Char; const Header, NameSpace: RawUtf8;
 // - the optional header is added at the beginning of the resulting string
 // - an optional name space content node could be added around the generated XML,
 // e.g. '<content>'
+// - set [jxoAttribute, jxoText] options to write '@name' and '#text' fields as
+// attributes and text content, i.e. to reverse the XmlToVariant() conventions
 function JsonToXml(const Json: RawUtf8; const Header: RawUtf8 = XMLUTF8_HEADER;
-  const NameSpace: RawUtf8 = ''): RawUtf8;
+  const NameSpace: RawUtf8 = ''; Options: TJsonToXmlOptions = []): RawUtf8;
 
-/// append some chars, escaping all XML special chars as expected
-// - i.e.   < > & " '  as   &lt; &gt; &amp; &quote; &apos;
-// - and all control chars (i.e. #1..#31) as &#..;
+/// append some #0 ended chars, escaping all XML special chars as expected
+// - i.e.   < > & " '  as   &lt; &gt; &amp; &quot; &apos;
+// - TAB, LF and CR are escaped as &#x09; &#x0a; &#x0d;
+// - the other control chars are just ignored, since #1..#8 #11 #12 #14..#31
+// are not allowed in any XML 1.0 document
 // - see @http://www.w3.org/TR/xml/#syntax
 procedure AddXmlEscape(W: TTextWriter; Text: PUtf8Char);
 
 /// append a JSON value, array or document as simple XML content
 // - as called by JsonBufferToXml() and JsonToXml() wrappers
 // - this method is called recursively to handle all kind of JSON values
+// - if jxoAttribute/jxoText are set, follows the XmlToVariant() conventions:
+// a '@name' field with a scalar value is written as a XML attribute of its
+// enclosing element, and a '#text' field as the element text content - note
+// that '@name' fields should appear before any content field of their object,
+// which is how XmlToVariant() does generate them
 // - WARNING: the JSON buffer is decoded in-place, so will be changed
+// - Pending is an internal flag which should be usually ignored: it tells that
+// the caller did write '<name' but not its ending '>' yet, and is set back to
+// false as soon as this level does write some content - so that a still set
+// Pending^ means that jxoSelfClosed may emit '/>' instead of '></name>'
 // - returns the end of the current JSON converted level, or nil if the
-// supplied content was not correct JSON
+// supplied content was not valid JSON
 function AddJsonToXml(W: TTextWriter; Json: PUtf8Char; ArrayName: PUtf8Char = nil;
-  EndOfObject: PUtf8Char = nil): PUtf8Char;
+  EndOfObject: PUtf8Char = nil; Options: TJsonToXmlOptions = [];
+  Pending: PBoolean = nil): PUtf8Char;
 
 /// unescape some XML text into a TTextWriter instance
 // - decode the five XML predefined entities and numeric character references,
@@ -167,10 +214,12 @@ function XmlUnescape(Text: PUtf8Char; TextLen: PtrInt; var Dest: RawUtf8;
 
 const
   /// TDocVariant options used by default for XmlToVariant()
-  // - no number type inference is done: XML content is text by nature, so
-  // all values are stored as (lossless) strings
+  // - XML names are case-sensitive, and xpoVariantGuessType could be doubles
   // - you may also set dvoInternNames for huge content, to reduce the memory usage
-  JSON_XML = JSON_FAST;
+  JSON_XML = [dvoReturnNullForUnknownProperty,
+              dvoValueCopiedByReference,
+              dvoNameCaseSensitive,
+              dvoAllowDoubleValue];
 
 type
   /// exception raised by TXmlParser on invalid or unsupported XML input
@@ -242,6 +291,8 @@ type
   // - xpoKeepWhiteSpace would return xtText tokens made only of whitespace,
   // which are silently skipped by default
   // - xpoVariantGuessType let XmlToVariant() recognize booleans and numbers
+  // - xpoRejectDocType rejects any <!DOCTYPE ...> declaration, whereas simple
+  // DOCTYPE declarations are ignored by default without any DTD processing
   TXmlParserOption = (
     xpoNoException,
     xpoStripNamespacePrefix,
@@ -249,7 +300,8 @@ type
     xpoKeepComments,
     xpoKeepPI,
     xpoKeepWhiteSpace,
-    xpoVariantGuessType);
+    xpoVariantGuessType,
+    xpoRejectDocType);
 
   /// options to refine TXmlParser process
   TXmlParserOptions = set of TXmlParserOption;
@@ -257,42 +309,47 @@ type
   /// a pointer to TXmlParser instance, used mainly for the fluent interface
   PXmlParser = ^TXmlParser;
 
-  /// some transient storage for TXmlParser.Save/Restore methods
-  TXmlState = TQWordRec;
-
   /// zero-allocation SAX-like parser over an XML UTF-8 memory buffer
-  // - a "basic" parser, from actual simple needs: no DTD support (which makes
-  // it immune to entity expansion attacks by design), only the five XML
-  // predefined entities and numeric character references, prefixes kept as
-  // part of the names with no URI namespace binding
-  // - the input buffer is expected to be UTF-8 encoded and to remain available
-  // in memory during the whole parsing: Name and Value do point within it,
-  // with no memory allocation during the scan - see NameToUtf8/ValueToUtf8
-  // - well-formedness of the tags nesting is verified, and any syntax or
-  // nesting error would raise an EXmlException with the faulty line number,
-  // unless xpoNoException option was set and Next returns xtError and
-  // more information is available in LastError/LastErrorLine
-  // - to reduce the memory footprint, this parser has some limitations: Depth
-  // is limited to 255, Names are allowed up to 255 UTF-8 bytes, and any root
-  // element should not be > 4GB of UTF-8 text
-  // - we recommend its high level SAX/DOM hybrid mode:
+  // - first usage is as full DOM via the XmlToVariant() wrapper function
+  // - then we recommend TXmlParser use in high level SAX/DOM hybrid mode:
   // ! var x: TXmlParser;
   // !     header, doc: TDocVariantData;
   // !     footer: RawUtf8;
   // ! begin
   // ! x.Init(xml);
-  // ! if x.Find('/root/header') then
-  // !   x.Consume(header);
+  // ! if x.Find('/root/header') and
+  // !    x.Consume(header) then
+  // !      ... use header.U['version'] ...
   // ! if x.Find('/root/catalog') then
-  // !   while x.Next('book', book) do
+  // !   while x.Consume('book', book) do
   // !     ... use book.U['title'] or book.I['@id'] ...
-  // ! if x.Find('/root/footer') then
-  // !   x.ConsumeText(footer);
+  // ! if x.Find('/root/footer') and
+  // !    x.ConsumeText(footer) then
+  // !      ... footer = text in <footer>text</footer> ...
+  // - if you really want to Consume() only what is needed, consider ForEach():
+  // ! if x.Rewind.Find('root/catalog') then
+  // !   while x.ForEach('book', 0) do
+  // !     if x.Find('title') and
+  // !       x.ConsumeText(title) then
+  // !         ... title = text in each <book><title>text</title></book> ...
   // - for raw SAX/pull usage, call Init() then ParseNext in a loop, e.g. as
   // ! x.Init(pointer(xml), length(xml));
   // ! while true do
   // !   case x.ParseNext of
   // !     ...
+  // - as show above, methods are FORWARD-ONLY: use properly Save/Restore or
+  // Rewind otherwise you may get a "Missing TXmlParser.Save/Rewind" exception
+  // - this is a "basic" parser, from actual simple needs: no DTD support but
+  // basic <!DOCTYPE ...> (which makes it immune to entity expansion attacks by
+  // design), no URI namespace binding, only the most useful XPath lookup syntax
+  // - well-formedness of the tags nesting is verified, and any syntax or
+  // nesting error would raise an EXmlException with the faulty line number,
+  // unless xpoNoException option was set and ParseNext returns xtError and
+  // more information is available in LastError/LastErrorLine
+  // - this static structure consumes less than 2KB on stack; to reduce the
+  // memory footprint, this parser has some limitations: Depth should be < 255,
+  // Names should be < 255 UTF-8 bytes, any root element should be < 4GB of
+  // UTF-8 text, and up to 32 Save/Restore levels are allowed
   {$ifdef USERECORDWITHMETHODS}
   TXmlParser = record
   {$else}
@@ -304,16 +361,17 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     function ParseName(p, e: PUtf8Char): PUtf8Char;
       {$ifdef HASINLINE} inline; {$endif}
+    function ParseDocType(p: PUtf8Char): PUtf8Char;
     /// append the current Name/Value attribute into a TDocVariant object
     procedure AttributeToDocVariant(Dest: PDocVariantData);
     /// raw recursive conversion of the current level into a TDocVariant object
     // - fill from attributes and content, until the matching xtElementEnd
     // - the supplied Dest^ should have been just allocated or ZeroClear()
-    procedure ToDocVariant(Dest: PDocVariantData);
+    procedure ToVariant(Dest: PDocVariantData);
   public
     /// the current token kind, as set by the last ParseNext call
     Kind: TXmlToken;
-    /// how many elements are currently opened
+    /// how many elements are currently opened via ParseNext
     // - incremented after a xtElementStart, decremented after a xtElementEnd
     // - by internal design, is limited to 255 as highest allowed value
     Depth: byte;
@@ -343,19 +401,32 @@ type
     /// reset the current position to the beginning of the XML supplied to Init()
     // - on real data, parsing is done at 2GB/s so Rewind is a common/fair task
     function Rewind: PXmlParser;
-    /// iterate over a given path until an element location is reached
-    // - together with Next(name,TDocVariant) is the recommended API for TXmlParser
+    /// locate an element using a simplified XPath-like syntax
+    // - with Consume(name,TDocVariant) is the recommended API for TXmlParser
     // - '/root/catalog' calls Rewind to search from the document root
     // - 'catalog/book' search nested <catalog><book> from the current position
     // - '//book' path will find <book> anywhere from the current position
     // - no XPath //book/title, predicates, wildcards, attributes or namespaces
-    function Find(path: PUtf8Char; sep: AnsiChar = '/'): boolean;
+    function Find(Path: PUtf8Char; Sep: AnsiChar = '/'): boolean;
     /// iterate in document order and extract the next match as TDocVariant
     // - together with Find(path) is the recommended API for TXmlParser
     // - just a wrapper around Next(ElementName) + Consume(Doc)
-    function Next(const ElementName: RawUtf8; var Doc: TDocVariantData;
+    function Consume(const ElementName: RawUtf8; var Doc: TDocVariantData;
       DocOptions: TDocVariantOptions = JSON_XML): boolean; overload;
       {$ifdef HASINLINE} inline; {$endif}
+    /// iterate over the direct child elements matching a given name
+    // - preserves the outer parser position so Find(), Consume() or nested
+    // ForEach() calls may safely be used inside the loop
+    // - each nested loop should use its own slot identifier in the 0..31 range:
+    // ! if x.Rewind.Find('datasets') then
+    // !   while x.ForEach('dataset', 0) do
+    // !     if x.Find('tableHead/fields') then
+    // !       while x.ForEach('field', 1) do
+    // !         if x.Find('units') and
+    // !            x.ConsumeText(s) and
+    // !            (s = 'arcsec') then
+    // !           inc(n);
+    function ForEach(const ElementName: RawUtf8; LoopSlot: cardinal): boolean;
     /// iterate to the next token of the input, returning xtEof when done
     // - may raise EXmlException or returns xtError if xpoNoException was set
     // - so for the following XML:
@@ -379,13 +450,13 @@ type
     /// returns the current Name as an allocated UTF-8 string
     procedure NameToUtf8(var result: RawUtf8);
       {$ifdef HASINLINE}inline;{$endif}
-    /// returns the current Value as an allocated UTF-8 string
+    /// decode the current Value as an allocated UTF-8 string
     // - decoding any XML entity, unless the current token is a verbatim
     // xtCData/xtComment section
     // - on decoding error, raise EXmlException or returns false if xpoNoException
     function ValueToUtf8(var Dest: RawUtf8): boolean;
       {$ifdef HASINLINE}inline;{$endif}
-    /// append the current Value as into a UTF-8 string
+    /// decode and append the current Value to an existing UTF-8 string
     // - on decoding error, raise EXmlException or returns false if xpoNoException
     function ValueAppendToUtf8(var Dest: RawUtf8): boolean;
     /// iterate over the direct child elements matching a given name
@@ -399,38 +470,49 @@ type
     /// consume/skip the current element subtree
     // - expects to be on xtElementStart, and goes to the matching xtElementEnd
     function Skip: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
-    /// iterate until a given element name is reached anywhere in the content
-    // - used e.g. to implement Find('//book')
-    function FindAny(ElementName: PUtf8Char; ElementLen: PtrInt): boolean;
     /// consume the current element subtree into a TDocVariant
     // - expects to be on xtElementStart, and goes to the matching xtElementEnd
     // - any attribute would be included as '@name' TDocVariant fields
     function Consume(var Doc: TDocVariantData;
-      DocOptions: TDocVariantOptions = JSON_XML): boolean;
+      DocOptions: TDocVariantOptions = JSON_XML): boolean; overload;
     /// consume the current element subtree as text
     // - expects to be on xtElementStart, and goes to the matching xtElementEnd
     // - ignores any attributes and nested elements
     function ConsumeText(var Dest: RawUtf8): boolean;
+    /// iterate until a given element name is reached anywhere in the content
+    // - used e.g. to implement Find('//book')
+    function FindAny(ElementName: PUtf8Char; ElementLen: PtrInt): boolean;
+    /// retrieve a text sub-value
+    // - relative and '//...' paths preserve the current parser position
+    // - an absolute '/...' path rewinds from the document root and leaves the
+    // parser at the resulting position
+    function GetU(Path: PUtf8Char; var V: RawUtf8): boolean;
+    /// retrieve an integer sub-value wrapping a GetU() transient call
+    function GetI(Path: PUtf8Char; var V: Int64): boolean;
+    /// save the current state of the parser (Position, Kind and Depth)
+    // - up to 32 Save/Restore nested levels are allowed
+    procedure Save;
+    /// restore the previous state of the parser (Position, Kind and Depth)
+    procedure Restore;
+    /// continue after the element from a previously saved level
+    // - skips its remaining subtree without rewinding the current position
+    // - faster than Restore + Skip when the subtree was already partly consumed
+    // - as used e.g. by the ForEach() method
+    function RestoreAndSkip: boolean;
     /// the offset of the current token in the input buffer
-    // - could be used to store a position, then resume a scan from it
     function Position: PtrInt;
       {$ifdef HASINLINE}inline;{$endif}
     /// raise the EXmlException corresponding to LastError/LastErrorLine
     // - do nothing if LastError = xpeNone
     procedure RaiseException;
-    /// save the current state of the parser (Position and Depth)
-    procedure Save(var Backup: TXmlState);
-    /// save the current state of the parser (Position and Depth)
-    procedure Restore(const Backup: TXmlState);
   private
     {$ifndef FPCX86NOTPIC}
     fTab: PAnsiCharToByte; // = XML_KIND[] lookup table (inlined on FPC only)
     {$endif FPCX86NOTPIC}
-    fCur, fBegin, fToken, fAfter: PUtf8Char;
-    // up to 256 levels of 32-bit offsets from fNameOrigin and 255-byte names
-    fStackLen: array[byte] of byte;
-    fStackPos: array[byte] of cardinal;
+    fBegin, fCur, fToken, fAfter: PUtf8Char;
+    fStackLen: array[byte] of byte;     // 255-byte names
+    fStackPos: array[byte] of cardinal; // 32-bit offsets from fBegin
+    fSave: array[0..31] of TQwordRec;   // for Save/Restore (len=fStackLen[255])
   end;
 
 const
@@ -452,7 +534,7 @@ const
     'mismatched end tag',                        // xpeWrongEndTag
     'unfinished comment',                        // xpeEofInComment
     'unfinished CDATA',                          // xpeEofInCdata
-    'DTD and <!..> markup are not supported',    // xpeUnsupportedMarkup
+    'unsupported DTD or <!..> markup',           // xpeUnsupportedMarkup
     'void or invalid PI name',                   // xpeVoidPiName
     'unfinished processing instruction',         // xpeEofInPi
     'void or invalid name',                      // xpeVoidTagName
@@ -482,8 +564,26 @@ function TryXmlToVariant(const Xml: RawUtf8; var Doc: variant;
 /// convert XML UTF-8 content into a JSON object
 // - just a wrapper around XmlToVariant() + TDocVariantData.ToJson
 // - see JsonToXml() for the reverse process
-function XmlToJson(const Xml: RawUtf8;
-  ParseOptions: TXmlParserOptions = []): RawUtf8;
+function XmlToJson(const Xml: RawUtf8; ParseOptions: TXmlParserOptions = [];
+  Options: TDocVariantOptions = JSON_XML): RawUtf8;
+
+/// append a TDocVariant document as XML content into a TTextWriter
+// - this is the reverse of XmlToVariant(), processing the TDocVariantData
+// Names[] and Values[] directly: '@name' fields are written as XML attributes
+// of their enclosing element, and a '#text' field as its text content
+// - unlike AddJsonToXml(), the whole object is available at once, so the
+// '@name' fields don't need to appear before its content fields
+// - as called by the VariantToXml() wrapper
+procedure AddVariantToXml(W: TTextWriter; const Doc: variant;
+  Options: TJsonToXmlOptions = JXO_ENABLED);
+
+/// convert a TDocVariant document into XML UTF-8 content
+// - just a wrapper around AddVariantToXml(), with an optional header (e.g.
+// XMLUTF8_HEADER) and an optional name space content node nesting the data,
+// as JsonToXml() does
+// - VariantToXml(XmlToVariant(x)) would return the original XML content
+function VariantToXml(const Doc: variant; const Header: RawUtf8 = XMLUTF8_HEADER;
+  const NameSpace: RawUtf8 = ''; Options: TJsonToXmlOptions = JXO_ENABLED): RawUtf8;
 
 
 { ************* YAML 1.2 core-schema to JSON or TDocVariant Support }
@@ -1573,7 +1673,7 @@ begin
 end;
 
 
-{ ************* Basic XML Conversions }
+{ ************* XML Processing with Escape/Unescape and TXmlParser }
 
 var
   XML_ESC: TAnsiCharToByte;
@@ -1603,116 +1703,181 @@ begin
   until Text^ = #0;
 end;
 
-function AddJsonToXml(W: TTextWriter; Json: PUtf8Char;
-  ArrayName, EndOfObject: PUtf8Char): PUtf8Char;
+function AddJsonToXml(W: TTextWriter; Json, ArrayName, EndOfObject: PUtf8Char;
+  Options: TJsonToXmlOptions; Pending: PBoolean): PUtf8Char;
 var
-  info: TGetJsonField;
   Name: PUtf8Char;
-  n, c: integer;
+  n, c: cardinal;
+  pend, sub: boolean; // pend is our own Pending^ state, sub the nested level
+  info: TGetJsonField;
+
+  procedure ClosePending; {$ifdef FPC} inline; {$endif}
+  begin // our caller did write '<name' but not its ending '>' yet
+    if not pend then
+      exit;
+    W.AddDirect('>');
+    pend := false; // notify our caller that some content was written
+  end;
+
 begin
   result := nil;
   if Json = nil then
     exit;
-  while (Json^ <= ' ') and
-        (Json^ <> #0) do
-    inc(Json);
+  pend := (Pending <> nil) and
+          Pending^;
+  Json := GotoNextNotSpace(Json);
   if Json^ = '/' then
     Json := GotoEndOfSlashComment(Json);
   case Json^ of
   '[':
     begin
-      repeat
-        inc(Json);
-      until (Json^ = #0) or
-            (Json^ > ' ');
+      ClosePending;
+      Json := IgnoreAndGotoNextNotSpace(Json);
       if Json^ = ']' then
         Json := GotoNextNotSpace(Json + 1)
       else
       begin
         n := 0;
         repeat
-          if Json = nil then
-            exit;
           W.Add('<');
           if ArrayName = nil then
             W.AddU(n)
           else
             AddXmlEscape(W, ArrayName);
-          W.AddDirect('>');
-          Json := AddJsonToXml(W, Json, nil, @info.EndOfObject);
-          W.AddDirect('<', '/');
-          if ArrayName = nil then
-            W.AddU(n)
+          // no '>' here: the item may start with some '@name' attributes
+          sub := true;
+          Json := AddJsonToXml(W, Json, nil, @info.EndOfObject, Options, @sub);
+          if Json = nil then
+            exit;
+          if sub then
+            W.AddDirect('/', '>') // no content at all: jxoSelfClosed short form
           else
-            AddXmlEscape(W, ArrayName);
-          W.AddDirect('>');
+          begin
+            W.AddDirect('<', '/');
+            if ArrayName = nil then
+              W.AddU(n)
+            else
+              AddXmlEscape(W, ArrayName);
+            W.AddDirect('>');
+          end;
           inc(n);
         until info.EndOfObject = ']';
       end;
     end;
   '{':
     begin
-      repeat
-        inc(Json);
-      until (Json^ = #0) or
-            (Json^ > ' ');
+      Json := IgnoreAndGotoNextNotSpace(Json);
       if Json^ = '}' then
         Json := GotoNextNotSpace(Json + 1)
       else
-      begin
         repeat
           Name := GetJsonPropName(Json);
-          if Name = nil then
+          if Name = nil then // invalid JSON input
             exit;
-          while (Json^ <= ' ') and
-                (Json^ <> #0) do
-            inc(Json);
-          if Json^ = '[' then // arrays are written as list of items, without root
-            Json := AddJsonToXml(W, Json, Name, @info.EndOfObject)
+          Json := GotoNextNotSpace(Json);
+          if (Name^ = '@') and
+             (jxoAttribute in Options) then
+          begin
+            if pend and
+               (Name[1] <> #0) and
+               not (Json^ in ['{', '[']) then
+            begin // '@name':value -> name="value" within the pending start tag
+              W.AddDirect(' ');
+              AddXmlEscape(W, Name + 1); // trim the '@' prefix
+              W.AddDirect('=', '"');
+              // AddXmlEscape() below escapes " as &quot; as expected
+              Json := AddJsonToXml(W, Json, nil, @info.EndOfObject, Options);
+              if Json = nil then
+                exit;
+              W.AddDirect('"');
+            end
+            else // after some content, or not a scalar: no valid attribute
+              Json := GotoNextJsonItem(Json, info.EndOfObject); // just ignore
+          end
+          else if (Name^ = '#') and
+                  (jxoText in Options) and
+                  (PCardinal(Name + 1)^ = TEXT32) and
+                  (Name[5] = #0) then
+          begin // '#text':value -> value as the element text content
+            if Json^ in ['{', '['] then
+              ClosePending; // not a scalar: no short form for this element
+            sub := pend;
+            Json := AddJsonToXml(W, Json, nil, @info.EndOfObject, Options, @sub);
+            if Json = nil then
+              exit;
+            if pend and
+               not sub then
+            begin // the nested level did write our pending '>' - a void
+              pend := false; // '#text' would have left the start tag pending
+              Pending^ := false;
+            end;
+          end
           else
           begin
-            W.Add('<');
-            AddXmlEscape(W, Name);
-            W.AddDirect('>');
-            Json := AddJsonToXml(W, Json, Name, @info.EndOfObject);
-            W.AddDirect('<', '/');
-            AddXmlEscape(W, Name);
-            W.AddDirect('>');
+            ClosePending;
+            if Json^ = '[' then // arrays are written as list of items, without root
+            begin
+              Json := AddJsonToXml(W, Json, Name, @info.EndOfObject, Options);
+              if Json = nil then
+                exit;
+            end
+            else
+            begin
+              W.Add('<');
+              AddXmlEscape(W, Name);
+              // no '>' here: the value may start with some '@name' attributes
+              sub := true;
+              Json := AddJsonToXml(W, Json, nil, @info.EndOfObject, Options, @sub);
+              if Json = nil then
+                exit;
+              if sub then
+                W.AddDirect('/', '>') // no content: jxoSelfClosed short form
+              else
+              begin
+                W.AddDirect('<', '/');
+                AddXmlEscape(W, Name);
+                W.AddDirect('>');
+              end;
+            end;
           end;
         until info.EndOfObject = '}';
-      end;
+      if not (jxoSelfClosed in Options) then
+        ClosePending; // e.g. '{}' or an object made of attributes only
     end;
   else
     begin // unescape the JSON content and write as UTF-8 escaped XML
       info.Json := Json;
       info.GetJsonField;
-      if info.Value <> nil then // null or "" would store a void entry
+      if (info.Value <> nil) and    // null or "" would store a void entry
+         (info.Value^ <> #0) then
       begin
-        c := PInteger(info.Value)^ and $ffffff;
+        ClosePending;
+        c := PCardinal(info.Value)^ and $ffffff;
         if (c = JSON_BASE64_MAGIC_C) or
            (c = JSON_SQLDATE_MAGIC_C) then
           inc(info.Value, 3); // ignore the Magic codepoint encoded as UTF-8
         AddXmlEscape(W, info.Value);
-      end;
+      end
+      else if not (jxoSelfClosed in Options) then
+        ClosePending;
       if EndOfObject <> nil then
         EndOfObject^ := info.EndOfObject;
+      if Pending <> nil then
+        Pending^ := pend;
       result := info.Json;
       exit;
     end;
   end;
   if Json <> nil then
   begin
-    while (Json^ <= ' ') and
-          (Json^ <> #0) do
-      inc(Json);
+    Json := GotoNextNotSpace(Json);
     if EndOfObject <> nil then
       EndOfObject^ := Json^;
     if Json^ <> #0 then
-      repeat
-        inc(Json);
-      until (Json^ = #0) or
-            (Json^ > ' ');
+      Json := IgnoreAndGotoNextNotSpace(Json);
   end;
+  if Pending <> nil then
+    Pending^ := pend;
   result := Json;
 end;
 
@@ -1752,10 +1917,29 @@ begin
   result := false;
 end;
 
-procedure JsonBufferToXml(P: PUtf8Char; const Header, NameSpace: RawUtf8;
-  out result: RawUtf8);
+procedure AddXmlNameSpaceEnd(W: TTextWriter; const NameSpace: RawUtf8);
 var
   i, j, namespaceLen: PtrInt;
+begin // append e.g. '</contents>' for '<contents xmlns="...">'
+  namespaceLen := length(NameSpace);
+  for i := 1 to namespaceLen do
+    if NameSpace[i] = '<' then
+    begin
+      for j := i + 1 to namespaceLen do
+        if NameSpace[j] in [' ', '>'] then
+        begin
+          W.AddDirect('<', '/');
+          W.AddStringCopy(NameSpace, i + 1, j - i - 1);
+          W.AddDirect('>');
+          break;
+        end;
+      break;
+    end;
+end;
+
+procedure JsonBufferToXml(P: PUtf8Char; const Header, NameSpace: RawUtf8;
+  out result: RawUtf8; Options: TJsonToXmlOptions);
+var
   W: TTextWriter;
   temp: TTextWriterStackBuffer;
 begin
@@ -1766,24 +1950,9 @@ begin
     W := TTextWriter.CreateOwnedStream(temp);
     try
       W.AddString(Header);
-      namespaceLen := length(NameSpace);
-      if namespaceLen <> 0 then
-        W.AddString(NameSpace);
-      AddJsonToXml(W, P);
-      if namespaceLen <> 0 then
-        for i := 1 to namespaceLen do
-          if NameSpace[i] = '<' then
-          begin
-            for j := i + 1 to namespaceLen do
-              if NameSpace[j] in [' ', '>'] then
-              begin
-                W.AddDirect('<', '/');
-                W.AddStringCopy(NameSpace, i + 1, j - i - 1);
-                W.AddDirect('>');
-                break;
-              end;
-            break;
-          end;
+      W.AddString(NameSpace);
+      AddJsonToXml(W, P, nil, nil, Options);
+      AddXmlNameSpaceEnd(W, NameSpace);
       W.SetText(result);
     finally
       W.Free;
@@ -1791,15 +1960,173 @@ begin
   end;
 end;
 
-function JsonToXml(const Json, Header, NameSpace: RawUtf8): RawUtf8;
+function JsonToXml(const Json, Header, NameSpace: RawUtf8;
+  Options: TJsonToXmlOptions): RawUtf8;
 var
   tmp: TSynTempBuffer;
 begin
   tmp.Init(Json);
   try
-    JsonBufferToXml(tmp.buf, Header, NameSpace, result);
+    JsonBufferToXml(tmp.buf, Header, NameSpace, result, Options);
   finally
     tmp.Done;
+  end;
+end;
+
+procedure AddAttributesToXmlNode(W: TTextWriter; n: PRawUtf8; v: PVariant; c: integer);
+var
+  tmp: TTempUtf8;
+begin
+  // first pass: the '@name' fields are attributes of this start tag - and
+  // since we have the whole object at hand, they may appear anywhere in it
+  while c > 0 do
+  begin
+    if (PPUtf8Char(n)^ <> nil) and
+       (PPUtf8Char(n)^^ = '@') and
+       (TVarData(v^).VType <> DocVariantVType) then
+    begin // attribute values are text only
+      W.AddDirect(' ');
+      AddXmlEscape(W, PUtf8Char(pointer(n^)) + 1); // trim the '@' prefix
+      W.AddDirect('=', '"');
+      // AddXmlEscape() below escapes " as &quot; as expected
+      VariantToTempUtf8(v^, tmp, [vfNullAsVoid]);
+      AddXmlEscape(W, tmp.Text);
+      TempUtf8Done(tmp);
+      W.AddDirect('"');
+    end;
+    inc(n);
+    inc(v);
+    dec(c);
+  end;
+end;
+
+function AddVariantToXmlText(W: TTextWriter; const Value: variant;
+  var Pending: boolean): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+var
+  tmp: TTempUtf8;
+begin // retrieve the text content - false if this value has none at all
+  VariantToTempUtf8(Value, tmp, [vfNullAsVoid]);
+  result := tmp.Len <> 0;
+  if not result then
+    exit;
+  if Pending then
+    W.AddDirect('>');
+  Pending := false;
+  AddXmlEscape(W, tmp.Text);
+  TempUtf8Done(tmp);
+end;
+
+procedure AddVariantToXmlNode(W: TTextWriter; n: PRawUtf8; v: PVariant;
+  c: integer; o: TJsonToXmlOptions; var Pending: boolean); forward;
+
+procedure AddVariantToXmlValue(W: TTextWriter; const Name: RawUtf8;
+  const Value: variant; Options: TJsonToXmlOptions);
+var
+  i: PtrInt;
+  d: PDocVariantData;
+  pend: boolean;
+begin
+  d := _Safe(Value);
+  if d^.IsArray then
+  begin // arrays are written as a list of items, without any root
+    for i := 0 to d^.Count - 1 do
+      AddVariantToXmlValue(W, Name, d^.Values[i], Options);
+    exit; // a void array writes no element at all, as AddJsonToXml() does
+  end;
+  W.Add('<');
+  AddXmlEscape(W, pointer(Name));
+  // no '>' here: the element may have some attributes, or no content at all
+  pend := true;
+  if d^.IsObject then
+  begin // a document is never written as text, even if it is void
+    if (d^.Count <> 0) and
+       (jxoAttribute in Options) then
+      AddAttributesToXmlNode(W, pointer(d^.Names), pointer(d^.Values), d^.Count);
+    if not (jxoSelfClosed in Options) then
+    begin
+      W.AddDirect('>');
+      pend := false;
+    end;
+    if d^.Count <> 0 then // AddVariantToXmlNode() expects some field
+      AddVariantToXmlNode(W, pointer(d^.Names), pointer(d^.Values), d^.Count,
+        Options, pend);
+  end
+  else if not AddVariantToXmlText(W, Value, pend) then
+    if not (jxoSelfClosed in Options) then
+    begin
+      W.AddDirect('>');
+      pend := false;
+    end;
+  if pend then
+  begin // no content at all: jxoSelfClosed short form
+    W.AddDirect('/', '>');
+    exit;
+  end;
+  W.AddDirect('<', '/');
+  AddXmlEscape(W, pointer(Name));
+  W.AddDirect('>');
+end;
+
+procedure AddVariantToXmlNode(W: TTextWriter; n: PRawUtf8; v: PVariant;
+  c: integer; o: TJsonToXmlOptions; var Pending: boolean);
+begin
+  // append non-attributes fields and the text content - caller checked c > 0
+  repeat
+    if not (jxoAttribute in o) or // ensure has not been written above
+       (PPUtf8Char(n)^ = nil) or
+       (PPUtf8Char(n)^^ <> '@') then // not representable as an attribute
+      if (jxoText in o) and
+         (n^ = '#text') then // a void '#text' leaves the start tag pending
+        AddVariantToXmlText(W, v^, Pending)
+      else
+      begin
+        if Pending then  // a sub-element is content: the start tag ends here
+          W.AddDirect('>');
+        Pending := false; // notify our caller that some content was written
+        AddVariantToXmlValue(W, n^, v^, o);
+      end;
+    inc(n);
+    inc(v);
+    dec(c);
+  until c = 0;
+end;
+
+procedure AddVariantToXml(W: TTextWriter; const Doc: variant;
+  Options: TJsonToXmlOptions);
+var
+  i: PtrINt;
+  d: PDocVariantData;
+  pend: boolean;
+begin
+  d := _Safe(Doc);
+  if d^.Count > 0 then
+    if d^.IsArray then
+      for i := 0 to d^.Count - 1 do // no name: use the index, as AddJsonToXml()
+        AddVariantToXmlValue(W, UInt32ToUtf8(i), d^.Values[i], Options)
+    else
+    begin
+      pend := false; // no pending start tag at this level
+      AddVariantToXmlNode(W, pointer(d^.Names), pointer(d^.Values), d^.Count,
+        Options, pend);
+    end;
+end;
+
+function VariantToXml(const Doc: variant; const Header, NameSpace: RawUtf8;
+  Options: TJsonToXmlOptions): RawUtf8;
+var
+  W: TTextWriter;
+  temp: TTextWriterStackBuffer;
+begin
+  W := TTextWriter.CreateOwnedStream(temp);
+  try
+    W.AddString(Header);
+    W.AddString(NameSpace);
+    AddVariantToXml(W, Doc, Options);
+    AddXmlNameSpaceEnd(W, NameSpace);
+    W.SetText(result);
+  finally
+    W.Free;
   end;
 end;
 
@@ -1913,7 +2240,8 @@ var
 begin
   if LastError = xpeNone then
     exit;
-  SetString(tmp, fToken, fAfter - fToken); // truncate to 23 chars
+  tmp[0] := AnsiChar(MaxPtrInt(0, MinPtrInt(high(tmp), fAfter - fToken)));
+  MoveFast(fToken^, tmp[1], ord(tmp[0])); // safe truncate to 23 chars
   EXmlException.RaiseUtf8('XML error at line %: % [%]',
     [LastErrorLine, XML_ERROR[LastError], tmp]);
 end;
@@ -1972,12 +2300,26 @@ procedure TXmlParser.Init(Text: PUtf8Char; TextLen: PtrInt;
   ParserOptions: TXmlParserOptions);
 begin
   {$ifdef CPU64}
-  if TextLen shr 32 <> 0 then
+  if TextLen shr 32 <> 0 then // we store 32-bit offsets in fStackPos[}
     EXmlException.RaiseUtf8('TXmlParser cannot parse % bytes', [TextLen]);
   {$endif CPU64}
+  if (Text = nil) or
+     (TextLen <= 0) then // normalize void input
+  begin
+    Text := nil;
+    TextLen := 0;
+  end;
+  Kind := xtNotStarted;
+  Depth := 0;
+  Options := ParserOptions;
+  LastError := xpeNone;
+  LastErrorLine := 0;
+  Name.Text := nil;
+  Name.Len := 0;
+  Value.Buffer := nil;
+  Value.Len := 0;
   fBegin := Text;
-  if (Text <> nil) and
-     (TextLen >= 3) and
+  if (TextLen >= 3) and
      (PWord(Text)^ = BOM_UTF8 and $ffff) and       // no PCardinal 4-bytes read
      (PByteArray(Text)[2] = BOM_UTF8 shr 16) then  // on a 3-bytes-only buffer
   begin
@@ -1987,18 +2329,12 @@ begin
   fCur := Text;
   fToken := Text;
   fAfter := Text + TextLen;
-  Options := ParserOptions;
-  Kind := xtNotStarted;
-  LastError := xpeNone;
-  Depth := 0;
-  LastErrorLine := 0;
-  Name.Text := nil;
-  Name.Len := 0;
-  Value.Buffer := nil;
-  Value.Len := 0;
   {$ifndef FPCX86NOTPIC}
   fTab := @XML_KIND;
   {$endif FPCX86NOTPIC}
+  fStackLen[0] := 0;               // no document element yet
+  fStackLen[high(fStackLen)] := 0; // 8-bit Save/Restore count
+  fStackPos[high(fStackPos)] := 0; // 32-bit ForEach() flags
 end;
 
 function TXmlParser.Init(const Text: RawUtf8; ParserOptions: TXmlParserOptions): PXmlParser;
@@ -2023,20 +2359,78 @@ begin
   result := fToken - fBegin;
 end;
 
-procedure TXmlParser.Save(var Backup: TXmlState);
+procedure TXmlParser.Save;
+var
+  i: PtrInt;
+  s: PQwordRec;
 begin
-  Backup.H := fCur - fBegin;
-  Backup.B[0] := Depth;
-  Backup.B[1] := ord(Kind);
+  i := fStackLen[high(fStackLen)]; // unused slot for fSave[] count
+  if i = high(fSave) then
+    EXmlException.RaiseU('Too many TXmlParser.Save');
+  s := @fSave[i];
+  inc(i);
+  fStackLen[high(fStackLen)] := i;
+  s^.L := PCardinal(@Kind)^; // B[0]=Kind B[1]=Depth B[2]=fStackLen[0]
+  s^.B[2] := fStackLen[0];   // preserve root/prolog state for DOCTYPE
+  s^.H := fCur - fBegin;
 end;
 
-procedure TXmlParser.Restore(const Backup: TXmlState);
+procedure TXmlParser.Restore;
+var
+  p: PUtf8Char;
+  i: PtrInt;
+  s: PQwordRec;
 begin
-  if fBegin + Backup.H > fCur then
+  i := fStackLen[high(fStackLen)]; // fSave[] count
+  if i = 0 then
+    EXmlException.RaiseU('Missing TXmlParser.Save/Rewind');
+  dec(i);
+  fStackLen[high(fStackLen)] := i;
+  s := @fSave[i];
+  PWord(@Kind)^ := s^.L; // B[0]=Kind B[1]=Depth B[2]=fStackLen[0]
+  fStackLen[0] := s^.B[2];
+  p := fBegin + s^.H;
+  if p <= fCur then
+    fCur := p
+  else
     EXmlException.RaiseU('TXmlParser.Restore: no forward possible');
-  fCur := fBegin + Backup.H;
-  Depth := Backup.B[0];
-  Kind := TXmlToken(Backup.B[1]);
+end;
+
+function TXmlParser.RestoreAndSkip: boolean;
+var
+  i: PtrInt;
+  level: byte;
+begin
+  result := false;
+  i := fStackLen[high(fStackLen)]; // fSave[] count
+  if i = 0 then
+    exit;
+  dec(i);
+  level := fSave[i].B[1]; // Skip logic from current back to the Saved level
+  fStackLen[high(fStackLen)] := i;
+  while Depth >= level do
+    if ParseNext in [xtEof, xtError] then
+      exit;
+  result := true;
+end;
+
+function TXmlParser.ForEach(const ElementName: RawUtf8; LoopSlot: cardinal): boolean;
+var
+  flags: PBits32;
+begin
+  result := false;
+  flags := @fStackPos[high(fStackPos)]; // unused 32-bit slot
+  if LoopSlot in flags^ then
+    if not RestoreAndSkip then
+      exit;
+  if Next(ElementName) then
+  begin
+    include(flags^, LoopSlot);
+    Save;
+    result := true;
+  end
+  else
+    exclude(flags^, LoopSlot);
 end;
 
 function TXmlParser.ParseNext: TXmlToken;
@@ -2143,8 +2537,8 @@ begin
                      (p^ = '>') then
                     if Depth <> 0 then
                     begin
-                      dec(Depth);
                       inc(p);
+                      dec(Depth);
                       if (fStackLen[Depth] = Name.Len) and
                          ((xpoDontCheckEndTagName in Options) or
                           CompareMemSmall(fBegin + fStackPos[Depth],
@@ -2191,12 +2585,12 @@ begin
                   end;
                   inc(p, 3);
                   continue;
-                end;
-                if (e - p >= 7) and
-                   (PCardinal(p)^ = ord('[') + ord('C') shl 8 +
-                                    ord('D') shl 16 + ord('A') shl 24) and
-                   (PCardinal(p + 3)^ = ord('A') + ord('T') shl 8 +
-                                        ord('A') shl 16 + ord('[') shl 24) then
+                end
+                else if (e - p >= 7) and
+                        (PCardinal(p)^ = ord('[') + ord('C') shl 8 +
+                                         ord('D') shl 16 + ord('A') shl 24) and
+                        (PCardinal(p + 3)^ = ord('A') + ord('T') shl 8 +
+                                         ord('A') shl 16 + ord('[') shl 24) then
                 begin
                   // <![CDATA[ ... ]]> verbatim section
                   inc(p, 7);
@@ -2215,6 +2609,18 @@ begin
                     break;
                   end;
                   LastError := xpeEofInCdata;
+                end
+                else if (e - p >= 7) and
+                        (PCardinal(p)^ = ord('D') + ord('O') shl 8 +
+                                         ord('C') shl 16 + ord('T') shl 24) and
+                        (PCardinal(p + 3)^ = ord('T') + ord('Y') shl 8 +
+                                         ord('P') shl 16 + ord('E') shl 24) then
+                // <!DOCTYPE name ...> with no internal subset or nested markup
+                begin
+                  p := ParseDocType(p + 7);
+                  if p <> nil then
+                    continue;
+                  LastError := xpeUnsupportedMarkup;
                 end
                 else
                   LastError := xpeUnsupportedMarkup;
@@ -2321,6 +2727,48 @@ begin
   result := Kind;
 end;
 
+function TXmlParser.ParseDocType(p: PUtf8Char): PUtf8Char;
+var
+  quote: AnsiChar;
+begin
+  result := nil; // caller will make LastError := xpeUnsupportedMarkup
+  if (fStackLen[0] <> 0) or // accepted only as first element
+     (xpoRejectDocType in Options) or
+     (p >= fAfter) or
+     (p^ > ' ') then // expects <!DOCTYPE name
+    exit;
+  repeat
+    inc(p);
+    if p = fAfter then
+      exit;
+  until p^ > ' ';
+  if {$ifdef FPCX86NOTPIC} XML_KIND {$else} fTab^ {$endif}[p^] <> 0 then
+    exit;
+  repeat
+    inc(p);
+    if p = fAfter then
+      exit;
+  until {$ifdef FPCX86NOTPIC} XML_KIND {$else} fTab^ {$endif}[p^] <> 0;
+  quote := #0;
+  repeat // Scan up to the final '>' ignoring quotes
+    if quote = #0 then
+      case p^ of
+        '"', '''':
+          quote := p^;
+        '[', ']', '<':
+          exit; // internal subsets and nested DTD markup are not allowed
+        '>':
+          begin
+            result := p + 1; // valid simple <!DOCTYPE name> node
+            exit;
+          end;
+      end
+    else if p^ = quote then
+      quote := #0;
+    inc(p);
+  until p = fAfter;
+end;
+
 procedure TXmlParser.NameToUtf8(var result: RawUtf8);
 begin
   FastSetString(result, Name.Text, Name.Len);
@@ -2366,12 +2814,14 @@ var
 begin
   n[0] := '@'; // note: Dest^ interning may append an ending #0 -> high>255
   MoveFast(Name.Text^, n[1], Name.Len); // we know Name.Len <= 255
-  v := pointer(Dest^.NewItem(@n, Name.Len + 1));
+  inc(Name.Len);
+  n[Name.Len] := #0; // no copy needed in TRawUtf8InterningSlot.UniqueFromBuffer
+  v := pointer(Dest^.NewItem(@n, Name.Len));
   v^.VType := varString;
   ValueAppendToUtf8(RawUtf8(v^.VAny));
 end;
 
-procedure TXmlParser.ToDocVariant(Dest: PDocVariantData);
+procedure TXmlParser.ToVariant(Dest: PDocVariantData);
 var
   txt, v: pointer;
 begin
@@ -2392,7 +2842,7 @@ begin
         begin
           v := Dest^.NewSibling(Name.Text, Name.Len);
           PCardinal(v)^ := PCardinal(Dest)^; // same VType + VOptions
-          ToDocVariant(v);
+          ToVariant(v);
         end;
       xtText,
       xtCData:
@@ -2468,13 +2918,6 @@ begin
   result := true;
 end;
 
-function TXmlParser.Next(const ElementName: RawUtf8; var Doc: TDocVariantData;
-   DocOptions: TDocVariantOptions): boolean;
-begin
-  result := Next(ElementName) and
-            Consume(Doc, DocOptions);
-end;
-
 function TXmlParser.FindAny(ElementName: PUtf8Char; ElementLen: PtrInt): boolean;
 begin
   result := false;
@@ -2493,21 +2936,21 @@ begin
   result := true;
 end;
 
-function TXmlParser.Find(path: PUtf8Char; sep: AnsiChar): boolean;
+function TXmlParser.Find(Path: PUtf8Char; Sep: AnsiChar): boolean;
 var
   l: PtrInt;
 begin
   result := false;
-  if path = nil then
+  if Path = nil then
     exit;
   result := true;
-  if path^ = sep then
-    if path[1] = sep then
+  if Path^ = Sep then
+    if Path[1] = Sep then
     begin
-      inc(path, 2); // find <book> anywhere from '//book' input path
-      l := StrLen(path);
-      if PosChar(path, l, sep) = nil then // no '//book/title' support
-        if FindAny(path, l) then
+      inc(Path, 2); // find <book> anywhere from '//book' input Path
+      l := StrLen(Path);
+      if PosChar(Path, l, Sep) = nil then // no '//book/title' support
+        if FindAny(Path, l) then
           exit;
       result := false;
       exit;
@@ -2515,29 +2958,38 @@ begin
     else
     begin
       Rewind; // '/root/catalog'
-      inc(path);
+      inc(Path);
     end;
   repeat // search relative 'root/catalog'
-    l := PosChar0(path, sep) - path; // use fast SSE2 asm on x86_64
-    if not Next(path, l) then
+    l := PosChar0(Path, Sep) - Path; // use fast SSE2 asm on x86_64
+    if not Next(Path, l) then
       break;
-    inc(path, l);
-    if path^ = #0 then
-      exit; // reached the end of suplied path
-    inc(path);
+    inc(Path, l);
+    if Path^ = #0 then
+      exit; // reached the end of suplied Path
+    inc(Path);
   until false;
   result := false;
 end;
 
 function TXmlParser.Consume(var Doc: TDocVariantData;
   DocOptions: TDocVariantOptions): boolean;
+var
+  tmp: TSynVarData;
 begin
   TSynVarData(Doc).VType := _VType(DocOptions, dvObject); // fast Init()
   Doc.Void; // as required by ToDocVariant and to allow several Consume() calls
   result := false;
   if Kind <> xtElementStart then
     exit;
-  ToDocVariant(@Doc);
+  ToVariant(@Doc); // recursively fill Doc with the nested content
+  if Doc.VarType = varString then
+  begin
+    tmp := TSynVarData(Doc);
+    Doc.Init(DocOptions);                // this method should set a TDocVariant
+    Doc.AddValue('#text', variant(tmp)); // return {"#text":".."}
+    FastAssignNew(tmp.VAny);             // manual tmp memory management
+  end;
   result := Kind in [xtEof, xtElementEnd];
 end;
 
@@ -2561,6 +3013,37 @@ begin
   result := true;
 end;
 
+function TXmlParser.Consume(const ElementName: RawUtf8; var Doc: TDocVariantData;
+   DocOptions: TDocVariantOptions): boolean;
+begin
+  result := Find(pointer(ElementName)) and
+            Consume(Doc, DocOptions);
+end;
+
+function TXmlParser.GetU(Path: PUtf8Char; var V: RawUtf8): boolean;
+var
+  keeppos: boolean;
+begin
+  result := false;
+  if Path = nil then
+    exit;
+  keeppos := (Path[0] <> '/') or (Path[1] = '/');
+  if keeppos then
+    Save;
+  result := Find(Path) and
+            ConsumeText(V);
+  if keeppos then
+    Restore;
+end;
+
+function TXmlParser.GetI(Path: PUtf8Char; var V: Int64): boolean;
+var
+  u: RawUtf8;
+begin
+  result := GetU(Path, u) and
+            ToInt64(u, V);
+end;
+
 
 function ConvertToVariant(var x: TXmlParser; const Xml: RawUtf8; var Doc: variant;
   ParseOptions: TXmlParserOptions; DocOptions: TDocVariantOptions): TXmlParserError;
@@ -2568,7 +3051,7 @@ begin
   x.Init(pointer(Xml), length(Xml), ParseOptions + [xpoNoException]);
   ZeroClear(@Doc); // as required by ToDocVariant
   PCardinal(@Doc)^ := _VType(DocOptions, dvObject); // fast Init() of root
-  x.ToDocVariant(@Doc);
+  x.ToVariant(@Doc);
   result := x.LastError;
 end;
 
@@ -2591,12 +3074,12 @@ begin
     TDocVariantData(Doc).Clear;
 end;
 
-function XmlToJson(const Xml: RawUtf8;
-  ParseOptions: TXmlParserOptions): RawUtf8;
+function XmlToJson(const Xml: RawUtf8; ParseOptions: TXmlParserOptions;
+  Options: TDocVariantOptions): RawUtf8;
 var
   doc: variant;
 begin
-  XmlToVariant(Xml, doc, ParseOptions);
+  XmlToVariant(Xml, doc, ParseOptions, Options);
   VariantSaveJson(doc, twJsonEscape, result);
 end;
 
@@ -2754,7 +3237,8 @@ begin
         else
           exit;
       prev := u;
-      u := u * 10 + QWord(ord(p^) - ord('0'));
+      u := u {$ifdef HASSLOWMUL64} shl 3 + u + u {$else} * 10 {$endif};
+      inc(u, QWord(ord(p^) - ord('0')));
       if Int64(u) < Int64(prev) then
         exit; // 63-bit overflow
       inc(p);
@@ -4846,20 +5330,19 @@ end;
 
 function IdemPChar2(table: PNormTable; p: PUtf8Char; up: PAnsiChar): boolean;
   {$ifdef HASINLINE}inline;{$endif}
-var
-  u: AnsiChar;
 begin
-  // here p and up are expected to be <> nil
-  result := false;
+  // in this local IdemPChar() version, p and up are expected to be <> nil
   dec(PtrUInt(p), PtrUInt(up));
-  repeat
-    u := up^;
-    if u = #0 then
-      break;
-    if table^[up[PtrUInt(p)]] <> u then
+  while true do
+    if up^ = #0 then
+      break
+    else if table[up[PtrUInt(p)]] = up^ then
+      inc(up)
+    else
+    begin
+      result := false;
       exit;
-    inc(up);
-  until false;
+    end;
   result := true;
 end;
 
@@ -6820,7 +7303,7 @@ begin
   esc['"'] := 4;
   _AddHtmlEscape := __AddHtmlEscape;
   // XML Efficient Parsing
-  FillCharFast(XML_ESC, 31, 9); // ignore invalid #1 .. #31 control char
+  FillCharFast(XML_ESC, 32, 9); // ignore the invalid #0 .. #31 control chars
   esc := @XML_ESC; // XML_ESCAPED[] = &#x09 &#x0a &#x0d &lt &gt &amp &quot &apos
   esc[#0]   := 1;   // go out of loop to abort
   esc[#9]   := 1;
